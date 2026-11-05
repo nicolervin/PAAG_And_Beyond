@@ -6,6 +6,7 @@ if (
     ("utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "request_unsaved_state_change"))
     or ("utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"))
     or ("utils.fishbone_store" in _sys.modules and getattr(_sys.modules["utils.fishbone_store"], "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2)
+    or ("utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 10)
 ):
     for _mod_name in (
         "utils.time_units",

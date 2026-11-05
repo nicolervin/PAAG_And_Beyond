@@ -719,25 +719,28 @@ def render_select_all_control(
     selected_count: int,
     key_prefix: str,
     column: str = DEFAULT_SELECTION_COLUMN,
+    always_show_both: bool = False,
 ) -> None:
     """Render Select all / Clear selection buttons inside a bulk action bar."""
     logical_key = logical_table_editor_key(editor_key)
+    select_all_active = bool(st.session_state.get(f"_select_all_{logical_key}", False))
     all_selected = selectable_count > 0 and selected_count >= selectable_count
-    if not all_selected:
+    if always_show_both or not all_selected:
         if host.button(
             "Select all",
             icon=":material/select_all:",
-            disabled=selectable_count <= 0,
+            disabled=selectable_count <= 0 or all_selected,
             key=f"{key_prefix}_select_all",
             help="Select all visible saved rows in this table.",
         ):
             st.session_state[f"_select_all_{logical_key}"] = True
             reset_table_editor_selection(editor_key, column=column)
             st.rerun()
-    if selected_count > 0:
+    if always_show_both or selected_count > 0:
         if host.button(
             "Clear selection",
             icon=":material/deselect:",
+            disabled=selected_count <= 0 and not select_all_active,
             key=f"{key_prefix}_clear_selection",
             help="Uncheck all selected rows in this table.",
         ):
@@ -827,7 +830,7 @@ def standard_details_column_config(
     )
 
 
-_TABLE_UI_REV_20261102 = 1
+_TABLE_UI_REV_20261102 = 2
 
 
 def selected_rows_action_bar(
@@ -978,6 +981,10 @@ def editable_table_footer(
     undo_available: bool = False,
     native_row_selection: bool = False,
     additional_unsaved_changes: bool = False,
+    show_select_all_controls: bool = False,
+    selectable_row_count: int = 0,
+    selected_row_count: int = 0,
+    selection_column: str = DEFAULT_SELECTION_COLUMN,
     delete_action_label: str | None = None,
     delete_action_icon: str | None = None,
     delete_action_key: str | None = None,
@@ -1014,6 +1021,16 @@ def editable_table_footer(
     )
     if unsaved:
         footer.markdown(":orange[:material/warning: **Unsaved changes**]")
+    if show_select_all_controls:
+        render_select_all_control(
+            footer,
+            editor_key=editor_key,
+            selectable_count=selectable_row_count,
+            selected_count=selected_row_count,
+            key_prefix=key_prefix,
+            column=selection_column,
+            always_show_both=True,
+        )
     delete_action = False
     if delete_action_label:
         delete_action = footer.button(
@@ -1021,7 +1038,11 @@ def editable_table_footer(
             icon=delete_action_icon,
             disabled=delete_action_disabled,
             help=delete_action_help,
-            key=delete_action_key or f"{key_prefix}_delete_action",
+            key=(
+                delete_action_key
+                if delete_action_key and str(delete_action_key).startswith("destructive_")
+                else f"destructive_{delete_action_key or f'{key_prefix}_delete_action'}"
+            ),
         )
     secondary_action = False
     if secondary_action_label:

@@ -23,7 +23,8 @@ import utils.store as _store_mod
 import utils.yamazumi_store as _yamazumi_store_mod
 
 if (
-    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 6
+    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 11
+    or "source_variant" not in _inspect.signature(_yamazumi_store_mod.delete_yamazumi_element).parameters
     or not hasattr(_db_core_mod, "YAMAZUMI_CONVEYOR_TYPES")
     or "update_yamazumi_areas_table" not in _store_mod.__dict__
     or "split_variants" not in _inspect.signature(_yamazumi_store_mod.add_yamazumi_element).parameters
@@ -32,6 +33,7 @@ if (
     _db_core_mod.YAMAZUMI_CONVEYOR_TYPES = ("1-sided", "2-sided")
     if "YAMAZUMI_CONVEYOR_TYPES" not in getattr(_db_core_mod, "__store_exports__", []):
         _db_core_mod.__store_exports__.append("YAMAZUMI_CONVEYOR_TYPES")
+    _importlib.reload(_db_core_mod)
     _db_core_mod.init_db()
     for _export_name in getattr(_yamazumi_store_mod, "__domain_exports__", ()):
         _store_mod.__dict__.pop(_export_name, None)
@@ -110,7 +112,10 @@ from utils.table_filters import (
 )
 import utils.table_ui as _table_ui_mod
 
-if "delete_action_label" not in _inspect.signature(_table_ui_mod.editable_table_footer).parameters:
+if (
+    "delete_action_label" not in _inspect.signature(_table_ui_mod.editable_table_footer).parameters
+    or "show_select_all_controls" not in _inspect.signature(_table_ui_mod.editable_table_footer).parameters
+):
     _importlib.reload(_table_ui_mod)
 
 from utils.table_ui import (
@@ -162,7 +167,14 @@ from utils.yamazumi_stack import (
     remove_element_from_stack_draft,
     stack_id,
 )
-from utils.yamazumi_pdf import parse_yamazumi_pdf
+import hashlib
+import utils.yamazumi_pdf as _yamazumi_pdf_mod
+
+if getattr(_yamazumi_pdf_mod, "_YAMAZUMI_PDF_HOT_RELOAD_REV", 0) < 1:
+    _importlib.reload(_yamazumi_pdf_mod)
+
+from utils.yamazumi_pdf import parse_yamazumi_pdf, parse_yamazumi_screenshot
+from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 
 
 
@@ -377,7 +389,19 @@ def _handle_import_expander_change() -> None:
 
 
 @cached_computation(scope="upload")
-def _cached_parse_yamazumi_upload(uploaded_file, is_pdf_file: bool) -> dict:
+def _cached_parse_yamazumi_upload(uploaded_file, is_pdf_file: bool, is_image_file: bool = False) -> dict:
+    if hasattr(uploaded_file, "seek"):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+    if is_image_file:
+        img_res = parse_yamazumi_screenshot(uploaded_file)
+        return {
+            "dataframe": img_res["dataframe"],
+            "pitch_dataframe": img_res["pitch_dataframe"],
+            "metadata": img_res["metadata"],
+        }
     if hasattr(uploaded_file, "seek"):
         try:
             uploaded_file.seek(0)
@@ -398,17 +422,18 @@ def _cached_parse_yamazumi_upload(uploaded_file, is_pdf_file: bool) -> dict:
 
 
 with st.expander(
-    "Import Yamazumi File (Excel or PDF)",
+    "Import Yamazumi File (Excel, PDF, or Screenshot)",
     icon=":material/upload_file:",
     key=import_expander_key,
     on_change=_handle_import_expander_change,
 ):
     uploaded = st.file_uploader(
-        "Yamazumi Excel or PDF File(s)",
-        type=["xlsx", "pdf"],
+        "Yamazumi Excel, PDF, or Screenshot File(s)",
+        type=["xlsx", "pdf", "png", "jpg", "jpeg", "webp"],
+
         accept_multiple_files=True,
         key=f"yamazumi_import_file_{yamazumi_import_widget_scope}",
-        help="Upload one or more Excel workbooks (.xlsx) or PDFs exported from yamazumi.sc.geappl.io for the selected Fishbone section.",
+        help="Upload one or more Excel workbooks (.xlsx), PDFs, or screenshot images (.png, .jpg, .webp) exported from yamazumi.sc.geappl.io for the selected Fishbone section.",
     )
     st.caption(
         f"Imports pitches, variants, work elements, and cycle times from one or more files. "
@@ -421,6 +446,81 @@ with st.expander(
         if isinstance(uploaded, (list, tuple))
         else ([uploaded] if uploaded is not None else [])
     )
+    pasted_screenshots_key = (
+        f"yamazumi_import_pasted_screenshots_{yamazumi_import_widget_scope}"
+    )
+    last_paste_hash_key = (
+        f"yamazumi_import_last_paste_hash_{yamazumi_import_widget_scope}"
+    )
+    st.markdown("**Or paste a screenshot from your clipboard**")
+    paste_clip_result = clipboard_image(
+        key=f"yamazumi_import_clipboard_{yamazumi_import_widget_scope}",
+    )
+    raw_paste_payload = (
+        getattr(paste_clip_result, "image", None) if paste_clip_result else None
+    )
+    if raw_paste_payload:
+        try:
+            decoded_shot = decode_clipboard_image(raw_paste_payload)
+            shot_bytes = decoded_shot.get("bytes") or b""
+            if shot_bytes:
+                shot_hash = hashlib.sha256(shot_bytes).hexdigest()
+                if st.session_state.get(last_paste_hash_key) != shot_hash:
+                    st.session_state[last_paste_hash_key] = shot_hash
+                    current_shots = list(
+                        st.session_state.get(pasted_screenshots_key) or []
+                    )
+                    shot_idx = len(current_shots) + 1
+                    current_shots.append(
+                        {
+                            "name": f"pasted-screenshot-{shot_idx}.png",
+                            "bytes": shot_bytes,
+                            "mime_type": decoded_shot.get("mime_type", "image/png"),
+                            "sha256": shot_hash,
+                        }
+                    )
+                    st.session_state[pasted_screenshots_key] = current_shots
+        except ValueError as exc:
+            st.error(str(exc))
+
+    pasted_screenshots: list[dict] = list(
+        st.session_state.get(pasted_screenshots_key) or []
+    )
+    if pasted_screenshots:
+        shot_bar_col1, shot_bar_col2 = st.columns(
+            [4, 1], vertical_alignment="center"
+        )
+        with shot_bar_col1:
+            st.success(
+                f"{len(pasted_screenshots)} screenshot(s) pasted from clipboard: "
+                + ", ".join(str(s.get("name")) for s in pasted_screenshots)
+            )
+        with shot_bar_col2:
+            if st.button(
+                "Clear Screenshots",
+                key=f"yamazumi_clear_pasted_shots_{yamazumi_import_widget_scope}",
+                icon=":material/close:",
+                width="stretch",
+            ):
+                st.session_state.pop(pasted_screenshots_key, None)
+                st.session_state.pop(last_paste_hash_key, None)
+                st.rerun()
+        with st.expander(
+            "View Pasted Screenshot(s)",
+            expanded=False,
+            icon=":material/image:",
+        ):
+            for s_item in pasted_screenshots:
+                st.image(
+                    s_item["bytes"],
+                    caption=str(s_item.get("name") or "Pasted screenshot"),
+                    width="stretch",
+                )
+
+    uploaded_files = [
+        *uploaded_files,
+        *[as_uploaded_file(s_item) for s_item in pasted_screenshots],
+    ]
     if uploaded_files:
         parsed_dfs: list[pd.DataFrame] = []
         parsed_pitch_dfs: list[pd.DataFrame] = []
@@ -428,14 +528,25 @@ with st.expander(
         parse_errors: list[str] = []
         has_pdf = False
         has_excel = False
+        has_screenshot = False
         for uf in uploaded_files:
-            uf_is_pdf = uf.name.lower().endswith(".pdf")
+            uf_lower = uf.name.lower()
+            uf_is_pdf = uf_lower.endswith(".pdf")
+            uf_is_image = uf_lower.endswith((".png", ".jpg", ".jpeg", ".webp"))
+            if uf_is_pdf:
+                has_pdf = True
+            elif uf_is_image:
+                has_screenshot = True
+            else:
+                has_excel = True
+            if False:
+                uf_is_pdf = uf.name.lower().endswith(".pdf")
             if uf_is_pdf:
                 has_pdf = True
             else:
                 has_excel = True
             try:
-                upload_res = _cached_parse_yamazumi_upload(uf, uf_is_pdf)
+                upload_res = _cached_parse_yamazumi_upload(uf, uf_is_pdf, uf_is_image)
                 file_df = upload_res["dataframe"]
                 file_pitch_df = upload_res["pitch_dataframe"]
                 file_meta = upload_res["metadata"]
@@ -446,7 +557,7 @@ with st.expander(
                     parsed_dfs.append(file_df_copy)
                 if file_pitch_df is not None:
                     parsed_pitch_dfs.append(file_pitch_df.copy())
-                if uf_is_pdf and file_meta:
+                if (uf_is_pdf or uf_is_image) and file_meta:
                     pdf_metas.append(file_meta)
             except Exception as exc:
                 parse_errors.append(
@@ -478,10 +589,11 @@ with st.expander(
             pitch_area_map_key = f"yamazumi_import_pitch_area_{yamazumi_import_widget_scope}"
             pitch_include_map_key = f"yamazumi_import_pitch_inc_{yamazumi_import_widget_scope}"
             pitch_type_map_key = f"yamazumi_import_pitch_type_{yamazumi_import_widget_scope}"
-            import_pitch_editor_key = f"yamazumi_import_pitch_editor_{yamazumi_import_widget_scope}"
+            import_pitch_editor_base_key = f"yamazumi_import_pitch_editor_{yamazumi_import_widget_scope}"
             pitch_base_df_key = f"yamazumi_import_pitch_base_df_{yamazumi_import_widget_scope}"
             from_pitch_key = f"yamazumi_import_bulk_from_{yamazumi_import_widget_scope}"
             to_pitch_key = f"yamazumi_import_bulk_to_{yamazumi_import_widget_scope}"
+            prev_bulk_area_key = f"yamazumi_import_prev_bulk_area_{yamazumi_import_widget_scope}"
 
             if st.session_state.get(pitch_sig_key) != upload_files_sig:
                 st.session_state[pitch_sig_key] = upload_files_sig
@@ -489,10 +601,127 @@ with st.expander(
                 st.session_state[pitch_area_map_key] = {}
                 st.session_state[pitch_include_map_key] = {}
                 st.session_state[pitch_type_map_key] = {}
-                st.session_state.pop(import_pitch_editor_key, None)
+                request_table_editor_reset(import_pitch_editor_base_key)
                 st.session_state.pop(pitch_base_df_key, None)
                 st.session_state.pop(from_pitch_key, None)
                 st.session_state.pop(to_pitch_key, None)
+                st.session_state.pop(prev_bulk_area_key, None)
+
+            has_excel = any(
+                not u.name.lower().endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp"))
+                for u in uploaded_files
+            )
+            if has_screenshot and parsed_df is not None:
+                with st.expander(
+                    "Review & Edit Extracted Screenshot Data",
+                    expanded=True,
+                    icon=":material/edit_note:",
+                ):
+                    st.caption(
+                        "Review the pitches and work elements extracted from your screenshot(s). "
+                        "You can edit any field, add rows, or remove rows before assigning pitches below."
+                    )
+                    shot_edit_cols = [
+                        "Sub-Line",
+                        "Pitch_number",
+                        "Pitch_name",
+                        "Model_variant",
+                        "Work_Type",
+                        "Work_Time_to_complete",
+                        "Work_Description",
+                        "Work_region",
+                    ]
+                    shot_editor_df = parsed_df.copy()
+                    for c_name in shot_edit_cols:
+                        if c_name not in shot_editor_df.columns:
+                            shot_editor_df[c_name] = (
+                                0.0 if c_name == "Work_Time_to_complete" else ""
+                            )
+                    shot_editor_df["Work_Time_to_complete"] = pd.to_numeric(
+                        shot_editor_df["Work_Time_to_complete"], errors="coerce"
+                    ).fillna(0.0)
+                    for str_col in (
+                        "Sub-Line",
+                        "Pitch_number",
+                        "Pitch_name",
+                        "Model_variant",
+                        "Work_Type",
+                        "Work_Description",
+                        "Work_region",
+                    ):
+                        shot_editor_df[str_col] = (
+                            shot_editor_df[str_col].fillna("").astype(str)
+                        )
+                    edited_shot_df = st.data_editor(
+                        shot_editor_df[shot_edit_cols],
+                        num_rows="dynamic",
+                        width="stretch",
+                        hide_index=True,
+                        key=f"yamazumi_import_shot_editor_{yamazumi_import_widget_scope}_{upload_files_sig}",
+                        column_config={
+                            "Sub-Line": st.column_config.TextColumn("Sub-Line"),
+                            "Pitch_number": st.column_config.TextColumn(
+                                "Pitch Address", required=True
+                            ),
+                            "Pitch_name": st.column_config.TextColumn("Pitch Name"),
+                            "Model_variant": st.column_config.TextColumn(
+                                "Model Variant", default="Base"
+                            ),
+                            "Work_Type": st.column_config.SelectboxColumn(
+                                "Work Type",
+                                options=WORK_TYPES,
+                                default="Cycle",
+                                required=True,
+                            ),
+                            "Work_Time_to_complete": st.column_config.NumberColumn(
+                                f"Time ({time_config.label.lower()})",
+                                min_value=0.0,
+                                step=0.1,
+                                default=0.0,
+                            ),
+                            "Work_Description": st.column_config.TextColumn(
+                                "Work Description", required=True
+                            ),
+                            "Work_region": st.column_config.TextColumn(
+                                "Work Region", default="None"
+                            ),
+                        },
+                    )
+                    cleaned_shot_df = edited_shot_df.copy()
+                    cleaned_shot_df["Pitch_status"] = "Active"
+                    cleaned_shot_df["Pitch_Takt_time"] = (
+                        parsed_df["Pitch_Takt_time"].iloc[0]
+                        if "Pitch_Takt_time" in parsed_df.columns and not parsed_df.empty
+                        else None
+                    )
+                    cleaned_shot_df = cleaned_shot_df.loc[
+                        cleaned_shot_df["Pitch_number"].fillna("").astype(str).str.strip() != ""
+                    ].reset_index(drop=True)
+                    parsed_df = cleaned_shot_df
+                    if not cleaned_shot_df.empty:
+                        shot_pitch_rows = []
+                        for p_num_val, p_grp in cleaned_shot_df.groupby("Pitch_number", sort=False):
+                            p_num_s = str(p_num_val or "").strip()
+                            if not p_num_s:
+                                continue
+                            first_r = p_grp.iloc[0]
+                            vars_list = list(
+                                dict.fromkeys(
+                                    str(v or "Base").strip() or "Base"
+                                    for v in p_grp["Model_variant"].tolist()
+                                )
+                            )
+                            shot_pitch_rows.append(
+                                {
+                                    "Sub-Line": str(first_r.get("Sub-Line") or "").strip(),
+                                    "Pitch_number": p_num_s,
+                                    "Pitch_status": "Active",
+                                    "Pitch_name": str(first_r.get("Pitch_name") or "").strip(),
+                                    "Pitch_Takt_time": first_r.get("Pitch_Takt_time"),
+                                    "Model_variants": vars_list,
+                                }
+                            )
+                        parsed_pitch_df = pd.DataFrame(shot_pitch_rows)
 
             placed_pitch_keys: set[str] = {
                 str(k).strip().casefold()
@@ -535,7 +764,7 @@ with st.expander(
                     f"**{len(uploaded_files)} files selected:** "
                     + ", ".join(uf.name for uf in uploaded_files)
                 )
-            if has_pdf and pdf_metas:
+            if (has_pdf or has_screenshot) and pdf_metas:
                 detected_sublines = list(
                     dict.fromkeys(
                         str(m.get("subline")).strip()
@@ -733,8 +962,8 @@ with st.expander(
                             pitches_by_var.setdefault(item.casefold(), set()).add(p_num)
                     variant_pitch_counts = {k: len(v) for k, v in pitches_by_var.items()}
 
-                def _default_variant_assignment(det_var: str, options: list[str]) -> str:
-                    det_key = det_var.strip().casefold()
+                def _match_single_variant(part_str: str, options: list[str]) -> str:
+                    det_key = part_str.strip().casefold()
                     for opt in options:
                         if opt.casefold() == det_key:
                             return opt
@@ -743,10 +972,26 @@ with st.expander(
                             _, choice_val = opt.split(" = ", 1)
                             if choice_val.strip().casefold() == det_key:
                                 return opt
+                    raw_tokens = [
+                        tok for tok in re.split(r"[^a-z0-9]+", det_key) if tok
+                    ]
+                    negation_words = {"no", "non", "without"}
+                    has_negation = any(tok in negation_words for tok in raw_tokens)
                     det_tokens = [
                         tok
-                        for tok in re.split(r"[^a-z0-9]+", det_key)
-                        if tok and tok not in {"base", "variant", "variants", "model", "models", "all"}
+                        for tok in raw_tokens
+                        if tok
+                        not in {
+                            "base",
+                            "variant",
+                            "variants",
+                            "model",
+                            "models",
+                            "all",
+                            "no",
+                            "non",
+                            "without",
+                        }
                     ]
                     if not det_tokens:
                         return "All models"
@@ -757,16 +1002,63 @@ with st.expander(
                             f_key = feat_name.strip().casefold()
                             if not c_key:
                                 continue
+                            c_raw_tokens = [
+                                tok for tok in re.split(r"[^a-z0-9]+", c_key) if tok
+                            ]
+                            c_has_negation = any(
+                                tok in negation_words for tok in c_raw_tokens
+                            )
+                            if has_negation != c_has_negation:
+                                continue
+                            c_tokens = [
+                                tok
+                                for tok in c_raw_tokens
+                                if tok not in negation_words
+                            ]
+                            if has_negation and c_tokens and all(
+                                tok in c_tokens or tok in f_key for tok in det_tokens
+                            ):
+                                return opt
                             if c_key in det_tokens:
                                 return opt
                             if c_key in det_key and (len(c_key) >= 3 or f_key in det_key):
                                 return opt
-                            if any(len(tok) >= 3 and c_key.startswith(tok) for tok in det_tokens):
+                            if any(
+                                len(tok) >= 3 and c_key.startswith(tok)
+                                for tok in det_tokens
+                            ):
                                 return opt
                     return "All models"
 
-                variant_mapping: dict[str, str] = {}
-                variant_audit_mapping: dict[str, str] = {}
+                def _default_variant_assignments(
+                    det_var: str, options: list[str]
+                ) -> list[str]:
+                    det_key = det_var.strip().casefold()
+                    for opt in options:
+                        if opt.casefold() == det_key:
+                            return [opt]
+                        if " = " in opt:
+                            _, choice_val = opt.split(" = ", 1)
+                            if choice_val.strip().casefold() == det_key:
+                                return [opt]
+                    sub_parts = [
+                        p.strip()
+                        for p in re.split(r"[/,;+&]+", det_var)
+                        if p.strip()
+                    ]
+                    if len(sub_parts) > 1:
+                        matched_parts: list[str] = []
+                        for sp in sub_parts:
+                            m = _match_single_variant(sp, options)
+                            if m != "All models" and m in options and m not in matched_parts:
+                                matched_parts.append(m)
+                        if matched_parts:
+                            return matched_parts
+                    single = _match_single_variant(det_var, options)
+                    return [single] if single in options else [options[0]]
+
+                variant_mapping: dict[str, list[str]] = {}
+                variant_audit_mapping: dict[str, list[str]] = {}
                 with st.container(border=True):
                     st.markdown("**Assign Features to Detected Model Variants**")
                     if len(defined_variant_options) <= 1:
@@ -776,63 +1068,109 @@ with st.expander(
                         )
                     else:
                         st.caption(
-                            "Map each model variant detected in the uploaded Yamazumi chart to All models or an official feature populated in the app before importing."
+                            "Map each model variant detected in the uploaded Yamazumi chart to All models or one or more official features populated in the app before importing."
                         )
                     var_cols = st.columns(min(len(detected_import_variants), 3))
                     for idx, det_var in enumerate(detected_import_variants):
                         det_key = det_var.casefold()
                         var_options = list(defined_variant_options)
-                        default_target = _default_variant_assignment(det_var, var_options)
-                        default_idx = (
-                            var_options.index(default_target)
-                            if default_target in var_options
-                            else 0
-                        )
+                        default_targets = [
+                            t
+                            for t in _default_variant_assignments(det_var, var_options)
+                            if t in var_options
+                        ] or [var_options[0]]
                         p_cnt = variant_pitch_counts.get(det_key, 0)
                         e_cnt = variant_element_counts.get(det_key, 0)
                         widget_key = f"yamazumi_import_feature_map_{yamazumi_import_widget_scope}_{det_key}"
-                        if widget_key in st.session_state and st.session_state[widget_key] not in var_options:
-                            st.session_state.pop(widget_key, None)
+                        if widget_key in st.session_state:
+                            existing_widget_val = st.session_state[widget_key]
+                            if isinstance(existing_widget_val, str):
+                                if existing_widget_val in var_options:
+                                    st.session_state[widget_key] = [existing_widget_val]
+                                else:
+                                    st.session_state.pop(widget_key, None)
+                            elif isinstance(existing_widget_val, list):
+                                valid_existing = [
+                                    v for v in existing_widget_val if v in var_options
+                                ]
+                                if valid_existing != existing_widget_val:
+                                    if valid_existing:
+                                        st.session_state[widget_key] = valid_existing
+                                    else:
+                                        st.session_state.pop(widget_key, None)
+                            else:
+                                st.session_state.pop(widget_key, None)
                         with var_cols[idx % len(var_cols)]:
-                            selected_target = st.selectbox(
+                            selected_targets = st.multiselect(
                                 f"Detected Variant: {det_var}",
                                 options=var_options,
-                                index=default_idx,
-                                help=f"Found on {p_cnt} pitch(es) and {e_cnt} work element(s) in the uploaded file(s).",
+                                default=default_targets,
+                                help=(
+                                    f"Found on {p_cnt} pitch(es) and {e_cnt} work element(s) in the uploaded file(s). "
+                                    "Select one or more features/variants."
+                                ),
                                 key=widget_key,
                             )
-                            variant_mapping[det_var] = selected_target
-                            variant_mapping[det_key] = selected_target
-                            variant_audit_mapping[det_var] = selected_target
+                            mapped_targets = list(
+                                dict.fromkeys(
+                                    [t for t in selected_targets if t in var_options]
+                                )
+                            ) or ["All models"]
+                            variant_mapping[det_var] = mapped_targets
+                            variant_mapping[det_key] = mapped_targets
+                            variant_audit_mapping[det_var] = list(mapped_targets)
 
                 if variant_mapping:
+                    default_mapped_variants = variant_mapping.get(
+                        "All models",
+                        variant_mapping.get(
+                            "Base", variant_mapping.get("base", ["All models"])
+                        ),
+                    )
+
+                    def _resolve_mapped_variants(raw_val: object) -> list[str]:
+                        source_items = parse_yamazumi_model_variants(
+                            raw_val, fallback=None
+                        )
+                        if not source_items:
+                            return list(default_mapped_variants)
+                        resolved: list[str] = []
+                        seen: set[str] = set()
+                        for item in source_items:
+                            mapped = variant_mapping.get(
+                                item,
+                                variant_mapping.get(item.casefold(), [item]),
+                            )
+                            for m_item in (
+                                mapped if isinstance(mapped, list) else [mapped]
+                            ):
+                                clean_m = str(m_item).strip()
+                                if not clean_m:
+                                    continue
+                                m_key = clean_m.casefold()
+                                if m_key not in seen:
+                                    seen.add(m_key)
+                                    resolved.append(clean_m)
+                        return resolved or list(default_mapped_variants)
+
                     parsed_df = parsed_df.copy()
-                    if "Model_variant" in parsed_df.columns:
-                        parsed_df["Model_variant"] = [
-                            variant_mapping.get(
-                                str(v).strip(),
-                                variant_mapping.get(
-                                    str(v).strip().casefold(),
-                                    str(v).strip() or "All models",
-                                ),
-                            )
-                            if pd.notna(v) and str(v).strip()
-                            else variant_mapping.get("All models", variant_mapping.get("Base", variant_mapping.get("base", "All models")))
-                            for v in parsed_df["Model_variant"]
+                    source_df_var_col = (
+                        "Model_variants"
+                        if "Model_variants" in parsed_df.columns
+                        else (
+                            "Model_variant"
+                            if "Model_variant" in parsed_df.columns
+                            else None
+                        )
+                    )
+                    if source_df_var_col is not None:
+                        mapped_df_variants = [
+                            _resolve_mapped_variants(v)
+                            for v in parsed_df[source_df_var_col]
                         ]
-                    if "Model_variants" in parsed_df.columns:
-                        parsed_df["Model_variants"] = [
-                            parse_yamazumi_model_variants(
-                                [
-                                    variant_mapping.get(
-                                        item,
-                                        variant_mapping.get(item.casefold(), item),
-                                    )
-                                    for item in parse_yamazumi_model_variants(v, fallback="All models")
-                                ],
-                                fallback="All models",
-                            )
-                            for v in parsed_df["Model_variants"]
+                        parsed_df["Model_variants"] = mapped_df_variants
+                        parsed_df["Model_variant"] = [
+                            ", ".join(v_list) for v_list in mapped_df_variants
                         ]
                     if parsed_pitch_df is not None and not parsed_pitch_df.empty:
                         parsed_pitch_df = parsed_pitch_df.copy()
@@ -846,18 +1184,7 @@ with st.expander(
                                 else "Model_variant"
                             )
                             parsed_pitch_df["Model_variants"] = [
-                                parse_yamazumi_model_variants(
-                                    [
-                                        variant_mapping.get(
-                                            item,
-                                            variant_mapping.get(item.casefold(), item),
-                                        )
-                                        for item in parse_yamazumi_model_variants(
-                                            v, fallback="All models"
-                                        )
-                                    ],
-                                    fallback="All models",
-                                )
+                                _resolve_mapped_variants(v)
                                 for v in parsed_pitch_df[source_col]
                             ]
 
@@ -890,13 +1217,17 @@ with st.expander(
                                 if feat_cf not in seen_set:
                                     seen_set.add(feat_cf)
                                     pitch_features_by_key.setdefault(pk, []).append(feat_clean)
-                    default_mapped_feature = variant_mapping.get(
+                    default_mapped_features = variant_mapping.get(
                         "All models",
-                        variant_mapping.get("Base", variant_mapping.get("base", "All models")),
+                        variant_mapping.get(
+                            "Base", variant_mapping.get("base", ["All models"])
+                        ),
                     )
                     for p in detected_pitches:
                         pk = str(p["pitch_key"])
-                        p_feats = pitch_features_by_key.get(pk) or [default_mapped_feature]
+                        p_feats = pitch_features_by_key.get(pk) or list(
+                            default_mapped_features
+                        )
                         p["features"] = ", ".join(p_feats)
 
                     with st.container(border=True):
@@ -915,18 +1246,27 @@ with st.expander(
                         }
                         all_pitch_nums = [str(p["pitch_number"]) for p in detected_pitches]
                         bulk_target_options = list(area_name_options)
+                        bulk_parity_options = [
+                            "All pitches",
+                            "Odd pitches only",
+                            "Even pitches only",
+                        ]
                         from_pitch_key = f"yamazumi_import_bulk_from_{yamazumi_import_widget_scope}"
                         to_pitch_key = f"yamazumi_import_bulk_to_{yamazumi_import_widget_scope}"
+                        parity_pitch_key = f"yamazumi_import_bulk_parity_{yamazumi_import_widget_scope}"
                         clear_sel_flag_key = f"yamazumi_import_clear_sel_{yamazumi_import_widget_scope}"
                         if st.session_state.pop(clear_sel_flag_key, False) and all_pitch_nums:
                             st.session_state[from_pitch_key] = all_pitch_nums[0]
                             st.session_state[to_pitch_key] = all_pitch_nums[-1]
+                            st.session_state[parity_pitch_key] = "All pitches"
                         if all_pitch_nums:
                             if st.session_state.get(from_pitch_key) not in all_pitch_nums:
                                 st.session_state[from_pitch_key] = all_pitch_nums[0]
                             if st.session_state.get(to_pitch_key) not in all_pitch_nums:
                                 st.session_state[to_pitch_key] = all_pitch_nums[-1]
-                        b_col1, b_col2, b_col3 = st.columns([1.4, 1.4, 1.8])
+                        if st.session_state.get(parity_pitch_key) not in bulk_parity_options:
+                            st.session_state[parity_pitch_key] = "All pitches"
+                        b_col1, b_col2, b_col3, b_col4 = st.columns([1.3, 1.3, 1.1, 1.5])
                         with b_col1:
                             bulk_from_pitch = st.selectbox(
                                 "From Pitch",
@@ -944,12 +1284,49 @@ with st.expander(
                                 key=to_pitch_key,
                             )
                         with b_col3:
+                            bulk_pitch_parity = st.selectbox(
+                                "Pitches in Range",
+                                options=bulk_parity_options,
+                                index=0,
+                                help="Filter the selected From/To pitch range to all pitches, odd pitches only, or even pitches only.",
+                                key=parity_pitch_key,
+                            )
+                        with b_col4:
                             bulk_target_area = st.selectbox(
                                 "Target Yamazumi Area",
                                 options=bulk_target_options,
                                 index=0,
                                 key=f"yamazumi_import_bulk_area_{yamazumi_import_widget_scope}",
                             )
+
+                        prev_bulk_area = st.session_state.get(prev_bulk_area_key)
+                        if prev_bulk_area is None:
+                            st.session_state[prev_bulk_area_key] = bulk_target_area
+                        elif prev_bulk_area != bulk_target_area and bulk_target_area:
+                            st.session_state[prev_bulk_area_key] = bulk_target_area
+                            for p in detected_pitches:
+                                pk = str(p["pitch_key"])
+                                if bool(pitch_include_map.get(pk, False)) or pitch_area_map.get(pk) in {
+                                    prev_bulk_area,
+                                    fallback_initial_area,
+                                }:
+                                    pitch_area_map[pk] = bulk_target_area
+                            st.session_state[pitch_area_map_key] = pitch_area_map
+                            st.session_state.pop(pitch_base_df_key, None)
+                            request_table_editor_reset(import_pitch_editor_base_key)
+
+                        def _pitch_matches_parity(p_num: str, parity_mode: str) -> bool:
+                            if parity_mode == "All pitches":
+                                return True
+                            nums = re.findall(r"\d+", str(p_num or ""))
+                            if not nums:
+                                return False
+                            last_num = int(nums[-1])
+                            if parity_mode == "Odd pitches only":
+                                return last_num % 2 == 1
+                            if parity_mode == "Even pitches only":
+                                return last_num % 2 == 0
+                            return True
 
                         def _resolve_bulk_pitch_keys() -> set[str]:
                             keys: set[str] = set()
@@ -961,27 +1338,36 @@ with st.expander(
                                     i2 = all_pitch_nums.index(e_num)
                                     lo, hi = min(i1, i2), max(i1, i2)
                                     for p_num in all_pitch_nums[lo : hi + 1]:
-                                        keys.add(p_num.strip().casefold())
+                                        if _pitch_matches_parity(p_num, bulk_pitch_parity):
+                                            keys.add(p_num.strip().casefold())
                             return keys
 
                         bulk_btn_row = st.container(horizontal=True)
                         if bulk_btn_row.button(
-                            "Assign Pitch Range",
+                            "Select Pitch Range",
                             icon=":material/check:",
-                            help="Assign pitches in the selected From/To range to the Target Yamazumi area.",
+                            help="Select and assign pitches in the selected From/To range to the Target Yamazumi area.",
                             key=f"yamazumi_import_bulk_apply_{yamazumi_import_widget_scope}",
                         ):
                             target_keys = _resolve_bulk_pitch_keys()
                             if not target_keys:
-                                st.warning("Select a From pitch or To pitch range first, or use the checkboxes in the table below.")
+                                if bulk_pitch_parity != "All pitches":
+                                    st.warning(
+                                        f"No pitches in the selected From/To range matched '{bulk_pitch_parity}'."
+                                    )
+                                else:
+                                    st.warning(
+                                        "Select a From pitch or To pitch range first, or use the checkboxes in the table below."
+                                    )
                             else:
                                 for tk in target_keys:
                                     pitch_area_map[tk] = bulk_target_area
                                     pitch_include_map[tk] = True
                                 st.session_state[pitch_area_map_key] = pitch_area_map
                                 st.session_state[pitch_include_map_key] = pitch_include_map
-                                st.session_state.pop(import_pitch_editor_key, None)
+                                request_table_editor_reset(import_pitch_editor_base_key)
                                 st.session_state.pop(pitch_base_df_key, None)
+                                st.rerun()
 
                         if bulk_btn_row.button(
                             "Clear Selection",
@@ -1000,7 +1386,7 @@ with st.expander(
                                 pitch_include_map[pk] = False
                             st.session_state[pitch_area_map_key] = pitch_area_map
                             st.session_state[pitch_include_map_key] = pitch_include_map
-                            st.session_state.pop(import_pitch_editor_key, None)
+                            request_table_editor_reset(import_pitch_editor_base_key)
                             st.session_state.pop(pitch_base_df_key, None)
                             st.session_state[clear_sel_flag_key] = True
                             st.rerun()
@@ -1021,7 +1407,10 @@ with st.expander(
                             )
                         ):
                             st.session_state.pop(pitch_base_df_key, None)
-                            st.session_state.pop(import_pitch_editor_key, None)
+                            request_table_editor_reset(import_pitch_editor_base_key)
+                        import_pitch_editor_key = apply_pending_table_editor_reset(
+                            import_pitch_editor_base_key
+                        )
                         if pitch_base_df_key not in st.session_state:
                             st.session_state[pitch_base_df_key] = pd.DataFrame(
                                 [
@@ -1087,14 +1476,18 @@ with st.expander(
                         needs_editor_refresh = False
                         for _, erow in edited_pitch_df.iterrows():
                             pk = str(erow["Pitch_number"]).strip().casefold()
-                            prev_area = str(pitch_area_map.get(pk, fallback_initial_area))
+                            prev_inc = bool(pitch_include_map.get(pk, False))
+                            prev_area = str(pitch_area_map.get(pk, bulk_target_area or fallback_initial_area))
                             new_inc = bool(erow.get("Import", False))
-                            new_area = str(erow.get("Target_area") or fallback_initial_area)
+                            new_area = str(erow.get("Target_area") or bulk_target_area or fallback_initial_area)
                             new_type = str(erow.get("Pitch_type") or "Pitch").strip().title()
                             if new_type not in PITCH_TYPES:
                                 new_type = "Pitch"
                             if new_area != prev_area and not new_inc:
                                 new_inc = True
+                                needs_editor_refresh = True
+                            elif new_inc and not prev_inc and bulk_target_area and new_area != bulk_target_area:
+                                new_area = bulk_target_area
                                 needs_editor_refresh = True
                             pitch_include_map[pk] = new_inc
                             pitch_area_map[pk] = new_area
@@ -1104,7 +1497,7 @@ with st.expander(
                         st.session_state[pitch_area_map_key] = pitch_area_map
                         st.session_state[pitch_type_map_key] = pitch_type_map
                         if needs_editor_refresh:
-                            st.session_state.pop(import_pitch_editor_key, None)
+                            request_table_editor_reset(import_pitch_editor_base_key)
                             st.session_state.pop(pitch_base_df_key, None)
                             st.rerun()
 
@@ -1187,7 +1580,41 @@ with st.expander(
                     hide_index=True,
                 )
 
-            replace_elements = st.checkbox(
+            existing_scenario_pitches_df = yamazumi_pitches_for_scenario(
+                project_id, scenario_id
+            )
+            existing_pitch_by_key: dict[str, dict] = {}
+            if not existing_scenario_pitches_df.empty:
+                for _, ep_row in existing_scenario_pitches_df.iterrows():
+                    ep_num = str(ep_row.get("pitch_number") or "").strip()
+                    if ep_num:
+                        existing_pitch_by_key[ep_num.casefold()] = {
+                            "pitch_number": ep_num,
+                            "pitch_name": str(ep_row.get("pitch_name") or "").strip(),
+                            "area_name": str(ep_row.get("area_name") or "").strip(),
+                            "element_count": int(
+                                pd.to_numeric(ep_row.get("element_count"), errors="coerce") or 0
+                            ),
+                        }
+            conflicting_pitches = [
+                existing_pitch_by_key[pk]
+                for pk in active_pitch_to_area
+                if pk in existing_pitch_by_key
+            ]
+            replace_elements = len(conflicting_pitches) > 0
+            if replace_elements:
+                conflict_addrs = [cp["pitch_number"] for cp in conflicting_pitches]
+                conflict_preview = (
+                    ", ".join(conflict_addrs[:10])
+                    + (f", and {len(conflict_addrs) - 10} more" if len(conflict_addrs) > 10 else "")
+                )
+                st.warning(
+                    f"**{len(conflicting_pitches)}** selected pitch address(es) are already registered in this scenario "
+                    f"({conflict_preview}). Importing will replace the pitch addresses and work elements "
+                    "for those pitches and leave the rest of the section alone.",
+                    icon=":material/warning:",
+                )
+            _unused_replace_checkbox = dict(label=
                 "Replace Existing Pitch Addresses and Work Elements in Target Area",
                 value=False,
                 key=f"yamazumi_import_replace_{yamazumi_import_widget_scope}",
@@ -1204,6 +1631,18 @@ with st.expander(
                 import_source_label = "PDF import"
             else:
                 import_source_label = "Excel import"
+            source_parts = [
+                label
+                for flag, label in (
+                    (has_excel, "Excel"),
+                    (has_pdf, "PDF"),
+                    (has_screenshot, "Screenshot"),
+                )
+                if flag
+            ]
+            import_source_label = (
+                f"{' & '.join(source_parts)} import" if source_parts else "Excel import"
+            )
             area_suffix = (
                 f" into {len(target_area_names)} Areas"
                 if len(target_area_names) > 1
@@ -1274,10 +1713,11 @@ with st.expander(
                         st.session_state[pitch_area_map_key] = pitch_area_map
                         st.session_state[pitch_include_map_key] = pitch_include_map
                         st.session_state[pitch_type_map_key] = pitch_type_map
-                        st.session_state.pop(import_pitch_editor_key, None)
+                        request_table_editor_reset(import_pitch_editor_base_key)
                         st.session_state.pop(pitch_base_df_key, None)
                         st.session_state.pop(from_pitch_key, None)
                         st.session_state.pop(to_pitch_key, None)
+                        st.session_state.pop(prev_bulk_area_key, None)
                     else:
                         st.session_state.pop(placed_pitches_key, None)
                         st.session_state[yamazumi_import_generation_key] = (
@@ -1310,8 +1750,42 @@ with st.expander(
                 else:
                     _execute_yamazumi_import()
 
-            @st.dialog("Replace Existing Yamazumi Section Data?", dismissible=False)
+            @st.dialog("Replace Existing Pitch Addresses?", dismissible=False)
             def _confirm_yamazumi_replace_import() -> None:
+                target_subline_name = (
+                    ", ".join(target_area_names)
+                    if target_area_names
+                    else "selected section(s)"
+                )
+                conflict_addrs = [cp["pitch_number"] for cp in conflicting_pitches]
+                conflict_preview = (
+                    ", ".join(conflict_addrs[:12])
+                    + (f", and {len(conflict_addrs) - 12} more" if len(conflict_addrs) > 12 else "")
+                )
+                existing_elem_total = sum(cp["element_count"] for cp in conflicting_pitches)
+                st.warning(
+                    f"**{len(conflicting_pitches)}** pitch address(es) selected for import ({conflict_preview}) "
+                    f"are already registered in the system (currently containing **{existing_elem_total}** work element(s)).\n\n"
+                    f"This will replace the existing pitch addresses and work elements for **those {len(conflicting_pitches)} imported pitch(es)** "
+                    f"and leave the rest of **{target_subline_name}** alone."
+                )
+                st.caption(
+                    "Downstream effects: Unimported pitches and work elements in the section, other Yamazumi sections, "
+                    "Fishbone sections, and existing Process at a Glance steps will not be deleted. Any Process steps "
+                    "previously linked to replaced work elements on these pitches will be unlinked and flagged for reconciliation."
+                )
+                actions = st.container(horizontal=True)
+                if actions.button("Cancel", key=f"cancel_yamazumi_import_replace_{yamazumi_import_widget_scope}"):
+                    st.session_state.pop(pending_replace_import_key, None)
+                    st.rerun()
+                if actions.button(
+                    "Replace & Import",
+                    type="primary",
+                    icon=":material/sync:",
+                    key=f"destructive_confirm_yamazumi_import_replace_{yamazumi_import_widget_scope}",
+                ):
+                    _execute_yamazumi_import()
+            def _unused_old_confirm_yamazumi_replace_import() -> None:
                 target_subline_name = (
                     ", ".join(target_area_names)
                     if target_area_names
@@ -2231,6 +2705,7 @@ with setup_columns[1].expander("Define Work Regions", icon=":material/category:"
         selectable_count=len(region_editor_rows),
         selected_count=len(selected_regions),
         key_prefix=f"yamazumi_region_select_{area_id}",
+        always_show_both=True,
     )
     bulk_region_active = region_bulk.selectbox(
         "Active for Selected Regions",
@@ -3669,6 +4144,7 @@ def confirm_gui_element_delete() -> None:
                 scenario_id=scenario_id,
                 audit_editor_name=editor_name,
                 audit_details={
+                    "model_variant": str(pending.get("model_variant") or "").strip() or None,
                     "source": "interactive_board_gui",
                     "linked_process_step_preserved": has_process_link,
                 },
@@ -3690,7 +4166,7 @@ def confirm_interactive_element_delete() -> None:
     target_element_area_id = element_area_by_id.get(element_id, str(area_id))
     try:
         impact = yamazumi_element_delete_impact(
-            project_id, scenario_id, target_element_area_id, element_id
+            project_id, scenario_id, target_element_area_id, element_id, source_variant=str(pending.get("model_variant") or "").strip() or None
         )
     except ValueError as exc:
         st.warning(str(exc))
@@ -3706,7 +4182,12 @@ def confirm_interactive_element_delete() -> None:
         impact.get("pitch_number"), impact.get("pitch_name")
     ) if impact.get("pitch_id") else "Unassigned"
     st.warning(
-        f"Delete **{impact['description']}** from **{pitch_label}** in this planning scenario?"
+        (
+            f"Delete **{impact['description']}** from model variant **{impact.get('target_model_variant')}** on **{pitch_label}** in this planning scenario? "
+            f"(It will remain on {', '.join(str(v) for v in (impact.get('remaining_model_variants') or []))}.)"
+            if impact.get("variant_only_delete")
+            else f"Delete **{impact['description']}** from **{pitch_label}** in this planning scenario?"
+        )
     )
     st.write(
         "This removes the element from the Yamazumi board, stack order, work totals, "
@@ -3751,7 +4232,7 @@ def confirm_interactive_element_delete() -> None:
     ):
         try:
             result = delete_yamazumi_element(
-                project_id, scenario_id, target_element_area_id, element_id
+                project_id, scenario_id, target_element_area_id, element_id, source_variant=str(pending.get("model_variant") or "").strip() or None
             )
             record_audit_event(
                 project_id,
@@ -3766,7 +4247,7 @@ def confirm_interactive_element_delete() -> None:
                 },
             )
             current_draft = st.session_state.get(board_draft_key)
-            if isinstance(current_draft, dict):
+            if isinstance(current_draft, dict) and not result.get("variant_only_delete"):
                 updated_draft = remove_element_from_stack_draft(
                     current_draft, element_id
                 )
@@ -4071,12 +4552,23 @@ with yamazumi_tables_tab:
             row_takt_s = default_takt if default_takt > 0 else 60.0
         raw_conveyor = str(area_row.get("conveyor_type") or "2-sided").strip()
         row_conveyor = raw_conveyor if raw_conveyor in CONVEYOR_TYPES else "2-sided"
+        def _safe_nonneg_int(val: object) -> int:
+            if val is None or pd.isna(val):
+                return 0
+            try:
+                parsed = float(val)
+                return int(round(parsed)) if math.isfinite(parsed) and parsed >= 0 else 0
+            except (TypeError, ValueError):
+                return 0
         area_table_rows.append(
             {
                 "id": str(area_row["id"]),
                 "name": str(area_row["name"]),
                 "area_takt_display": float(seconds_to_display(row_takt_s, takt_time_unit)),
                 "conveyor_type": row_conveyor,
+                "team_leaders": _safe_nonneg_int(area_row.get("team_leaders")),
+                "control_person": _safe_nonneg_int(area_row.get("control_person")),
+                "replacement_operators": _safe_nonneg_int(area_row.get("replacement_operators")),
                 "updated_at": str(area_row.get("updated_at") or ""),
             }
         )
@@ -4089,12 +4581,22 @@ with yamazumi_tables_tab:
                 "name": pd.Series(dtype="string"),
                 "area_takt_display": pd.Series(dtype="float64"),
                 "conveyor_type": pd.Series(dtype="string"),
+                "team_leaders": pd.Series(dtype="int64"),
+                "control_person": pd.Series(dtype="int64"),
+                "replacement_operators": pd.Series(dtype="int64"),
                 "updated_at": pd.Series(dtype="string"),
             }
         )
     edited_area_table = st.data_editor(
         area_table_df,
-        column_order=["name", "area_takt_display", "conveyor_type"],
+        column_order=[
+            "name",
+            "area_takt_display",
+            "conveyor_type",
+            "team_leaders",
+            "control_person",
+            "replacement_operators",
+        ],
         disabled=["id", "name", "updated_at"],
         hide_index=True,
         num_rows="fixed",
@@ -4123,6 +4625,42 @@ with yamazumi_tables_tab:
                 required=True,
                 help="Select whether this pitch area uses a 1-sided or 2-sided conveyor.",
             ),
+            "team_leaders": st.column_config.NumberColumn(
+                "Team Leaders",
+                min_value=0,
+                step=1,
+                format="%d",
+                required=True,
+                default=0,
+                help=(
+                    "Number of Team Leaders in this Yamazumi area. "
+                    "Counts toward the total headcount used to calculate HPU on the Overview tab."
+                ),
+            ),
+            "control_person": st.column_config.NumberColumn(
+                "Control Person",
+                min_value=0,
+                step=1,
+                format="%d",
+                required=True,
+                default=0,
+                help=(
+                    "Number of Control Persons in this Yamazumi area. "
+                    "Counts toward the total headcount used to calculate HPU on the Overview tab."
+                ),
+            ),
+            "replacement_operators": st.column_config.NumberColumn(
+                "Replacement Operators",
+                min_value=0,
+                step=1,
+                format="%d",
+                required=True,
+                default=0,
+                help=(
+                    "Number of Replacement Operators in this Yamazumi area. "
+                    "Counts toward the total headcount used to calculate HPU on the Overview tab."
+                ),
+            ),
             "updated_at": None,
         },
     )
@@ -4138,7 +4676,13 @@ with yamazumi_tables_tab:
         try:
             area_draft_df = current_editor_draft(area_table_df, area_table_editor_key)
             if isinstance(edited_area_table, pd.DataFrame) and len(edited_area_table) == len(area_draft_df):
-                for col in ("area_takt_display", "conveyor_type"):
+                for col in (
+                    "area_takt_display",
+                    "conveyor_type",
+                    "team_leaders",
+                    "control_person",
+                    "replacement_operators",
+                ):
                     if col in edited_area_table.columns:
                         area_draft_df[col] = edited_area_table[col].values
             area_req_errors = required_field_errors(
@@ -4170,6 +4714,9 @@ with yamazumi_tables_tab:
                             display_to_seconds(numeric_display, takt_time_unit)
                         ),
                         "conveyor_type": str(row.get("conveyor_type") or "").strip(),
+                        "team_leaders": row.get("team_leaders"),
+                        "control_person": row.get("control_person"),
+                        "replacement_operators": row.get("replacement_operators"),
                     }
                 )
             area_save_result = update_yamazumi_areas_table(
@@ -4402,18 +4949,21 @@ with yamazumi_tables_tab:
         "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
         "updated_at": None,
     }
-    pitch_editor_rows = direct_entry_editor_rows(
-        visible_pitches,
+    pitch_editor_rows = prepare_editor_selection_column(
+        direct_entry_editor_rows(
+            visible_pitches,
+            editor_key=pitch_editor_key,
+            sort_columns=[
+                "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
+                "model_variants", "sequence"
+            ],
+            labels={
+                "area_name": "Yamazumi Area", "pitch_number": "Pitch Address",
+                "pitch_name": "Pitch Name", "pitch_type": "Pitch Type",
+                "model_variants": "Model Variants", "sequence": "Order",
+            },
+        ),
         editor_key=pitch_editor_key,
-        sort_columns=[
-            "area_name", "pitch_number", "pitch_name", "pitch_type", "status",
-            "model_variants", "sequence"
-        ],
-        labels={
-            "area_name": "Yamazumi Area", "pitch_number": "Pitch Address",
-            "pitch_name": "Pitch Name", "pitch_type": "Pitch Type",
-            "model_variants": "Model Variants", "sequence": "Order",
-        },
     )
     _pitch_editor_row_ids = (
         pitch_editor_rows["id"].fillna("").astype(str).tolist()
@@ -4436,29 +4986,32 @@ with yamazumi_tables_tab:
     selected_pitches = native_selected_rows(
         pitch_editor_rows, editor_key=pitch_editor_key
     )
-    pitch_selected_mask = (
-        edited_pitches["selected"].fillna(False).astype(bool).copy()
-        if "selected" in edited_pitches.columns
-        else pd.Series(False, index=edited_pitches.index, dtype="bool")
+    move_selected_pitches = resolve_editor_selected_rows(
+        pitch_editor_rows, edited_pitches, editor_key=pitch_editor_key
     )
-    pitch_editor_state = get_effective_table_editor_state(pitch_editor_key)
-    for raw_pos, row_changes in (pitch_editor_state.get("edited_rows") or {}).items():
-        try:
-            pos = int(raw_pos)
-        except (ValueError, TypeError):
-            continue
-        if (
-            0 <= pos < len(pitch_selected_mask)
-            and isinstance(row_changes, dict)
-            and "selected" in row_changes
-        ):
-            pitch_selected_mask.iat[pos] = bool(row_changes["selected"])
-    move_selected_pitches = edited_pitches.loc[pitch_selected_mask].copy()
-    if not move_selected_pitches.empty and "id" in move_selected_pitches.columns:
+    if (
+        not selected_pitches.empty
+        and not move_selected_pitches.empty
+        and "id" in move_selected_pitches.columns
+    ):
+        native_pitch_ids = set(selected_pitches["id"].dropna().astype(str))
         move_selected_pitches = move_selected_pitches.loc[
-            move_selected_pitches["id"].notna()
-            & move_selected_pitches["id"].astype(str).str.strip().ne("")
+            ~move_selected_pitches["id"].astype(str).isin(native_pitch_ids)
         ].copy()
+    selectable_pitch_count = (
+        int(
+            (
+                pitch_editor_rows["id"].fillna("").astype(str).str.strip().ne("")
+                & ~pitch_editor_rows["id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.startswith("__draft_new__")
+            ).sum()
+        )
+        if "id" in pitch_editor_rows.columns
+        else len(pitch_editor_rows)
+    )
     move_selected_ids = (
         [
             str(pid)
@@ -4487,9 +5040,12 @@ with yamazumi_tables_tab:
         editor_key=pitch_editor_key,
         key_prefix="yamazumi_pitches",
         native_row_selection=True,
+        show_select_all_controls=True,
+        selectable_row_count=selectable_pitch_count,
+        selected_row_count=len(move_selected_pitches),
         delete_action_label="Delete Pitches",
         delete_action_icon=":material/delete:",
-        delete_action_key=f"yamazumi_delete_pitches_request_{scenario_id}_{area_id}",
+        delete_action_key=f"destructive_yamazumi_delete_pitches_request_{scenario_id}_{area_id}",
         delete_action_disabled=delete_pitch_disabled,
         delete_action_help=(
             "Save or undo current Yamazumi board changes first."
@@ -4858,19 +5414,22 @@ with yamazumi_tables_tab:
         "process_sync_status": None,
         "updated_at": None,
     }
-    element_editor_rows = direct_entry_editor_rows(
-        visible_elements,
+    element_editor_rows = prepare_editor_selection_column(
+        direct_entry_editor_rows(
+            visible_elements,
+            editor_key=element_editor_key,
+            sort_columns=[
+                "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
+                "work_region", "criticality", "sequence",
+            ],
+            labels={
+                "area_name": "Yamazumi Area", "model_variants": "Model Variants",
+                "work_type": "Work Type", "description": "Work Description",
+                "time_s": time_column_label,
+                "work_region": "Work Region", "sequence": "Order",
+            },
+        ),
         editor_key=element_editor_key,
-        sort_columns=[
-            "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-            "work_region", "criticality", "sequence",
-        ],
-        labels={
-            "area_name": "Yamazumi Area", "model_variants": "Model Variants",
-            "work_type": "Work Type", "description": "Work Description",
-            "time_s": time_column_label,
-            "work_region": "Work Region", "sequence": "Order",
-        },
     )
     element_disabled_cols = ["id", "area_id", "criticality", "source", "process_element_id", "process_sync_status", "updated_at"]
     edited_elements = st.data_editor(
@@ -4886,29 +5445,32 @@ with yamazumi_tables_tab:
     selected_elements = native_selected_rows(
         element_editor_rows, editor_key=element_editor_key
     )
-    element_selected_mask = (
-        edited_elements["selected"].fillna(False).astype(bool).copy()
-        if "selected" in edited_elements.columns
-        else pd.Series(False, index=edited_elements.index, dtype="bool")
+    copy_selected_elements = resolve_editor_selected_rows(
+        element_editor_rows, edited_elements, editor_key=element_editor_key
     )
-    element_editor_state = get_effective_table_editor_state(element_editor_key)
-    for raw_pos, row_changes in (element_editor_state.get("edited_rows") or {}).items():
-        try:
-            pos = int(raw_pos)
-        except (ValueError, TypeError):
-            continue
-        if (
-            0 <= pos < len(element_selected_mask)
-            and isinstance(row_changes, dict)
-            and "selected" in row_changes
-        ):
-            element_selected_mask.iat[pos] = bool(row_changes["selected"])
-    copy_selected_elements = edited_elements.loc[element_selected_mask].copy()
-    if not copy_selected_elements.empty and "id" in copy_selected_elements.columns:
+    if (
+        not selected_elements.empty
+        and not copy_selected_elements.empty
+        and "id" in copy_selected_elements.columns
+    ):
+        native_element_ids = set(selected_elements["id"].dropna().astype(str))
         copy_selected_elements = copy_selected_elements.loc[
-            copy_selected_elements["id"].notna()
-            & copy_selected_elements["id"].astype(str).str.strip().ne("")
+            ~copy_selected_elements["id"].astype(str).isin(native_element_ids)
         ].copy()
+    selectable_element_count = (
+        int(
+            (
+                element_editor_rows["id"].fillna("").astype(str).str.strip().ne("")
+                & ~element_editor_rows["id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.startswith("__draft_new__")
+            ).sum()
+        )
+        if "id" in element_editor_rows.columns
+        else len(element_editor_rows)
+    )
     copy_selected_element_ids = (
         [
             str(eid)
@@ -4931,9 +5493,12 @@ with yamazumi_tables_tab:
         editor_key=element_editor_key,
         key_prefix="yamazumi_elements",
         native_row_selection=True,
+        show_select_all_controls=True,
+        selectable_row_count=selectable_element_count,
+        selected_row_count=len(copy_selected_elements),
         delete_action_label="Delete Work Element",
         delete_action_icon=":material/delete:",
-        delete_action_key=f"yamazumi_delete_elements_request_{scenario_id}_{area_id}",
+        delete_action_key=f"destructive_yamazumi_delete_elements_request_{scenario_id}_{area_id}",
         delete_action_disabled=delete_element_disabled,
         delete_action_help=(
             "Save or undo current Yamazumi board changes first."

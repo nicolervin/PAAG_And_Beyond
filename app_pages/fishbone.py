@@ -64,12 +64,13 @@ import utils.fishbone_visual as _fishbone_visual_mod
 import utils.fishbone_store as _fishbone_store_mod
 import utils.store as _store_mod
 
-if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2:
+if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 3:
     _fishbone_store_mod = importlib.reload(_fishbone_store_mod)
     _store_mod = importlib.reload(_store_mod)
     add_assembly_section = _store_mod.add_assembly_section
+    update_assembly_section_rows = _store_mod.update_assembly_section_rows
 
-if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 6:
+if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 7:
     _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
@@ -1271,6 +1272,8 @@ if fishbone_tab.open:
                         pass
                     if pos_map := p.get("positions"):
                         draft["positions"].update(pos_map)
+                    draft["connection_nodes"].clear()
+                    persistent_conn_nodes.clear()
                 if p := getattr(canvas_state, "create_connection", None):
                     try:
                         delattr(canvas_state, "create_connection")
@@ -1282,10 +1285,24 @@ if fishbone_tab.open:
                     from_node = p.get("from_node")
                     to_node = p.get("to_node")
                     if f_id and t_id and f_id != t_id:
-                        if not any(
-                            dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
-                            for dc in draft["connections"]
-                        ):
+                        existing_db_cids = [
+                            str(r["id"])
+                            for _, r in connections_df.iterrows()
+                            if str(r["from_section_id"]) == f_id
+                            and str(r["to_section_id"]) == t_id
+                            and str(r["id"]) not in draft["deleted_connections"]
+                        ] if not connections_df.empty else []
+                        matching_draft = [
+                            dc for dc in draft["connections"]
+                            if dc["from_section_id"] == f_id and dc["to_section_id"] == t_id
+                        ]
+                        if matching_draft:
+                            for dc in matching_draft:
+                                if from_node:
+                                    dc["from_node"] = from_node
+                                if to_node:
+                                    dc["to_node"] = to_node
+                        elif not existing_db_cids:
                             draft["connections"].append({
                                 "from_section_id": f_id,
                                 "to_section_id": t_id,
@@ -1298,6 +1315,9 @@ if fishbone_tab.open:
                             nodes_dict = {"from_node": from_node, "to_node": to_node}
                             draft["connection_nodes"][f"{f_id}->{t_id}"] = nodes_dict
                             persistent_conn_nodes[f"{f_id}->{t_id}"] = nodes_dict
+                            for ecid in existing_db_cids:
+                                draft["connection_nodes"][ecid] = nodes_dict
+                                persistent_conn_nodes[ecid] = nodes_dict
                 if p := getattr(canvas_state, "move_connection", None):
                     try:
                         delattr(canvas_state, "move_connection")
@@ -3100,6 +3120,9 @@ if fishbone_tab.open:
                     if draft.get("connections") or draft.get("deleted_connections"):
                         conn_changes = len(draft.get("connections") or []) + len(draft.get("deleted_connections") or [])
                         canvas_save_parts.append(f"{conn_changes} connection change(s)")
+                    elif draft.get("connection_nodes"):
+                        arrow_keys = [k for k in draft["connection_nodes"] if "->" in str(k)]
+                        canvas_save_parts.append(f"{len(arrow_keys) or 1} arrow position(s)")
                     part_changes = (
                         len(draft.get("new_assignments") or [])
                         + len(draft.get("updated_assignments") or {})
@@ -3249,6 +3272,12 @@ def _render_framework_maintenance():
             framework_walk["depth"].astype(int),
         ))
         framework = framework_walk.drop(columns=["depth"])
+        framework["name"] = framework["name"].fillna("").astype(str)
+        framework["description"] = framework["description"].fillna("").astype(str)
+        framework["sequence"] = (
+            pd.to_numeric(framework["sequence"], errors="coerce").fillna(10).astype(int)
+        )
+        framework["active"] = framework["active"].fillna(1).astype(bool)
         framework["section_type"] = [
             "Support Operations" if str(val or "") == "Support Operations" else "Assembly"
             for val in framework["section_type"]
@@ -3339,6 +3368,7 @@ def _render_framework_maintenance():
                         },
                     )
                     st.session_state[framework_undo_key] = current_plan_snapshot
+                    request_table_editor_reset(framework_editor_key)
                     st.toast(f"{framework.iloc[click['row']]['name']}: {action.lower()}", icon=":material/swap_vert:")
 
         def show_framework_assemblies() -> None:
@@ -3354,8 +3384,8 @@ def _render_framework_maintenance():
             hide_index=True,
             num_rows="delete",
             height=300,
-            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at", "assemblies_action"],
-            column_order=["hierarchy", "active", "sequence", "order_actions", "assemblies_action", "name", "section_type", "parent_assembly", "description"],
+            disabled=["id", "hierarchy", "created_at", "updated_at", "assemblies_action"],
+            column_order=["hierarchy", "order_actions", "assemblies_action", "sequence", "name", "active", "section_type", "parent_assembly", "description"],
             column_config={
                 "id": None,
                 "project_id": None,
@@ -3367,7 +3397,7 @@ def _render_framework_maintenance():
                     help="Blue rows are top-level Assembly sections. Orange indented rows are child Assembly sections grouped under their parent. Purple rows are Support Operations.",
                 ),
                 "active": st.column_config.CheckboxColumn("Active", help="Inactive Fishbone sections remain in history but are hidden from new part placement."),
-                "sequence": st.column_config.NumberColumn("Order", format="%d", pinned=True, width="small", help="Managed automatically by the move actions."),
+                "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d", width="small", help="Order of this section among its siblings. Edit directly or use the move actions."),
                 "order_actions": st.column_config.ButtonColumn(
                     "Move",
                     pinned=True,
@@ -3385,7 +3415,7 @@ def _render_framework_maintenance():
                     key="framework_assemblies_action",
                     help="Show assembly numbers built or installed in this section.",
                 ),
-                "name": st.column_config.TextColumn("Fishbone section", required=True, pinned=True, width=150),
+                "name": st.column_config.TextColumn("Fishbone section", required=True, width=160),
                 "section_type": st.column_config.SelectboxColumn("Type", options=["Assembly", "Support Operations"], required=True),
                 "parent_assembly": st.column_config.SelectboxColumn(
                     "Parent assembly",

@@ -8,7 +8,7 @@ from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
-_FISHBONE_STORE_HOT_RELOAD_REV = 2
+_FISHBONE_STORE_HOT_RELOAD_REV = 3
 
 @cached_store_read
 def assembly_sections(project_id: str) -> pd.DataFrame:
@@ -987,7 +987,10 @@ def update_assembly_section_rows(
         raise ValueError("The assembly framework table is missing required columns.")
     records = edited.to_dict("records")
     ids = {str(row["id"]) for row in records}
-    names = [str(row.get("name") or "").strip() for row in records]
+    names = [
+        "" if row.get("name") is None or pd.isna(row.get("name")) else str(row.get("name")).strip()
+        for row in records
+    ]
     if any(not name for name in names):
         raise ValueError("Every framework row needs a name.")
     if len({name.casefold() for name in names}) != len(names):
@@ -997,7 +1000,7 @@ def update_assembly_section_rows(
     type_by_id: dict[str, str] = {}
     for row in records:
         section_id = str(row["id"])
-        section_type = str(row.get("section_type") or "").strip()
+        section_type = "" if row.get("section_type") is None or pd.isna(row.get("section_type")) else str(row.get("section_type")).strip()
         parent_id = row.get("parent_id")
         parent_id = None if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip() else str(parent_id).strip()
         if section_type not in {"Assembly", "Support Operations", "Main spine", "Subassembly"}:
@@ -1028,17 +1031,73 @@ def update_assembly_section_rows(
     timestamp = now_iso()
     try:
         with (nullcontext(_connection) if _connection is not None else connection()) as conn:
+            existing_rows = {
+                str(r["id"]): dict(r)
+                for r in conn.execute(
+                    "SELECT id, name, parent_id FROM assembly_sections WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            }
             for row in records:
                 section_id = str(row["id"])
+                clean_name = "" if row.get("name") is None or pd.isna(row.get("name")) else str(row.get("name")).strip()
+                clean_desc = "" if row.get("description") is None or pd.isna(row.get("description")) else str(row.get("description")).strip()
+                raw_seq = row.get("sequence")
+                clean_seq = 0 if raw_seq is None or pd.isna(raw_seq) else int(raw_seq)
+                raw_active = row.get("active")
+                clean_active = 1 if (raw_active is not None and not pd.isna(raw_active) and bool(raw_active)) else 0
+                new_parent_id = parent_by_id[section_id]
                 conn.execute(
                     """UPDATE assembly_sections SET name=?, section_type=?, parent_id=?, sequence=?,
                        description=?, active=?, updated_at=? WHERE id=? AND project_id=?""",
                     (
-                        str(row["name"]).strip(), type_by_id[section_id], parent_by_id[section_id],
-                        int(row.get("sequence") or 0), str(row.get("description") or "").strip(),
-                        1 if bool(row.get("active")) else 0, timestamp, section_id, project_id,
+                        clean_name, type_by_id[section_id], new_parent_id,
+                        clean_seq, clean_desc,
+                        clean_active, timestamp, section_id, project_id,
                     ),
                 )
+                prev = existing_rows.get(section_id)
+                if prev is not None:
+                    old_parent_raw = prev.get("parent_id")
+                    old_parent_id = None if old_parent_raw is None or pd.isna(old_parent_raw) or not str(old_parent_raw).strip() else str(old_parent_raw).strip()
+                    if old_parent_id != new_parent_id:
+                        if old_parent_id:
+                            conn.execute(
+                                """DELETE FROM assembly_section_connections
+                                   WHERE project_id=? AND from_section_id=? AND to_section_id=? AND connection_type='subassembly'""",
+                                (project_id, section_id, old_parent_id),
+                            )
+                        if new_parent_id:
+                            existing_conn = conn.execute(
+                                "SELECT id FROM assembly_section_connections WHERE project_id=? AND from_section_id=? AND to_section_id=?",
+                                (project_id, section_id, new_parent_id),
+                            ).fetchone()
+                            if not existing_conn:
+                                conn.execute(
+                                    """INSERT INTO assembly_section_connections
+                                       (id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at)
+                                       VALUES (?, ?, ?, ?, 'subassembly', 10, ?, ?)""",
+                                    (str(uuid4()), project_id, section_id, new_parent_id, timestamp, timestamp),
+                                )
+                    old_name = str(prev.get("name") or "").strip()
+                    if old_name and old_name != clean_name:
+                        linked_areas = conn.execute(
+                            "SELECT id, scenario_id, name FROM yamazumi_areas WHERE project_id=? AND section_id=?",
+                            (project_id, section_id),
+                        ).fetchall()
+                        for area_row in linked_areas:
+                            if str(area_row["name"] or "").strip().casefold() == old_name.casefold():
+                                conflict = conn.execute(
+                                    """SELECT 1 FROM yamazumi_areas
+                                       WHERE project_id=? AND scenario_id=? AND LOWER(TRIM(name))=LOWER(TRIM(?)) AND id<>?
+                                       LIMIT 1""",
+                                    (project_id, area_row["scenario_id"], clean_name, area_row["id"]),
+                                ).fetchone()
+                                if not conflict:
+                                    conn.execute(
+                                        "UPDATE yamazumi_areas SET name=?, updated_at=? WHERE id=?",
+                                        (clean_name, timestamp, area_row["id"]),
+                                    )
     except sqlite3.IntegrityError as exc:
         raise ValueError("Framework names must be unique within the project.") from exc
     return len(records)

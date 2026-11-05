@@ -387,6 +387,150 @@ class WorkElementOpIdTests(unittest.TestCase):
                 self.project_id, self.scenario_id, ["work-other"]
             )
 
+    def test_same_pitch_multi_variant_elements_group_in_section_table_and_reconcile(self) -> None:
+        area_id, pitch_id = self.add_area_pitch(
+            "ped-027", "main", pitch_number="01-PED-027"
+        )
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, sequence, description,
+                    time_s, model_variant, model_variants, work_type,
+                    process_element_id, process_sync_status, updated_at)
+                   VALUES
+                   ('yam-foam-ped', ?, ?, ?, 10, 'Install front foam', 8.0,
+                    'Pedestal / Riser = Pedestal', '["Pedestal / Riser = Pedestal"]', 'Cycle',
+                    NULL, 'Needs IE review', ?),
+                   ('yam-foam-riser', ?, ?, ?, 20, 'Install front foam', 8.0,
+                    'Pedestal / Riser = Riser', '["Pedestal / Riser = Riser"]', 'Cycle',
+                    NULL, 'Needs IE review', ?)""",
+                (
+                    self.project_id, area_id, pitch_id, timestamp,
+                    self.project_id, area_id, pitch_id, timestamp,
+                ),
+            )
+
+        section_df = store.yamazumi_elements_for_section(
+            self.project_id, self.scenario_id, "main"
+        )
+        self.assertEqual(len(section_df), 1)
+        row = section_df.iloc[0]
+        self.assertEqual(row["description"], "Install front foam")
+        self.assertEqual(
+            store.parse_yamazumi_model_variants(
+                row["model_variants"], row["model_variant"]
+            ),
+            ["Pedestal / Riser = Pedestal", "Pedestal / Riser = Riser"],
+        )
+        self.assertEqual(int(row["process_reflected"]), 0)
+
+        reconciled = store.reconcile_yamazumi_to_process(
+            self.project_id, self.scenario_id, [str(row["id"])]
+        )
+        self.assertEqual(reconciled, 1)
+
+        with store.connection() as conn:
+            yam_rows = conn.execute(
+                """SELECT id, process_element_id, process_sync_status
+                   FROM yamazumi_elements
+                   WHERE project_id=? AND pitch_id=?
+                   ORDER BY sequence""",
+                (self.project_id, pitch_id),
+            ).fetchall()
+            self.assertEqual(len(yam_rows), 2)
+            process_id = str(yam_rows[0]["process_element_id"] or "")
+            self.assertTrue(bool(process_id))
+            self.assertEqual(
+                str(yam_rows[1]["process_element_id"] or ""), process_id
+            )
+            we_row = conn.execute(
+                """SELECT operation, model_applicability
+                   FROM work_elements
+                   WHERE id=? AND project_id=? AND scenario_id=?""",
+                (process_id, self.project_id, self.scenario_id),
+            ).fetchone()
+            self.assertEqual(
+                we_row["model_applicability"],
+                "Pedestal / Riser = Pedestal, Pedestal / Riser = Riser",
+            )
+
+        refreshed_df = store.yamazumi_elements_for_section(
+            self.project_id, self.scenario_id, "main"
+        )
+        self.assertEqual(len(refreshed_df), 1)
+        self.assertEqual(int(refreshed_df.iloc[0]["process_reflected"]), 1)
+        self.assertEqual(
+            str(refreshed_df.iloc[0]["process_element_id"]), process_id
+        )
+
+        op_contexts = store.work_element_op_contexts(
+            self.project_id, self.scenario_id, [process_id]
+        )
+        self.assertTrue(op_contexts[process_id]["complete"])
+        self.assertEqual(op_contexts[process_id]["op_id"], "M2.01-PED-027.1")
+
+        pitch_summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, pitch_id
+        )
+        self.assertEqual(len(pitch_summary["elements"]), 1)
+
+    def test_same_pitch_overlapping_subset_variant_elements_collapse_while_same_stack_repeats_stay_separate(self) -> None:
+        area_id, pitch_id = self.add_area_pitch(
+            "ped-027-rail", "main", pitch_number="01-PED-027"
+        )
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, sequence, description,
+                    time_s, model_variant, model_variants, work_type,
+                    process_element_id, process_sync_status, updated_at)
+                   VALUES
+                   ('yam-rail-both', ?, ?, ?, 10, 'Install left rail', 3.0,
+                    'Pedestal / Riser = Pedestal',
+                    '["Pedestal / Riser = Pedestal", "Pedestal / Riser = Riser"]',
+                    'Cycle', NULL, 'Needs IE review', ?),
+                   ('yam-rail-riser', ?, ?, ?, 20, 'Install left rail', 3.0,
+                    'Pedestal / Riser = Riser',
+                    '["Pedestal / Riser = Riser"]',
+                    'Cycle', NULL, 'Needs IE review', ?),
+                   ('yam-clip-1', ?, ?, ?, 30, 'Install clip', 2.0,
+                    'Pedestal / Riser = Pedestal',
+                    '["Pedestal / Riser = Pedestal"]',
+                    'Cycle', NULL, 'Needs IE review', ?),
+                   ('yam-clip-2', ?, ?, ?, 40, 'Install clip', 2.0,
+                    'Pedestal / Riser = Pedestal',
+                    '["Pedestal / Riser = Pedestal"]',
+                    'Cycle', NULL, 'Needs IE review', ?)""",
+                (
+                    self.project_id, area_id, pitch_id, timestamp,
+                    self.project_id, area_id, pitch_id, timestamp,
+                    self.project_id, area_id, pitch_id, timestamp,
+                    self.project_id, area_id, pitch_id, timestamp,
+                ),
+            )
+
+        section_df = store.yamazumi_elements_for_section(
+            self.project_id, self.scenario_id, "main"
+        )
+        rail_rows = section_df.loc[
+            section_df["description"].eq("Install left rail")
+        ]
+        self.assertEqual(len(rail_rows), 1)
+        self.assertEqual(
+            store.parse_yamazumi_model_variants(
+                rail_rows.iloc[0]["model_variants"],
+                rail_rows.iloc[0]["model_variant"],
+            ),
+            ["Pedestal / Riser = Pedestal", "Pedestal / Riser = Riser"],
+        )
+
+        clip_rows = section_df.loc[
+            section_df["description"].eq("Install clip")
+        ]
+        self.assertEqual(len(clip_rows), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

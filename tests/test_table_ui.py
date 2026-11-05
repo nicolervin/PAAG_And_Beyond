@@ -454,6 +454,32 @@ class EditableTableFooterTests(unittest.TestCase):
         self.assertEqual(move_call.kwargs["key"], "move_pitches")
         self.assertTrue(actions.additional_action)
 
+    def test_footer_can_render_select_all_and_clear_selection_buttons(self) -> None:
+        footer = Mock()
+        footer.button.side_effect = [False, False, False, False, False, False, False]
+
+        with (
+            patch.object(table_ui.st, "session_state", {"example_editor": {}}),
+            patch.object(table_ui.st, "container", return_value=footer),
+        ):
+            table_ui.editable_table_footer(
+                editor_key="example_editor",
+                key_prefix="example",
+                show_select_all_controls=True,
+                selectable_row_count=5,
+                selected_row_count=0,
+                delete_action_label="Delete Pitches",
+            )
+
+        select_all_call = footer.button.call_args_list[0]
+        clear_sel_call = footer.button.call_args_list[1]
+        delete_call = footer.button.call_args_list[2]
+        self.assertEqual(select_all_call.args[0], "Select all")
+        self.assertFalse(select_all_call.kwargs["disabled"])
+        self.assertEqual(clear_sel_call.args[0], "Clear selection")
+        self.assertTrue(clear_sel_call.kwargs["disabled"])
+        self.assertEqual(delete_call.args[0], "Delete Pitches")
+
     def test_filter_table_returns_range_index_when_filtered(self) -> None:
         df = pd.DataFrame(
             {
