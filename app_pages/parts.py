@@ -1922,7 +1922,7 @@ def annotate_part_primary_image_dialog(part_row: dict, active_project_id: str) -
     data_url = f"data:{mime};base64,{b64_str}"
 
     st.caption(
-        f"**Part:** `{part_row.get('part_number', '')}` — Crop, rotate in 90° increments, or draw arrows, callouts, shapes, and text. "
+        f"**Part:** `{part_row.get('part_number', '')}` — Crop, rotate in 90° increments, or draw arrows, callouts (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), shapes, and badges. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
     annotator_res = image_annotator(
@@ -1978,7 +1978,7 @@ def annotate_part_supplemental_image_dialog(supplemental: dict, active_project_i
 
     view_label = supplemental.get("caption") or supplemental.get("image_type") or "Additional View"
     st.caption(
-        f"**View:** {view_label} — Crop, rotate in 90° increments, or draw arrows, callouts, shapes, and text. "
+        f"**View:** {view_label} — Crop, rotate in 90° increments, or draw arrows, callouts (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), shapes, and badges. "
         "Click **💾 Apply & Save Markup** in the toolbar when finished."
     )
     annotator_res = image_annotator(
@@ -2112,6 +2112,8 @@ with image_col.container(border=True):
 
     with tab_upload_clip:
         staged_prim_key = f"staged_prim_upload_{part['id']}"
+        prim_up_nonce_key = f"prim_up_nonce_{part['id']}"
+        prim_up_nonce = int(st.session_state.get(prim_up_nonce_key, 0))
         last_prim_paste_hash_key = f"last_prim_paste_hash_{part['id']}"
         last_prim_upload_hash_key = f"last_prim_upload_hash_{part['id']}"
         discarded_prim_up_key = f"_discarded_prim_up_{part['id']}"
@@ -2119,13 +2121,13 @@ with image_col.container(border=True):
         uploaded = st.file_uploader(
             "Upload photo or rendered view",
             type=["png", "jpg", "jpeg", "webp"],
-            key=f"image_{part['id']}",
+            key=f"image_{part['id']}_{prim_up_nonce}",
             help="Photos: max 10 MB (PNG, JPG, WEBP)",
         )
         st.caption("Photos: max **10 MB** (PNG, JPG, WEBP)")
 
         st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-        primary_clipboard_key = f"clipboard_primary_{part['id']}"
+        primary_clipboard_key = f"clipboard_primary_{part['id']}_{prim_up_nonce}"
         pasted = clipboard_image(key=primary_clipboard_key)
 
         prim_upload_caption = st.text_input(
@@ -2228,6 +2230,10 @@ with image_col.container(border=True):
                 if staged_prim.get("source") == "upload":
                     st.session_state[discarded_prim_up_key] = staged_prim.get("source_hash")
                 st.session_state.pop(staged_prim_key, None)
+                st.session_state.pop(staged_prim_key, None)
+                st.session_state.pop(last_prim_paste_hash_key, None)
+                st.session_state.pop(last_prim_upload_hash_key, None)
+                st.session_state[prim_up_nonce_key] = prim_up_nonce + 1
                 st.session_state[f"_clear_prim_caption_{part['id']}"] = True
                 record_audit_event(
                     project_id,
@@ -2407,6 +2413,9 @@ with image_col.container(border=True):
         ):
             cur_staged = st.session_state.get(staged_prim_key)
             st.toast(f"Discarded staged primary image for {part['part_number']}", icon=":material/delete:")
+            st.session_state.pop(last_prim_paste_hash_key, None)
+            st.session_state.pop(last_prim_upload_hash_key, None)
+            st.session_state[prim_up_nonce_key] = int(st.session_state.get(prim_up_nonce_key, 0)) + 1
             if isinstance(cur_staged, dict) and cur_staged.get("source") == "upload":
                 st.session_state[discarded_prim_up_key] = cur_staged.get("source_hash")
             st.session_state.pop(staged_prim_key, None)
@@ -2477,6 +2486,9 @@ with image_col.container(border=True):
                 st.session_state[d_key] = cur_staged.get("source_hash")
             st.session_state.pop(s_key, None)
             st.toast(f"Discarded staged additional view for {part['part_number']}", icon=":material/delete:")
+            st.session_state.pop(f"last_supp_paste_hash_{part['id']}", None)
+            st.session_state.pop(f"last_supp_upload_hash_{part['id']}", None)
+            st.session_state[f"supp_up_nonce_{part['id']}"] = int(st.session_state.get(f"supp_up_nonce_{part['id']}", 0)) + 1
             st.session_state.pop(f"parts_pending_discard_staged_supp_{part['id']}", None)
             st.rerun()
 
@@ -2609,6 +2621,8 @@ with image_col.container(border=True):
 
         with supp_tab_upload_clip:
             staged_supp_upload_key = f"staged_supp_upload_{part['id']}"
+            supp_up_nonce_key = f"supp_up_nonce_{part['id']}"
+            supp_up_nonce = int(st.session_state.get(supp_up_nonce_key, 0))
             last_supp_paste_hash_key = f"last_supp_paste_hash_{part['id']}"
             last_supp_upload_hash_key = f"last_supp_upload_hash_{part['id']}"
             discarded_supp_up_key = f"_discarded_supp_up_{part['id']}"
@@ -2616,13 +2630,13 @@ with image_col.container(border=True):
             extra = st.file_uploader(
                 "Upload image file or 3D CAD STEP file",
                 type=["png", "jpg", "jpeg", "webp", "step", "stp"],
-                key=f"supp_file_{part['id']}",
+                key=f"supp_file_{part['id']}_{supp_up_nonce}",
                 help="Images: max 10 MB (PNG, JPG, WEBP) • 3D CAD: max 50 MB (STEP, STP)",
             )
             st.caption("Images: max **10 MB** (PNG, JPG, WEBP) • 3D CAD: max **50 MB** (STEP, STP)")
 
             st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-            supp_clipboard_key = f"clipboard_supp_{part['id']}"
+            supp_clipboard_key = f"clipboard_supp_{part['id']}_{supp_up_nonce}"
             supp_pasted = clipboard_image(key=supp_clipboard_key)
             supp_pasted_payload = getattr(supp_pasted, "image", None)
             if supp_pasted_payload:
@@ -2744,6 +2758,10 @@ with image_col.container(border=True):
                                 "source": "upload",
                                 "filename": extra.name,
                             }
+                        st.session_state.pop(staged_supp_upload_key, None)
+                        st.session_state.pop(last_supp_paste_hash_key, None)
+                        st.session_state.pop(last_supp_upload_hash_key, None)
+                        st.session_state[supp_up_nonce_key] = supp_up_nonce + 1
                         st.session_state[f"_clear_supp_caption_{part['id']}"] = True
                         record_audit_event(
                             project_id,

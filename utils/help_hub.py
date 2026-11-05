@@ -207,7 +207,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "**Link model variants (`Variant group`)**: Use the **Variant group** multiselect dropdown (populated with active part numbers from the Parts Catalog) to manually tie peer model-variant parts together. Manual links are symmetric/transitive across the variant family and merge with automatic center base-code matches.",
             "**Select rows for bulk actions or deletion**: Check the **Select** column (or click **Select all**) to apply bulk feature applicability changes or click **Delete selected (N)**.",
             "**Freeze / Pin columns**: Use the **Freeze left columns** selector above the Parts Catalog table to pin `Part number`, `Factory nickname`, or any other columns while scrolling horizontally.",
-            "**Attach & annotate photos**: Upload or paste (`Ctrl+V`) part photos and use **Annotate / Add Shapes** to draw editable vector arrows, boxes, and callouts.",
+            "**Attach & annotate photos**: Upload or paste (`Ctrl+V`) part photos and use **Annotate / Add Shapes** to draw editable vector arrows, boxes, and callout text boxes (with adjustable font sizes via the **Text** dropdown, **A−** / **A+** buttons, or corner drag handle).",
             "**Toggle Active in scenario**: Mark parts active or inactive for the active planning scenario without deleting them from other scenarios.",
         ],
         "connections": (
@@ -344,7 +344,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Create & update Ergonomics reviews**: Link reviews to Process steps, select ergonomic hazards, assign a reviewer and due date, and set the risk classification.",
-            "**Attach visual media**: Upload or paste posture photos and videos with annotated callouts.",
+            "**Attach visual media**: Upload or paste posture photos and videos with annotated callouts (including adjustable callout text font sizes via the **Text** dropdown, **A−** / **A+** buttons, or corner drag handle).",
             "**Edit or Acknowledge upstream Process changes**: When a linked Process step is edited upstream (pitch, operation text, time, height, or parts), review the `⚠️ Upstream Process changes to review` queue to either **Acknowledge selected** directly or **Edit** the review and click **Save & Refresh** to clear the flag automatically.",
         ],
         "connections": (

@@ -1856,8 +1856,8 @@ def annotate_visual_media_dialog(
     st.markdown(f"#### Annotate Visual Aid: {caption or 'Visual Aid'}")
     st.caption(
         "Crop, rotate in 90° increments, insert overlay photos from the **Parts Catalog** (`📦 Part Photo`) or **Clipboard** (`📋 Paste Photo` / `Ctrl+V`), "
-        "or add directional arrows, callout text boxes, focus boxes/circles, step number badges (1, 2, 3), and freehand pen markup. "
-        "Click **💾 Apply & Save Markup** when finished."
+        "or add directional arrows, callout text boxes (adjust font size with **Text** / **A−** / **A+** or drag the callout corner), focus boxes/circles, "
+        "step number badges (1, 2, 3), and freehand pen markup. Click **💾 Apply & Save Markup** when finished."
     )
 
     source_path = None
@@ -1988,6 +1988,9 @@ def discard_staged_media_dialog(pitch_id: str) -> None:
         on_click=lambda: st.toast("Discarded staged visual aid", icon=":material/delete:"),
     ):
         st.session_state.pop(f"staged_media_{pitch_id}", None)
+        st.session_state.pop(f"last_paste_hash_{pitch_id}", None)
+        st.session_state.pop(f"last_upload_hash_{pitch_id}", None)
+        st.session_state[f"vis_up_nonce_{pitch_id}"] = int(st.session_state.get(f"vis_up_nonce_{pitch_id}", 0)) + 1
         st.rerun()
 
 
@@ -6246,22 +6249,26 @@ elif tab_slides.open:
                     with st.container(border=True):
                         vis_tab_file, vis_tab_link, vis_tab_parts = st.tabs(["Upload / Clipboard", "Web Link / URL", "Parts Catalog"])
                         with vis_tab_file:
+                            vis_up_nonce_key = f"vis_up_nonce_{selected_pitch_id}"
+                            vis_up_nonce = int(st.session_state.get(vis_up_nonce_key, 0))
+                            last_paste_hash_key = f"last_paste_hash_{selected_pitch_id}"
+                            last_upload_hash_key = f"last_upload_hash_{selected_pitch_id}"
                             up_col1, up_col2 = st.columns([1.5, 1])
                             with up_col1:
                                 uploaded_media = st.file_uploader(
                                     "Upload photo, video, or 3D CAD STEP",
                                     type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm", "step", "stp"],
-                                    key=f"file_upload_visual_{selected_pitch_id}",
+                                    key=f"file_upload_visual_{selected_pitch_id}_{vis_up_nonce}",
                                     help="Photos: max 10 MB (PNG, JPG, WEBP) • Videos: max 25 MB (MP4, MOV, WEBM) • 3D CAD: max 50 MB (STEP, STP)",
                                 )
                                 st.caption("Photos: max **10 MB** • Videos: max **25 MB** • 3D CAD: max **50 MB** (STEP, STP)")
 
                                 st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-                                pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
+                                pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}_{vis_up_nonce}")
 
                                 aid_caption = st.text_input(
                                     "Caption / Yellow Callout Note",
-                                    key=f"input_caption_visual_{selected_pitch_id}",
+                                    key=f"input_caption_visual_{selected_pitch_id}_{vis_up_nonce}",
                                     placeholder="e.g. Ensure bracket is flush against locator pin before torquing",
                                 )
                             with up_col2:
@@ -6269,7 +6276,7 @@ elif tab_slides.open:
                                     "Tag to Work Elements",
                                     options=list(tag_dict_elem.keys()),
                                     format_func=lambda tid: tag_dict_elem.get(tid, tid),
-                                    key=f"select_tags_visual_{selected_pitch_id}",
+                                    key=f"select_tags_visual_{selected_pitch_id}_{vis_up_nonce}",
                                     help="Tags link this visual aid to specific PAAG work elements on this pitch.",
                                 )
                                 aid_sequence = st.number_input(
@@ -6277,7 +6284,7 @@ elif tab_slides.open:
                                     min_value=1,
                                     value=10,
                                     step=5,
-                                    key=f"input_seq_visual_{selected_pitch_id}",
+                                    key=f"input_seq_visual_{selected_pitch_id}_{vis_up_nonce}",
                                 )
 
                             # Manage staged image if user uploads an image or pastes from clipboard
@@ -6291,7 +6298,8 @@ elif tab_slides.open:
                                     primary_image = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
                                     clip_bytes = primary_image["bytes"]
                                     clip_hash = hashlib.sha256(clip_bytes).hexdigest()
-                                    if not current_staged or current_staged.get("hash") != clip_hash:
+                                    if st.session_state.get(last_paste_hash_key) != clip_hash:
+                                        st.session_state[last_paste_hash_key] = clip_hash
                                         st.session_state[staged_key] = {
                                             "source": "clipboard",
                                             "hash": clip_hash,
@@ -6311,7 +6319,8 @@ elif tab_slides.open:
                                 if up_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
                                     up_bytes = uploaded_media.getvalue()
                                     up_hash = hashlib.sha256(up_bytes).hexdigest()
-                                    if not current_staged or current_staged.get("hash") != up_hash:
+                                    if st.session_state.get(last_upload_hash_key) != up_hash or not isinstance(current_staged, dict):
+                                        st.session_state[last_upload_hash_key] = up_hash
                                         up_mime = "image/png" if up_suffix == ".png" else "image/webp" if up_suffix == ".webp" else "image/jpeg"
                                         st.session_state[staged_key] = {
                                             "source": "upload",
@@ -6326,6 +6335,11 @@ elif tab_slides.open:
                                 elif up_suffix in {".step", ".stp"}:
                                     size_mb = len(uploaded_media.getvalue()) / (1024 * 1024)
                                     st.info(f":material/view_in_ar: **3D CAD Model Ready:** `{uploaded_media.name}` ({size_mb:.1f} MB)")
+                            else:
+                                st.session_state.pop(last_upload_hash_key, None)
+                                if isinstance(current_staged, dict) and current_staged.get("source") == "upload":
+                                    st.session_state.pop(staged_key, None)
+                                    current_staged = None
 
                             # Show preview card if an image is staged
                             if current_staged and current_staged.get("composite_bytes"):
@@ -6381,6 +6395,10 @@ elif tab_slides.open:
                                             },
                                         )
                                         st.session_state.pop(staged_key, None)
+                                        st.session_state.pop(staged_key, None)
+                                        st.session_state.pop(last_paste_hash_key, None)
+                                        st.session_state.pop(last_upload_hash_key, None)
+                                        st.session_state[vis_up_nonce_key] = vis_up_nonce + 1
                                         st.toast("Visual aid saved!", icon=":material/check_circle:")
                                         st.rerun()
                                     except Exception as exc:
@@ -6411,6 +6429,10 @@ elif tab_slides.open:
                                                 "caption": aid_caption,
                                             },
                                         )
+                                        st.session_state.pop(staged_key, None)
+                                        st.session_state.pop(last_paste_hash_key, None)
+                                        st.session_state.pop(last_upload_hash_key, None)
+                                        st.session_state[vis_up_nonce_key] = vis_up_nonce + 1
                                         st.toast("Visual aid saved!", icon=":material/check_circle:")
                                         st.rerun()
                                     except Exception as exc:
@@ -6419,17 +6441,19 @@ elif tab_slides.open:
                                     st.error("Please choose an image or video file to upload, or paste a screenshot using the button above.")
 
                         with vis_tab_link:
+                            vis_link_nonce_key = f"vis_link_nonce_{selected_pitch_id}"
+                            vis_link_nonce = int(st.session_state.get(vis_link_nonce_key, 0))
                             link_col1, link_col2 = st.columns([1.5, 1])
                             with link_col1:
                                 link_url_val = st.text_input(
                                     "Web Link URL",
                                     placeholder="https://sharepoint... or https://windchill... or web drawing/video URL",
-                                    key=f"input_url_visual_{selected_pitch_id}",
+                                    key=f"input_url_visual_{selected_pitch_id}_{vis_link_nonce}",
                                     help="Attach a web link to a SharePoint document, CAD drawing, online SOP, or web media.",
                                 )
                                 link_caption_val = st.text_input(
                                     "Caption / Yellow Callout Note",
-                                    key=f"input_link_cap_visual_{selected_pitch_id}",
+                                    key=f"input_link_cap_visual_{selected_pitch_id}_{vis_link_nonce}",
                                     placeholder="e.g. Workstation Standard Operating Procedure",
                                 )
                             with link_col2:
@@ -6437,7 +6461,7 @@ elif tab_slides.open:
                                     "Tag to Work Elements",
                                     options=list(tag_dict_elem.keys()),
                                     format_func=lambda tid: tag_dict_elem.get(tid, tid),
-                                    key=f"select_link_tags_{selected_pitch_id}",
+                                    key=f"select_link_tags_{selected_pitch_id}_{vis_link_nonce}",
                                     help="Tags link this web visual aid to specific PAAG work elements on this pitch.",
                                 )
                                 link_seq_val = st.number_input(
@@ -6445,7 +6469,7 @@ elif tab_slides.open:
                                     min_value=1,
                                     value=10,
                                     step=5,
-                                    key=f"input_link_seq_{selected_pitch_id}",
+                                    key=f"input_link_seq_{selected_pitch_id}_{vis_link_nonce}",
                                 )
                             if st.button("Add Web Link Visual Aid", icon=":material/link:", type="primary", key=f"btn_add_link_visual_{selected_pitch_id}"):
                                 clean_link_url = str(link_url_val or "").strip()
@@ -6475,6 +6499,7 @@ elif tab_slides.open:
                                                 "caption": link_caption_val,
                                             },
                                         )
+                                        st.session_state[vis_link_nonce_key] = vis_link_nonce + 1
                                         st.toast("Web link visual aid saved!", icon=":material/check_circle:")
                                         st.rerun()
                                     except Exception as exc:
