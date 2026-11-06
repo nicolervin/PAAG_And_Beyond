@@ -30,6 +30,7 @@ from utils.cache_store import (
     cached_store_read,
     is_scenario_task_completed,
     mark_scenario_task_completed,
+    record_write_attribution,
 )
 
 from utils.quality_store import (
@@ -1895,6 +1896,7 @@ def _sync_linked_process_work_elements(
 
 
 _THREAD_LOCAL = _threading.local()
+_DB_CONN_LOCK = _threading.RLock()
 _INITIALIZED_DB_SIGNATURES: set[tuple[str, int, bool]] = set()
 _WAL_CONFIGURED_DB_SIGNATURES: set[tuple[str, int]] = set()
 
@@ -1913,30 +1915,37 @@ def _db_file_identity(path: Path) -> tuple[str, int, bool]:
 
 @contextmanager
 def connection():
-    conn = get_db_connection()
-    changes_before = conn.total_changes
-    modified_tables: set[str] = set()
+    with _DB_CONN_LOCK:
+        conn = get_db_connection()
+        changes_before = conn.total_changes
+        modified_tables: set[str] = set()
 
-    def _write_authorizer(action: int, arg1: str | None, arg2: str | None, dbname: str | None, source: str | None) -> int:
-        # SQLITE_INSERT = 18, SQLITE_UPDATE = 23, SQLITE_DELETE = 9
-        if action in (9, 18, 23) and arg1:
-            modified_tables.add(arg1)
-        return 0  # SQLITE_OK
+        def _write_authorizer(action: int, arg1: str | None, arg2: str | None, dbname: str | None, source: str | None) -> int:
+            # SQLITE_INSERT = 18, SQLITE_UPDATE = 23, SQLITE_DELETE = 9
+            if action in (9, 18, 23) and arg1:
+                modified_tables.add(arg1)
+            return 0  # SQLITE_OK
 
-    try:
-        conn.set_authorizer(_write_authorizer)
-    except Exception:
-        pass
-    try:
-        yield conn
-        had_writes = bool(conn.total_changes > changes_before)
-        conn.commit()
-        if had_writes:
-            bump_write_epoch(modified_tables=modified_tables)
-            if is_cacheable_runtime():
-                schedule_gcs_sync(Path(DB_PATH), Path(UPLOAD_DIR))
-    finally:
-        conn.close()
+        try:
+            conn.set_authorizer(_write_authorizer)
+        except Exception:
+            pass
+        try:
+            yield conn
+            had_writes = bool(conn.total_changes > changes_before)
+            conn.commit()
+            if had_writes:
+                new_epoch = bump_write_epoch(modified_tables=modified_tables)
+                st_mod = _sys.modules.get("streamlit")
+                if st_mod is not None and hasattr(st_mod, "session_state"):
+                    try:
+                        st_mod.session_state["_rendered_write_epoch"] = new_epoch
+                    except Exception:
+                        pass
+                if is_cacheable_runtime():
+                    schedule_gcs_sync(Path(DB_PATH), Path(UPLOAD_DIR))
+        finally:
+            conn.close()
 
 
 def ensure_db_initialized() -> None:
@@ -4039,6 +4048,21 @@ def record_audit_event(
     editor = str(editor_name or "").strip()
     base_details = dict(details) if isinstance(details, dict) else {}
     timestamp = now_iso()
+    collab_sid = ""
+    st_mod = _sys.modules.get("streamlit")
+    if st_mod is not None and hasattr(st_mod, "session_state"):
+        try:
+            collab_sid = str(st_mod.session_state.get("_collab_session_id") or "")
+        except Exception:
+            collab_sid = ""
+    record_write_attribution(
+        project_id=project_id,
+        table_name=table_name,
+        action=action,
+        editor_name=editor,
+        timestamp=timestamp,
+        session_id=collab_sid,
+    )
 
     def _insert_one(entry_row_count: int, entry_details: dict, entry_ts: str) -> None:
         params = (
@@ -4284,7 +4308,11 @@ def register_domain_module(module: _types.ModuleType, exports: list[str]) -> Non
             and export_name in baseline
             and facade.__dict__[export_name] is not baseline[export_name]
         )
-        if callable(val) and not is_monkeypatched:
+        if (
+            callable(val)
+            and not is_monkeypatched
+            and getattr(val, "__module__", None) == module.__name__
+        ):
             _REGISTERED_ENTRYPOINT_FUNCTIONS[(module.__name__, export_name)] = val
     setattr(module, "_DOMAIN_REGISTERED_V2", True)
     bump_runtime_revision()
@@ -4300,7 +4328,7 @@ def store_runtime_symbols() -> dict[str, object]:
             "_DOMAIN_MODULES", "_DOMAIN_EXPORTS", "_REGISTERED_ENTRYPOINT_FUNCTIONS",
             "_functools", "_importlib",
             "_sys", "_types", "_RUNTIME_REVISION", "_SYNCED_REVISION",
-            "_STORE_MODULE", "_THREAD_LOCAL", "_INITIALIZED_DB_SIGNATURES",
+            "_STORE_MODULE", "_THREAD_LOCAL", "_DB_CONN_LOCK", "_INITIALIZED_DB_SIGNATURES",
             "_WAL_CONFIGURED_DB_SIGNATURES", "_DEFAULT_CONNECTION",
             "_DEFAULT_QUERY", "_DEFAULT_EXECUTE", "_DEFAULT_GET_DB_CONNECTION",
         }

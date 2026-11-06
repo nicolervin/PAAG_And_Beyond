@@ -11,6 +11,7 @@ from typing import Iterable, NoReturn, Sequence
 import pandas as pd
 import streamlit as st
 
+from utils.cache_store import get_last_write_metadata, get_write_epoch
 from utils.table_filters import (
     can_redo_last_table_edit,
     can_undo_last_table_edit,
@@ -886,9 +887,6 @@ def standard_details_column_config(
     )
 
 
-_TABLE_UI_REV_20261102 = 3
-
-
 def selected_rows_action_bar(
     *,
     parent=None,
@@ -951,7 +949,45 @@ def _source_item_has_unsaved(item: dict) -> bool:
 def has_active_unsaved_changes() -> bool:
     """Return True if any active editor or draft on the current view has unsaved changes."""
     sources = st.session_state.get(_UNSAVED_SOURCES_KEY) or []
-    return any(_source_item_has_unsaved(item) for item in sources)
+    if any(_source_item_has_unsaved(item) for item in sources):
+        return True
+    for s_key in list(st.session_state.keys()):
+        key_str = str(s_key)
+        if key_str.startswith("yamazumi_board_draft_"):
+            val = st.session_state.get(s_key)
+            if isinstance(val, dict) and bool(val):
+                return True
+        elif key_str.startswith("fishbone_canvas_draft_"):
+            val = st.session_state.get(s_key)
+            if isinstance(val, dict) and any(
+                bool(val.get(k))
+                for k in (
+                    "positions",
+                    "connections",
+                    "deleted_connections",
+                    "connection_nodes",
+                    "new_assignments",
+                    "updated_assignments",
+                    "deleted_assignments",
+                    "variant_links",
+                )
+            ):
+                return True
+        elif (
+            key_str.startswith("yamazumi_edit_element_target_")
+            or key_str.startswith("yamazumi_edit_pitch_target_")
+            or key_str.startswith("process_edit_line_dialog_")
+            or key_str.startswith("_draft_modified_")
+            or key_str.startswith("layout_shapes_has_unsaved_")
+            or key_str.startswith("_pending_save_conflict_")
+            or key_str.startswith("_inline_conflict_")
+            or key_str.startswith("edit_element_conflict_")
+            or key_str.startswith("ergo_annotate_active_")
+            or key_str.startswith("_annotator_open_")
+        ):
+            if st.session_state.get(s_key):
+                return True
+    return False
 
 
 def has_active_table_selections_or_edits() -> bool:
@@ -1063,6 +1099,493 @@ def register_unsaved_source(
     return trigger_save, trigger_discard
 
 
+_CONFLICT_IGNORED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "id",
+        DEFAULT_SELECTION_COLUMN,
+        "view_details",
+        "created_at",
+        "updated_at",
+        "created_display",
+        "updated_display",
+        "photo_status",
+        "applicability_status",
+    }
+)
+
+_CONFLICT_ROW_LABEL_COLUMNS: tuple[str, ...] = (
+    "part_number",
+    "Part #",
+    "model_number",
+    "Model #",
+    "unique_identifier",
+    "code",
+    "name",
+    "feature_name",
+    "option_name",
+    "pitch_number",
+    "station_number",
+    "operation_number",
+    "work_element",
+    "step_description",
+    "element_description",
+    "requirement_type",
+    "equipment_name",
+    "type_name",
+    "subject",
+    "detail",
+    "label",
+    "description",
+)
+
+
+def _conflict_cell_values_equal(left: object, right: object) -> bool:
+    if isinstance(left, (list, tuple, set)) and isinstance(right, (list, tuple, set)):
+        left_norm = [str(x).strip() for x in left if str(x).strip()]
+        right_norm = [str(x).strip() for x in right if str(x).strip()]
+        return left_norm == right_norm
+    return _audit_cell_values_equal(left, right)
+
+
+def _format_conflict_cell_value(val: object) -> str:
+    if val is None:
+        return "(blank)"
+    if isinstance(val, bool):
+        return "Checked" if val else "Unchecked"
+    if isinstance(val, (list, tuple, set)):
+        cleaned = [str(x).strip() for x in val if str(x).strip()]
+        return ", ".join(cleaned) if cleaned else "(blank)"
+    try:
+        if pd.isna(val):
+            return "(blank)"
+    except Exception:
+        pass
+    if isinstance(val, (int, float)):
+        formatted = format_clean_number(val)
+        return formatted if formatted else "(blank)"
+    text = str(val).strip()
+    return text if text else "(blank)"
+
+
+def _extract_conflict_row_label(
+    row: pd.Series,
+    pos: int | None,
+    row_labels: dict[int, str] | None,
+) -> str:
+    if isinstance(row_labels, dict) and pos is not None and pos in row_labels:
+        lbl = str(row_labels[pos] or "").strip()
+        if lbl and not lbl.startswith("Row "):
+            return lbl
+    for col in _CONFLICT_ROW_LABEL_COLUMNS:
+        if col not in row.index:
+            continue
+        val = row.get(col)
+        try:
+            if val is None or pd.isna(val):
+                continue
+        except Exception:
+            if val is None:
+                continue
+        text = str(val).strip()
+        if text:
+            return text[:48] + ("..." if len(text) > 48 else "")
+    if pos is not None:
+        return f"Row {pos + 1}"
+    return "Edited row"
+
+
+def detect_table_cell_conflicts(editor_key: str) -> list[dict[str, str]]:
+    """Detect cells edited by the current user that were also modified and saved in the DB since editing began."""
+    logical_key = logical_table_editor_key(editor_key)
+    base_df = st.session_state.get(f"_table_clean_base_df_{logical_key}")
+    live_df = st.session_state.get(f"_table_live_df_{logical_key}")
+    if (
+        not isinstance(base_df, pd.DataFrame)
+        or not isinstance(live_df, pd.DataFrame)
+        or base_df.empty
+    ):
+        return []
+
+    display_df = st.session_state.get(f"_table_display_df_{logical_key}")
+    id_draft = st.session_state.get(f"_table_id_draft_{logical_key}") or {}
+    state = get_effective_table_editor_state(editor_key)
+    meta = st.session_state.get(f"_table_undo_meta_{logical_key}")
+    col_labels: dict[str, str] = (
+        meta.get("col_labels", {}) if isinstance(meta, dict) else {}
+    )
+    row_labels: dict[int, str] = (
+        meta.get("row_labels", {}) if isinstance(meta, dict) else {}
+    )
+
+    has_id_col = "id" in base_df.columns and "id" in live_df.columns
+    base_by_id: dict[str, pd.Series] = {}
+    live_by_id: dict[str, pd.Series] = {}
+    if has_id_col:
+        for _, b_row in base_df.iterrows():
+            bid = b_row.get("id")
+            if bid is not None and not pd.isna(bid) and str(bid).strip():
+                base_by_id[str(bid).strip()] = b_row
+        for _, l_row in live_df.iterrows():
+            lid = l_row.get("id")
+            if lid is not None and not pd.isna(lid) and str(lid).strip():
+                live_by_id[str(lid).strip()] = l_row
+
+    edits_by_row_key: dict[tuple[str, int | None], dict[str, object]] = {}
+    pos_for_row_key: dict[tuple[str, int | None], int] = {}
+
+    if isinstance(id_draft, dict):
+        for raw_rid, chg_map in id_draft.items():
+            rid_str = str(raw_rid or "").strip()
+            if not rid_str or rid_str.startswith("__draft_new__") or not isinstance(chg_map, dict):
+                continue
+            r_key = (rid_str, None)
+            for col_name, col_val in chg_map.items():
+                if str(col_name) not in _CONFLICT_IGNORED_COLUMNS:
+                    edits_by_row_key.setdefault(r_key, {})[str(col_name)] = col_val
+
+    for raw_pos, chg_map in (state.get("edited_rows") or {}).items():
+        if not isinstance(chg_map, dict):
+            continue
+        try:
+            pos = int(raw_pos)
+        except (TypeError, ValueError):
+            continue
+        rid_str = ""
+        if (
+            has_id_col
+            and isinstance(display_df, pd.DataFrame)
+            and "id" in display_df.columns
+            and 0 <= pos < len(display_df)
+        ):
+            raw_id = display_df.iloc[pos].get("id")
+            if raw_id is not None and not pd.isna(raw_id):
+                rid_str = str(raw_id).strip()
+        elif has_id_col and 0 <= pos < len(base_df):
+            raw_id = base_df.iloc[pos].get("id")
+            if raw_id is not None and not pd.isna(raw_id):
+                rid_str = str(raw_id).strip()
+        if rid_str.startswith("__draft_new__"):
+            continue
+        r_key = (rid_str, None) if rid_str else ("", pos)
+        pos_for_row_key[r_key] = pos
+        for col_name, col_val in chg_map.items():
+            if str(col_name) not in _CONFLICT_IGNORED_COLUMNS:
+                edits_by_row_key.setdefault(r_key, {})[str(col_name)] = col_val
+
+    conflicts: list[dict[str, str]] = []
+    for r_key, col_changes in edits_by_row_key.items():
+        rid_str, pos_fallback = r_key
+        pos_hint = pos_for_row_key.get(r_key, pos_fallback)
+        base_row: pd.Series | None = None
+        live_row: pd.Series | None = None
+        if rid_str and has_id_col:
+            base_row = base_by_id.get(rid_str)
+            live_row = live_by_id.get(rid_str)
+        elif pos_fallback is not None:
+            if 0 <= pos_fallback < len(base_df):
+                base_row = base_df.iloc[pos_fallback]
+            if 0 <= pos_fallback < len(live_df):
+                live_row = live_df.iloc[pos_fallback]
+
+        if base_row is None:
+            continue
+
+        row_label = _extract_conflict_row_label(base_row, pos_hint, row_labels)
+        for col_name, user_val in col_changes.items():
+            if col_name not in base_row.index:
+                continue
+            base_val = base_row[col_name]
+            if _conflict_cell_values_equal(user_val, base_val):
+                continue
+            col_label = (
+                col_labels.get(col_name)
+                or col_name.replace("_", " ").strip().title()
+            )
+            if live_row is None:
+                conflicts.append(
+                    {
+                        "row_label": row_label,
+                        "column": col_name,
+                        "column_label": col_label,
+                        "base_value": _format_conflict_cell_value(base_val),
+                        "saved_value": "(Row deleted)",
+                        "your_value": _format_conflict_cell_value(user_val),
+                    }
+                )
+            elif col_name in live_row.index:
+                live_val = live_row[col_name]
+                if not _conflict_cell_values_equal(live_val, base_val):
+                    conflicts.append(
+                        {
+                            "row_label": row_label,
+                            "column": col_name,
+                            "column_label": col_label,
+                            "base_value": _format_conflict_cell_value(base_val),
+                            "saved_value": _format_conflict_cell_value(live_val),
+                            "your_value": _format_conflict_cell_value(user_val),
+                        }
+                    )
+    return conflicts
+
+
+@st.dialog("Save Conflict Detected", width="large", dismissible=False)
+def _save_conflict_dialog(logical_key: str, conflict_payload: dict[str, object]) -> None:
+    conflicts = list(conflict_payload.get("conflicts") or [])
+    who = str(conflict_payload.get("editor_name") or "another collaborator").strip()
+    cell_count = len(conflicts)
+    st.warning(
+        f"**{who}** already saved changes to **{cell_count} cell(s)** that you also edited. "
+        "Choose whether to overwrite their saved values with your changes, discard your changes, or return to the table to review.",
+        icon=":material/sync_problem:",
+    )
+    if conflicts:
+        conflict_df = pd.DataFrame(
+            [
+                {
+                    "Row": str(item.get("row_label") or item.get("Row") or ""),
+                    "Column": str(
+                        item.get("column_label")
+                        or item.get("field")
+                        or item.get("Field")
+                        or ""
+                    ),
+                    "Original value": str(
+                        item.get("base_value") or item.get("Original Value") or ""
+                    ),
+                    f"Saved by {who}": str(
+                        item.get("saved_value")
+                        or item.get("Saved by Collaborator")
+                        or ""
+                    ),
+                    "Your unsaved edit": str(
+                        item.get("your_value") or item.get("Your Unsaved Edit") or ""
+                    ),
+                }
+                for item in conflicts
+            ]
+        )
+        st.dataframe(conflict_df, hide_index=True, width="stretch")
+
+    action_bar = st.container(
+        horizontal=True,
+        vertical_alignment="center",
+        horizontal_alignment="right",
+    )
+    if action_bar.button(
+        "Overwrite with my changes",
+        type="primary",
+        icon=":material/save:",
+        key=f"conflict_overwrite_{logical_key}",
+    ):
+        st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+        st.session_state[f"_confirm_save_conflict_overwrite_{logical_key}"] = True
+        st.rerun()
+    if action_bar.button(
+        "Discard my changes",
+        icon=":material/delete:",
+        key=f"destructive_conflict_discard_{logical_key}",
+    ):
+        st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+        st.session_state.pop(f"_conflict_saved_payload_{logical_key}", None)
+        st.session_state[f"_confirm_save_conflict_discard_{logical_key}"] = True
+        st.rerun()
+    if action_bar.button(
+        "Return to review",
+        icon=":material/arrow_back:",
+        key=f"conflict_return_{logical_key}",
+    ):
+        st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+        st.session_state.pop(f"_conflict_saved_payload_{logical_key}", None)
+        st.rerun()
+
+
+def compare_record_field_conflicts(
+    baseline: dict[str, object],
+    live: dict[str, object],
+    user_values: dict[str, object],
+    field_labels: dict[str, str],
+    *,
+    row_label: str = "",
+    formatters: dict[str, object] | None = None,
+) -> tuple[dict[str, object], list[dict[str, str]]]:
+    """Compare baseline, live DB, and user-submitted fields, returning (merged_values, conflicts).
+
+    Fields that the user did not change relative to ``baseline`` automatically adopt the
+    current ``live`` value so non-overlapping concurrent edits are preserved.
+    """
+    conflicts: list[dict[str, str]] = []
+    merged: dict[str, object] = dict(user_values)
+    fmt_map = formatters or {}
+    for col_name, col_label in field_labels.items():
+        base_val = baseline.get(col_name)
+        live_val = live.get(col_name)
+        user_val = user_values.get(col_name)
+        if _conflict_cell_values_equal(user_val, base_val):
+            if col_name in live:
+                merged[col_name] = live_val
+            continue
+        if not _conflict_cell_values_equal(live_val, base_val) and not _conflict_cell_values_equal(
+            user_val, live_val
+        ):
+            fmt_fn = fmt_map.get(col_name)
+            if callable(fmt_fn):
+                b_str = str(fmt_fn(base_val))
+                l_str = str(fmt_fn(live_val))
+                u_str = str(fmt_fn(user_val))
+            else:
+                b_str = _format_conflict_cell_value(base_val)
+                l_str = _format_conflict_cell_value(live_val)
+                u_str = _format_conflict_cell_value(user_val)
+            r_lbl = row_label or "Current record"
+            conflicts.append(
+                {
+                    "row_label": r_lbl,
+                    "field": col_label,
+                    "column": col_name,
+                    "column_label": col_label,
+                    "base_value": b_str,
+                    "saved_value": l_str,
+                    "your_value": u_str,
+                    "Row": r_lbl,
+                    "Field": col_label,
+                    "Original Value": b_str,
+                    "Saved by Collaborator": l_str,
+                    "Your Unsaved Edit": u_str,
+                }
+            )
+    return merged, conflicts
+
+
+def render_inline_conflict_resolution(
+    conflict_key: str,
+) -> str | None:
+    """Render an inline conflict resolution banner and table inside an already-open modal dialog.
+
+    Returns ``"overwrite"``, ``"discard"``, or ``None``.
+    """
+    state_key = f"_inline_conflict_{conflict_key}"
+    raw = st.session_state.get(state_key)
+    if raw is None and conflict_key in st.session_state:
+        state_key = conflict_key
+        raw = st.session_state.get(conflict_key)
+    if isinstance(raw, dict):
+        conflicts = list(raw.get("conflicts") or [])
+        who = str(
+            raw.get("editor_name")
+            or get_last_write_metadata().get("editor_name")
+            or "another collaborator"
+        ).strip()
+    elif isinstance(raw, list):
+        conflicts = list(raw)
+        who = str(
+            get_last_write_metadata().get("editor_name") or "another collaborator"
+        ).strip()
+    else:
+        return None
+    if not conflicts:
+        return None
+    st.warning(
+        f"**{who}** already saved changes to **{len(conflicts)} field(s)** that you also edited. "
+        "Choose whether to overwrite their saved values with your changes or discard your edits.",
+        icon=":material/sync_problem:",
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Field": str(
+                        item.get("column_label")
+                        or item.get("field")
+                        or item.get("Field")
+                        or ""
+                    ),
+                    "Original value": str(
+                        item.get("base_value") or item.get("Original Value") or ""
+                    ),
+                    f"Saved by {who}": str(
+                        item.get("saved_value")
+                        or item.get("Saved by Collaborator")
+                        or ""
+                    ),
+                    "Your unsaved edit": str(
+                        item.get("your_value") or item.get("Your Unsaved Edit") or ""
+                    ),
+                }
+                for item in conflicts
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    c_bar = st.container(horizontal=True, horizontal_alignment="right")
+    overwrite_clicked = c_bar.button(
+        "Overwrite with my changes",
+        type="primary",
+        icon=":material/save:",
+        key=f"inline_conflict_overwrite_{conflict_key}",
+    )
+    discard_clicked = c_bar.button(
+        "Discard my changes",
+        icon=":material/delete:",
+        key=f"destructive_inline_conflict_discard_{conflict_key}",
+    )
+    if overwrite_clicked:
+        st.session_state.pop(state_key, None)
+        return "overwrite"
+    if discard_clicked:
+        st.session_state.pop(state_key, None)
+        return "discard"
+    return None
+
+
+def trigger_standalone_conflict_dialog(
+    logical_key: str,
+    conflicts: list[dict[str, str]],
+    *,
+    payload: object = None,
+) -> None:
+    """Queue a Save Conflict Detected modal for a non-editable_table_footer save action."""
+    meta = get_last_write_metadata()
+    who = str(meta.get("editor_name") or "another collaborator").strip()
+    st.session_state[f"_pending_save_conflict_{logical_key}"] = {
+        "conflicts": conflicts,
+        "editor_name": who,
+        "key_prefix": logical_key,
+    }
+    if payload is not None:
+        st.session_state[f"_conflict_saved_payload_{logical_key}"] = payload
+
+
+def check_standalone_conflict_resolution(
+    logical_key: str,
+) -> tuple[bool | str | None, object]:
+    """Return (resolution, saved_payload) where resolution is True (overwrite), 'discard', or None."""
+    confirmed_overwrite = bool(
+        st.session_state.pop(f"_confirm_save_conflict_overwrite_{logical_key}", False)
+        or st.session_state.pop(f"_conflict_confirmed_save_{logical_key}", False)
+    )
+    confirmed_discard = bool(
+        st.session_state.pop(f"_confirm_save_conflict_discard_{logical_key}", False)
+    )
+    saved_payload = None
+    if confirmed_overwrite or confirmed_discard:
+        saved_payload = st.session_state.pop(
+            f"_conflict_saved_payload_{logical_key}", None
+        )
+    if confirmed_overwrite:
+        return True, saved_payload
+    if confirmed_discard:
+        return "discard", saved_payload
+    return None, None
+
+
+def render_standalone_conflict_dialog(logical_key: str) -> None:
+    """Render the Save Conflict Detected modal if one is pending for ``logical_key``."""
+    pending_conflict = st.session_state.get(f"_pending_save_conflict_{logical_key}")
+    if isinstance(pending_conflict, dict) and pending_conflict.get("conflicts"):
+        _save_conflict_dialog(logical_key, pending_conflict)
+
+
 def editable_table_footer(
     *,
     editor_key: str,
@@ -1091,6 +1614,13 @@ def editable_table_footer(
     additional_action_help: str | None = None,
 ) -> TableHeaderActions:
     """Render the standard warning and actions below an editable table."""
+    logical_key = logical_table_editor_key(editor_key)
+    confirmed_overwrite = bool(
+        st.session_state.pop(f"_confirm_save_conflict_overwrite_{logical_key}", False)
+    )
+    confirmed_discard = bool(
+        st.session_state.pop(f"_confirm_save_conflict_discard_{logical_key}", False)
+    )
     unsaved = (
         table_has_unsaved_changes(
             editor_key, native_row_selection=native_row_selection
@@ -1108,7 +1638,23 @@ def editable_table_footer(
         vertical_alignment="center",
         horizontal_alignment="right",
     )
-    if unsaved:
+    base_epoch_key = f"_table_base_epoch_{logical_key}"
+    current_epoch = get_write_epoch()
+    if not unsaved:
+        st.session_state[base_epoch_key] = current_epoch
+        st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+    else:
+        base_epoch = int(st.session_state.get(base_epoch_key, current_epoch) or current_epoch)
+        st.html('<span data-paag-unsaved="true" style="display:none;"></span>')
+        if current_epoch > base_epoch:
+            meta = get_last_write_metadata()
+            active_pid = str(st.session_state.get("project_id") or "").strip()
+            meta_pid = str(meta.get("project_id") or "").strip()
+            if not active_pid or not meta_pid or active_pid == meta_pid:
+                who = str(meta.get("editor_name") or "another collaborator").strip()
+                footer.markdown(
+                    f":red[:material/sync_problem: **New changes saved by {who}**]"
+                )
         footer.markdown(":orange[:material/warning: **Unsaved changes**]")
     if show_select_all_controls:
         render_select_all_control(
@@ -1206,9 +1752,34 @@ def editable_table_footer(
         icon=":material/save:",
         key=f"{key_prefix}_save_refresh",
     )
+    wants_save = bool(save_and_refresh or trigger_save or confirmed_overwrite)
+    wants_discard = bool(undo or trigger_discard or confirmed_discard)
+    if wants_discard:
+        st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
+    elif wants_save and not confirmed_overwrite:
+        conflicts = detect_table_cell_conflicts(editor_key)
+        if conflicts:
+            meta = get_last_write_metadata()
+            who = str(meta.get("editor_name") or "another collaborator").strip()
+            st.session_state[f"_pending_save_conflict_{logical_key}"] = {
+                "conflicts": conflicts,
+                "editor_name": who,
+                "key_prefix": key_prefix,
+            }
+            wants_save = False
+            if trigger_save:
+                st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
+                st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
+                st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
+                st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+
+    pending_conflict = st.session_state.get(f"_pending_save_conflict_{logical_key}")
+    if isinstance(pending_conflict, dict) and pending_conflict.get("conflicts"):
+        _save_conflict_dialog(logical_key, pending_conflict)
+
     return TableHeaderActions(
-        save_and_refresh=bool(save_and_refresh or trigger_save),
-        undo=bool(undo or trigger_discard),
+        save_and_refresh=wants_save,
+        undo=wants_discard,
         additional_action=additional_action,
         secondary_action=secondary_action,
         delete_action=delete_action,
@@ -1366,7 +1937,11 @@ def guarded_tabs(
 
 def _has_blocking_save_dialog_state() -> bool:
     for state_key, state_val in st.session_state.items():
-        if str(state_key).startswith("_pending_group_conflict_") and state_val:
+        s_key = str(state_key)
+        if (
+            s_key.startswith("_pending_group_conflict_")
+            or s_key.startswith("_pending_save_conflict_")
+        ) and state_val:
             return True
     return False
 
@@ -1519,6 +2094,10 @@ def finalize_unsaved_tracking(
     split_secondary_key: str | None = None,
 ) -> None:
     """Complete or prompt for any pending navigation after the page finishes rendering."""
+    if has_active_unsaved_changes():
+        st.html('<span data-paag-unsaved="true" style="display:none;"></span>')
+    else:
+        st.session_state["_rendered_write_epoch"] = get_write_epoch()
     executing_action = st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
     pending = st.session_state.get(_PENDING_UNSAVED_NAV_KEY)
     if not isinstance(pending, dict):

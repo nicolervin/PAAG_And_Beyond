@@ -78,7 +78,7 @@ class HelpHubTests(unittest.TestCase):
 
         # Update status via bulk save
         edited = fb_df.copy()
-        edited.loc[0, "status"] = "Resolved"
+        edited.loc[0, "status"] = "Completed"
         edited.loc[0, "resolution_notes"] = "Fixed scroll container anchor"
         changed = save_bulk_app_feedback(
             edited, active_project_id=proj_id, editor_name="Alice"

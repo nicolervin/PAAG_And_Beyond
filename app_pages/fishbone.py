@@ -75,18 +75,22 @@ if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 9:
     _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
+    check_standalone_conflict_resolution,
     decimal_values_equal,
+    detect_table_cell_conflicts,
     editable_table_footer,
     guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
     register_unsaved_source,
-    render_select_all_control,
-    resolve_editor_selected_rows,
-    stage_native_delete_confirmation,
     render_audit_history_table,
+    render_select_all_control,
+    render_standalone_conflict_dialog,
+    resolve_editor_selected_rows,
     selectable_dataframe,
+    stage_native_delete_confirmation,
     table_has_unsaved_changes,
+    trigger_standalone_conflict_dialog,
 )
 
 
@@ -1203,8 +1207,72 @@ if fishbone_tab.open:
                         del canvas_undo_stack[:-50]
                     canvas_redo_stack.clear()
 
+            canvas_clean_base_key = f"fishbone_canvas_clean_base_{project_id}"
+
+            def _build_fishbone_canvas_snapshot() -> dict:
+                pos_snap = {}
+                if not visible_sections.empty:
+                    for _, srow in visible_sections.iterrows():
+                        sid_s = str(srow.get("id") or "")
+                        if sid_s:
+                            gx_val = srow.get("grid_x")
+                            gy_val = srow.get("grid_y")
+                            pos_snap[sid_s] = (
+                                str(srow.get("name") or sid_s),
+                                int(gx_val) if pd.notna(gx_val) else None,
+                                int(gy_val) if pd.notna(gy_val) else None,
+                            )
+                conn_snap = {}
+                if not connections_df.empty:
+                    for _, crow in connections_df.iterrows():
+                        cid_s = str(crow.get("id") or "")
+                        if cid_s:
+                            conn_snap[cid_s] = (
+                                str(crow.get("from_section_id") or ""),
+                                str(crow.get("to_section_id") or ""),
+                            )
+                asgn_snap = {}
+                if not assignments.empty:
+                    for _, arow in assignments.iterrows():
+                        aid_s = str(arow.get("id") or "")
+                        if aid_s:
+                            asgn_snap[aid_s] = {
+                                "section_id": str(arow.get("section_id") or ""),
+                                "section_name": str(arow.get("section_name") or ""),
+                                "part_number": str(arow.get("part_number") or ""),
+                                "quantity": float(arow.get("quantity") or 1.0) if pd.notna(arow.get("quantity")) else 1.0,
+                                "use_description": str(arow.get("use_description") or ""),
+                                "notes": str(arow.get("notes") or ""),
+                            }
+                return {"positions": pos_snap, "connections": conn_snap, "assignments": asgn_snap}
+
+            live_fishbone_snap = _build_fishbone_canvas_snapshot()
+            has_existing_canvas_draft = bool(
+                draft["positions"]
+                or draft["connections"]
+                or draft["deleted_connections"]
+                or draft.get("connection_nodes")
+                or draft["new_assignments"]
+                or draft.get("updated_assignments")
+                or draft["deleted_assignments"]
+                or draft.get("variant_links")
+            )
+            if not has_existing_canvas_draft or canvas_clean_base_key not in st.session_state:
+                st.session_state[canvas_clean_base_key] = live_fishbone_snap
+
+            move_conflict_key = f"fishbone_move_part_conflict_{project_id}"
+            move_conflict_res, saved_move_payload = check_standalone_conflict_resolution(move_conflict_key)
+            if move_conflict_res == "discard":
+                st.toast("Discarded conflicting Fishbone part move", icon=":material/undo:")
+                st.rerun()
+
             canvas_key = f"interactive_fishbone_{project_id}"
             canvas_state = st.session_state.get(canvas_key)
+            if move_conflict_res is True and isinstance(saved_move_payload, dict):
+                class _SavedMoveState:
+                    pass
+                canvas_state = _SavedMoveState()
+                setattr(canvas_state, "move_part_assignment", saved_move_payload)
             if canvas_state is not None:
                 if p := getattr(canvas_state, "create_section", None):
                     try:
@@ -2031,6 +2099,42 @@ if fishbone_tab.open:
                                 for ua in draft.get("updated_assignments", []):
                                     if str(ua.get("assignment_id") or ua.get("id") or "") == s_aid and ua.get("section_id"):
                                         ua["section_id"] = to_sid
+                        section_name_by_id = {str(r["id"]): str(r["name"]) for _, r in sections.iterrows()} if not sections.empty else {}
+                        if move_conflict_res is not True and from_sid:
+                            move_conflicts: list[dict] = []
+                            for item_aid in aids:
+                                s_aid = str(item_aid or "").strip()
+                                if s_aid and not s_aid.startswith("draft_"):
+                                    live_asgn = live_fishbone_snap["assignments"].get(s_aid)
+                                    if live_asgn is None:
+                                        move_conflicts.append(
+                                            {
+                                                "Row": moved_pn or s_aid[:8],
+                                                "Field": "Section Placement",
+                                                "Original Value": section_name_by_id.get(str(from_sid), str(from_sid)),
+                                                "Saved by Collaborator": "(Deleted by collaborator)",
+                                                "Your Unsaved Edit": section_name_by_id.get(str(to_sid), str(to_sid)),
+                                            }
+                                        )
+                                    else:
+                                        live_sid = str(live_asgn.get("section_id") or "")
+                                        if live_sid and live_sid != str(from_sid) and live_sid != str(to_sid):
+                                            move_conflicts.append(
+                                                {
+                                                    "Row": live_asgn.get("part_number") or moved_pn or s_aid[:8],
+                                                    "Field": "Section Placement",
+                                                    "Original Value": section_name_by_id.get(str(from_sid), str(from_sid)),
+                                                    "Saved by Collaborator": section_name_by_id.get(live_sid, live_sid),
+                                                    "Your Unsaved Edit": section_name_by_id.get(str(to_sid), str(to_sid)),
+                                                }
+                                            )
+                            if move_conflicts:
+                                trigger_standalone_conflict_dialog(
+                                    move_conflict_key,
+                                    move_conflicts,
+                                    payload=dict(p),
+                                )
+                                st.rerun()
                         moved_db_count = 0
                         for item_aid in aids:
                             if item_aid and not str(item_aid).startswith("draft_"):
@@ -2700,8 +2804,10 @@ if fishbone_tab.open:
                     st.markdown(f"- ⏱️ **{impact['yamazumi_area_count']}** Yamazumi area(s)")
                 with m2:
                     st.markdown(f"- 📋 **{impact['process_link_count']}** Process at a Glance requirement(s)")
-                    st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
-                    st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
+                    if impact.get("assembly_reference_count"):
+                        st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
+                    if impact.get("category_reference_count"):
+                        st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
 
                 if impact["pits_bom_approved_occurrence_count"]:
                     st.error(
@@ -2906,7 +3012,8 @@ if fishbone_tab.open:
                     asm_cnt = int(overall_impact.get("assembly_reference_count", 0)) if overall_impact else 0
                     st.markdown(f"- 📊 **{yam_cnt}** linked Yamazumi area(s)")
                     st.markdown(f"- 📋 **{proc_cnt}** Process at a Glance part requirement(s)")
-                    st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
+                    if asm_cnt:
+                        st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
 
                 st.divider()
                 clear_options = ["clear_parts", "delete_sections", "both"]
@@ -3161,11 +3268,88 @@ if fishbone_tab.open:
                     f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh in the toolbar to commit."
                 )
 
+            canvas_footer_editor_key = f"fishbone_canvas_footer_{project_id}"
+            if has_canvas_draft:
+                base_snap = st.session_state.get(canvas_clean_base_key, live_fishbone_snap)
+                base_rows_for_diff: list[dict] = []
+                live_rows_for_diff: list[dict] = []
+                draft_edited_by_id: dict[str, dict] = {}
+                sec_name_lookup = {str(r["id"]): str(r["name"]) for _, r in sections.iterrows()} if not sections.empty else {}
+
+                # 1. Node positions in draft
+                for sid_k, pos_tuple in (draft.get("positions") or {}).items():
+                    sid_str = str(sid_k)
+                    row_id = f"pos:{sid_str}"
+                    b_pos = base_snap.get("positions", {}).get(sid_str, (sec_name_lookup.get(sid_str, sid_str), None, None))
+                    l_pos = live_fishbone_snap.get("positions", {}).get(sid_str, (sec_name_lookup.get(sid_str, sid_str), None, None))
+                    b_str = f"({b_pos[1]}, {b_pos[2]})" if b_pos[1] is not None and b_pos[2] is not None else "Auto"
+                    l_str = f"({l_pos[1]}, {l_pos[2]})" if l_pos[1] is not None and l_pos[2] is not None else "Auto"
+                    d_str = f"({pos_tuple[0]}, {pos_tuple[1]})"
+                    row_label = f"Section '{l_pos[0]}'"
+                    base_rows_for_diff.append({"id": row_id, "name": row_label, "Grid Position": b_str, "Placement / Details": ""})
+                    live_rows_for_diff.append({"id": row_id, "name": row_label, "Grid Position": l_str, "Placement / Details": ""})
+                    draft_edited_by_id[row_id] = {"Grid Position": d_str}
+
+                # 2. Updated & deleted assignments in draft
+                for ua in (draft.get("updated_assignments") or []):
+                    aid_str = str(ua.get("assignment_id") or ua.get("id") or "").strip()
+                    if not aid_str or aid_str.startswith("draft_"):
+                        continue
+                    row_id = f"asgn:{aid_str}"
+                    b_asgn = base_snap.get("assignments", {}).get(aid_str, {})
+                    l_asgn = live_fishbone_snap.get("assignments", {}).get(aid_str, {})
+                    pn_label = str(l_asgn.get("part_number") or b_asgn.get("part_number") or aid_str[:8])
+                    b_sec = str(b_asgn.get("section_name") or sec_name_lookup.get(str(b_asgn.get("section_id") or ""), ""))
+                    l_sec = str(l_asgn.get("section_name") or sec_name_lookup.get(str(l_asgn.get("section_id") or ""), "(Deleted)"))
+                    d_sec_id = str(ua.get("section_id") or l_asgn.get("section_id") or b_asgn.get("section_id") or "")
+                    d_sec = sec_name_lookup.get(d_sec_id, d_sec_id)
+                    b_qty = b_asgn.get("quantity", 1.0)
+                    l_qty = l_asgn.get("quantity", 1.0)
+                    d_qty = ua.get("quantity", l_qty)
+                    b_desc = str(b_asgn.get("use_description") or "")
+                    l_desc = str(l_asgn.get("use_description") or "")
+                    d_desc = str(ua.get("use_description") if "use_description" in ua else l_desc)
+                    b_summary = f"Sec: {b_sec} | Qty: {b_qty:g} | Desc: {b_desc}"
+                    l_summary = f"Sec: {l_sec} | Qty: {l_qty:g} | Desc: {l_desc}" if l_asgn else "(Deleted by collaborator)"
+                    d_summary = f"Sec: {d_sec} | Qty: {float(d_qty or 1.0):g} | Desc: {d_desc}"
+                    base_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": b_summary})
+                    live_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": l_summary})
+                    draft_edited_by_id[row_id] = {"Placement / Details": d_summary}
+
+                for del_aid in (draft.get("deleted_assignments") or set()):
+                    aid_str = str(del_aid or "").strip()
+                    if not aid_str or aid_str.startswith("draft_"):
+                        continue
+                    row_id = f"del_asgn:{aid_str}"
+                    b_asgn = base_snap.get("assignments", {}).get(aid_str, {})
+                    l_asgn = live_fishbone_snap.get("assignments", {}).get(aid_str, {})
+                    if b_asgn and l_asgn and b_asgn != l_asgn:
+                        pn_label = str(l_asgn.get("part_number") or b_asgn.get("part_number") or aid_str[:8])
+                        b_summary = f"Sec: {b_asgn.get('section_name', '')} | Qty: {b_asgn.get('quantity', 1.0):g}"
+                        l_summary = f"Sec: {l_asgn.get('section_name', '')} | Qty: {l_asgn.get('quantity', 1.0):g}"
+                        base_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": b_summary})
+                        live_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": l_summary})
+                        draft_edited_by_id[row_id] = {"Placement / Details": "(Staged for removal)"}
+
+                if base_rows_for_diff:
+                    st.session_state[f"_table_clean_base_df_{canvas_footer_editor_key}"] = pd.DataFrame(base_rows_for_diff)
+                    st.session_state[f"_table_live_df_{canvas_footer_editor_key}"] = pd.DataFrame(live_rows_for_diff)
+                    st.session_state[f"_table_undo_meta_{canvas_footer_editor_key}"] = {
+                        "id_col": "id",
+                        "row_label_cols": ["name"],
+                    }
+                    st.session_state[f"_table_id_draft_{canvas_footer_editor_key}"] = draft_edited_by_id
+            else:
+                st.session_state.pop(f"_table_clean_base_df_{canvas_footer_editor_key}", None)
+                st.session_state.pop(f"_table_live_df_{canvas_footer_editor_key}", None)
+                st.session_state.pop(f"_table_id_draft_{canvas_footer_editor_key}", None)
+
             trigger_canvas_save, trigger_canvas_discard = register_unsaved_source(
                 f"fishbone_canvas_{project_id}",
-                editor_key=f"fishbone_canvas_footer_{project_id}",
+                editor_key=canvas_footer_editor_key,
                 additional_unsaved=has_canvas_draft,
             )
+            canvas_conflict_res, _ = check_standalone_conflict_resolution(canvas_footer_editor_key)
             top_undo_last = bool(
                 st.session_state.pop(f"pending_interactive_undo_last_fishbone_{project_id}", False)
             )
@@ -3191,11 +3375,15 @@ if fishbone_tab.open:
                     st.session_state[canvas_draft_key] = canvas_redo_stack.pop()
                     st.toast("Reapplied the last undone canvas edit", icon=":material/redo:")
                     st.rerun()
-            if top_discard_all or trigger_canvas_discard:
+            if top_discard_all or trigger_canvas_discard or canvas_conflict_res == "discard":
                 st.session_state.pop(canvas_undo_stack_key, None)
                 st.session_state.pop(canvas_redo_stack_key, None)
                 if has_canvas_draft:
                     st.session_state.pop(canvas_draft_key, None)
+                    st.session_state.pop(canvas_clean_base_key, None)
+                    st.session_state.pop(f"_table_clean_base_df_{canvas_footer_editor_key}", None)
+                    st.session_state.pop(f"_table_live_df_{canvas_footer_editor_key}", None)
+                    st.session_state.pop(f"_table_id_draft_{canvas_footer_editor_key}", None)
                     st.toast("Discarded canvas draft changes", icon=":material/undo:")
                     st.rerun()
                 elif framework_undo_key in st.session_state:
@@ -3206,7 +3394,18 @@ if fishbone_tab.open:
             top_save_and_refresh = bool(
                 st.session_state.pop(f"pending_interactive_save_fishbone_{project_id}", False)
             )
-            if top_save_and_refresh or trigger_canvas_save:
+            if top_save_and_refresh or trigger_canvas_save or canvas_conflict_res is True:
+                canvas_conflicts = (
+                    detect_table_cell_conflicts(canvas_footer_editor_key)
+                    if canvas_conflict_res is not True
+                    else []
+                )
+                if canvas_conflicts:
+                    trigger_standalone_conflict_dialog(
+                        canvas_footer_editor_key,
+                        canvas_conflicts,
+                    )
+                    st.rerun()
                 try:
                     st.session_state.pop(canvas_undo_stack_key, None)
                     st.session_state.pop(canvas_redo_stack_key, None)
@@ -3234,6 +3433,10 @@ if fishbone_tab.open:
                             {"variant_links": draft["variant_links"]},
                         )
                     st.session_state.pop(canvas_draft_key, None)
+                    st.session_state.pop(canvas_clean_base_key, None)
+                    st.session_state.pop(f"_table_clean_base_df_{canvas_footer_editor_key}", None)
+                    st.session_state.pop(f"_table_live_df_{canvas_footer_editor_key}", None)
+                    st.session_state.pop(f"_table_id_draft_{canvas_footer_editor_key}", None)
                     request_table_editor_reset(pool_editor_key)
                     request_table_editor_reset(assignment_editor_key)
                     request_table_editor_reset(framework_editor_key)
@@ -3263,6 +3466,20 @@ if fishbone_tab.open:
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
+
+            if (
+                not st.session_state.get(f"fb_add_part_modal_{project_id}")
+                and not st.session_state.get(f"fb_quick_create_part_modal_{project_id}")
+                and not st.session_state.get(f"fb_edit_sec_modal_{project_id}")
+                and not st.session_state.get(f"fb_del_sec_modal_{project_id}")
+                and not st.session_state.get(f"fb_edit_part_modal_{project_id}")
+                and not st.session_state.get(f"fb_split_part_modal_{project_id}")
+                and not st.session_state.get(f"fb_combine_parts_modal_{project_id}")
+                and not st.session_state.get(f"fb_create_sub_modal_{project_id}")
+                and not st.session_state.get(f"fb_split_sec_modal_{project_id}")
+            ):
+                render_standalone_conflict_dialog(move_conflict_key)
+                render_standalone_conflict_dialog(canvas_footer_editor_key)
 
             # Stacked Layout: Collapsible Table Editors
             st.divider()
@@ -3435,7 +3652,7 @@ def _render_framework_maintenance():
             ":material/arrow_downward: Move later",
             ":material/last_page: Move to end",
         ]] * len(framework)
-        framework["assemblies_action"] = ":material/grid_on: Assembly grid"
+
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
@@ -3507,8 +3724,8 @@ def _render_framework_maintenance():
             hide_index=True,
             num_rows="delete",
             height=300,
-            disabled=["id", "hierarchy", "created_at", "updated_at", "assemblies_action"],
-            column_order=["hierarchy", "order_actions", "assemblies_action", "sequence", "name", "active", "section_type", "parent_assembly", "description"],
+            disabled=["id", "hierarchy", "created_at", "updated_at"],
+            column_order=["hierarchy", "order_actions", "sequence", "name", "active", "section_type", "parent_assembly", "description"],
             column_config={
                 "id": None,
                 "project_id": None,
@@ -3605,16 +3822,16 @@ def _render_framework_maintenance():
                 f"{impact['descendant_section_count']} child section(s)?"
             )
             st.markdown(
-                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
-                "mini-BOM uses tied to a re-pointed Built section move to the target, and all "
-                "other uses return to Not placed.\n"
+                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections and will return to Not placed.\n"
+
+
                 f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will move or merge into the target area, keeping their pitches and work.\n"
                 f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
-                f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
-                f"- **{impact['category_built_reference_count']}** assembly-grid category Built reference(s) will be re-pointed.\n"
-                f"- **{impact['category_installed_reference_count']}** assembly-grid category Installed reference(s) will be re-pointed.\n"
-                f"- **{impact['feature_visibility_preference_count']}** section-specific grid feature visibility preference(s) will be removed.\n"
-                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections.\n"
+
+
+
+
+
                 f"- **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached before deletion."
             )
             if impact["pits_bom_approved_occurrence_count"]:
@@ -3637,14 +3854,14 @@ def _render_framework_maintenance():
             target_is_valid = not impact["requires_repointing"]
             if impact["requires_repointing"] and not replacement_ids:
                 st.error(
-                    "Create another Fishbone section before deleting these sections. Yamazumi, "
-                    "Process at a Glance, assembly, and assembly-grid category references require "
+                    "Create another Fishbone section before deleting these sections. Yamazumi and "
+                    "Process at a Glance references require "
                     "a continuity target."
                 )
             if impact["requires_repointing"] and replacement_ids:
                 st.info(
-                    "Choose one existing Fishbone section to continue all affected Yamazumi, "
-                    "Process at a Glance, assembly, and assembly-grid category references under "
+                    "Choose one existing Fishbone section to continue all affected Yamazumi and "
+                    "Process at a Glance references under "
                     "before deleting."
                 )
                 target_section_id = st.selectbox(
@@ -3655,10 +3872,11 @@ def _render_framework_maintenance():
                     format_func=lambda value: replacement_labels.get(value, value),
                     key=f"fishbone_delete_target_{project_id}",
                     help=(
-                        "This one target receives every affected Yamazumi, Process at a Glance, "
-                        "assembly Built or Installed, and assembly-grid category Built or "
-                        "Installed section reference. Section-specific grid feature visibility "
-                        "preferences are removed instead of re-pointed."
+                        "This one target receives every affected Yamazumi and Process at a Glance "
+                        "section reference."
+
+
+
                     ),
                 )
                 if target_section_id:
@@ -3727,7 +3945,7 @@ def _render_framework_maintenance():
             confirm_framework_delete()
 
         assembly_section_key = f"fishbone_assembly_section_{project_id}"
-        if st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
+        if False and st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
             selected_section_id = str(st.session_state[assembly_section_key])
             section_assemblies = assemblies_for_section(project_id, selected_section_id)
             with st.container(border=True):

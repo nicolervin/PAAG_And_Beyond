@@ -120,6 +120,7 @@ if (
     _importlib.reload(_table_ui_mod)
 
 from utils.table_ui import (
+    compare_record_field_conflicts,
     dataframe_to_excel,
     drop_untouched_new_rows,
     editable_table_footer,
@@ -127,6 +128,7 @@ from utils.table_ui import (
     guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
+    render_inline_conflict_resolution,
     render_select_all_control,
     required_field_errors,
     resolve_editor_selected_rows,
@@ -1672,6 +1674,7 @@ with st.expander(
                         parsed_df,
                         section_id_by_name,
                         replace_existing_elements=replace_elements,
+                        replace_imported_pitches_only=True,
                         source_label=import_source_label,
                         pitch_rows=parsed_pitch_df,
                     )
@@ -2904,6 +2907,8 @@ metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
 
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
+board_clean_baseline_key = f"yamazumi_board_clean_baseline_{project_id}_{scenario_id}_{area_id}"
+board_moved_ids_key = f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{area_id}"
 board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"
 add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_pitch_gen_key = f"yamazumi_add_pitch_gen_{project_id}_{scenario_id}_{area_id}"
@@ -2978,28 +2983,40 @@ def handle_yamazumi_move() -> None:
         ].to_dict("records")
     else:
         persisted_elements = yamazumi_elements(project_id, area_id).to_dict("records")
+    baseline_elements = st.session_state.get(board_clean_baseline_key)
+    if not isinstance(baseline_elements, list) or not baseline_elements:
+        baseline_elements = [dict(e) for e in persisted_elements]
+        st.session_state[board_clean_baseline_key] = baseline_elements
     current_draft = st.session_state.get(board_draft_key)
     valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
     if not isinstance(current_draft, dict):
-        current_draft = build_stack_draft(persisted_elements)
+        current_draft = build_stack_draft(baseline_elements)
     else:
         current_draft = reconcile_stack_draft(
-            current_draft, persisted_elements, valid_pitch_ids=valid_p_ids
+            current_draft, baseline_elements, valid_pitch_ids=valid_p_ids
         )
     try:
+        moved_eid = str(move.get("element_id") or "").strip()
         updated_draft = apply_stack_drop(
             current_draft,
-            element_id=str(move.get("element_id") or ""),
+            element_id=moved_eid,
             pitch_id=move.get("pitch_id"),
             before_element_id=move.get("before_element_id"),
             after_element_id=move.get("after_element_id"),
             insert_index=move.get("insert_index"),
         )
         st.session_state.pop(board_draft_error_key, None)
-        if draft_differs(persisted_elements, updated_draft):
+        moved_ids = list(st.session_state.get(board_moved_ids_key) or [])
+        if moved_eid and moved_eid not in moved_ids:
+            moved_ids.append(moved_eid)
+        st.session_state[board_moved_ids_key] = moved_ids
+        if draft_differs(baseline_elements, updated_draft) or draft_differs(
+            persisted_elements, updated_draft
+        ):
             st.session_state[board_draft_key] = updated_draft
         else:
             st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(board_moved_ids_key, None)
     except ValueError as exc:
         st.session_state[board_draft_error_key] = str(exc)
 
@@ -3084,10 +3101,12 @@ def _clear_edit_pitch_widget_state(target_pitch_id: object, *, clear_sig: bool =
         "edit_pitch_type_",
         "edit_pitch_feed_target_",
         "edit_pitch_variants_",
+        "_inline_conflict_edit_pitch_conflict_",
     ):
         st.session_state.pop(f"{prefix}{pid}", None)
     if clear_sig:
         st.session_state.pop(f"edit_pitch_source_sig_{pid}", None)
+        st.session_state.pop(f"edit_pitch_baseline_{pid}", None)
 
 
 def close_edit_pitch_dialog() -> None:
@@ -3107,15 +3126,22 @@ def handle_edit_pitch_request() -> None:
 def handle_edit_element_request() -> None:
     request = _board_trigger("edit_element")
     if request.get("element_id"):
+        target_eid = str(request["element_id"])
         close_other_yamazumi_dialogs(edit_element_dialog_key)
+        st.session_state.pop(f"edit_element_baseline_{target_eid}", None)
+        st.session_state.pop(f"edit_element_conflict_{target_eid}", None)
+        if not elements.empty:
+            m_rows = elements.loc[elements["id"].astype(str) == target_eid]
+            if not m_rows.empty:
+                st.session_state[f"edit_element_baseline_{target_eid}"] = m_rows.iloc[0].to_dict()
         model_variant = str(request.get("model_variant") or "").strip()
         if model_variant:
             st.session_state[edit_element_dialog_key] = {
-                "element_id": str(request["element_id"]),
+                "element_id": target_eid,
                 "model_variant": model_variant,
             }
         else:
-            st.session_state[edit_element_dialog_key] = str(request["element_id"])
+            st.session_state[edit_element_dialog_key] = target_eid
 
 
 def handle_scale_mode_change() -> None:
@@ -3374,17 +3400,21 @@ def edit_pitch_dialog() -> None:
         )
     )
     source_sig_key = f"edit_pitch_source_sig_{pitch_id}"
-    source_sig = (
-        str(current.get("pitch_number") or ""),
-        str(current.get("pitch_name") or ""),
-        str(current.get("status") or "Active"),
-        str(current.get("pitch_type") or "Pitch").title(),
-        str(current.get("feeds_into_pitch_id") or "").strip(),
-        tuple(str(v) for v in current_variants),
-    )
-    if restored_values or st.session_state.get(source_sig_key) != source_sig:
+    baseline_key = f"edit_pitch_baseline_{pitch_id}"
+    conflict_key = f"edit_pitch_conflict_{pitch_id}"
+    live_pitch_dict = {
+        "pitch_number": str(current.get("pitch_number") or ""),
+        "pitch_name": str(current.get("pitch_name") or ""),
+        "status": str(current.get("status") or "Active"),
+        "pitch_type": str(current.get("pitch_type") or "Pitch").title(),
+        "feeds_into_pitch_id": str(current.get("feeds_into_pitch_id") or "").strip(),
+        "model_variants": ", ".join(str(v) for v in current_variants),
+    }
+    source_sig = tuple(live_pitch_dict.values())
+    if restored_values or source_sig_key not in st.session_state:
         _clear_edit_pitch_widget_state(pitch_id, clear_sig=False)
         st.session_state[source_sig_key] = source_sig
+        st.session_state[baseline_key] = dict(live_pitch_dict)
     pitch_number = st.text_input(
         "Pitch Address",
         value=str(restored_values.get("pitch_number", current.get("pitch_number")) or ""),
@@ -3437,22 +3467,68 @@ def edit_pitch_dialog() -> None:
         key=f"edit_pitch_variants_{pitch_id}",
         help="Existing work must be moved or retagged before its variant can be removed.",
     )
+    conflict_res = render_inline_conflict_resolution(conflict_key)
+    if conflict_res == "discard":
+        st.session_state.pop(state_key, None)
+        _clear_edit_pitch_widget_state(pitch_id)
+        st.rerun(scope="app")
+
     actions = st.container(horizontal=True)
     if actions.button("Cancel", key=f"cancel_edit_pitch_{pitch_id}"):
         st.session_state.pop(state_key, None)
         _clear_edit_pitch_widget_state(pitch_id)
         st.rerun()
-    if actions.button("Save Pitch", type="primary", icon=":material/save:", key=f"save_edit_pitch_{pitch_id}"):
+    save_pitch_clicked = actions.button("Save Pitch", type="primary", icon=":material/save:", key=f"save_edit_pitch_{pitch_id}")
+    if save_pitch_clicked or conflict_res == "overwrite":
+        baseline_pitch = st.session_state.get(baseline_key, live_pitch_dict)
+        user_pitch_dict = {
+            "pitch_number": str(pitch_number or ""),
+            "pitch_name": str(pitch_name or ""),
+            "status": str(status or "Active"),
+            "pitch_type": str(pitch_type or "Pitch").title(),
+            "feeds_into_pitch_id": str(feed_target_id or "").strip(),
+            "model_variants": ", ".join(str(v) for v in selected_variants),
+        }
+        merged_pitch, pitch_conflicts = compare_record_field_conflicts(
+            row_label=str(pitch_number or current.get("pitch_number") or pitch_id),
+            baseline=baseline_pitch,
+            live=live_pitch_dict,
+            user_values=user_pitch_dict,
+            field_labels={
+                "pitch_number": "Pitch Address",
+                "pitch_name": "Pitch Name",
+                "status": "Status",
+                "pitch_type": "Pitch Type",
+                "feeds_into_pitch_id": "Feeds Into Pitch",
+                "model_variants": "Model Variants",
+            },
+            formatters={
+                "feeds_into_pitch_id": lambda v: feed_target_label_by_id.get(str(v or ""), str(v or "(None)")) if str(v or "") else "(None)",
+            },
+        )
+        if pitch_conflicts and conflict_res != "overwrite":
+            st.session_state[f"_inline_conflict_{conflict_key}"] = pitch_conflicts
+            st.rerun()
+        effective_variants = (
+            selected_variants
+            if conflict_res == "overwrite" or user_pitch_dict["model_variants"] != baseline_pitch.get("model_variants")
+            else list(current.get("model_variants") or ["All models"])
+        )
+        effective_feed_target = (
+            (str(merged_pitch.get("feeds_into_pitch_id") or "").strip() or None)
+            if str(merged_pitch.get("pitch_type") or "Pitch") in {"Subassembly", "Kitter"}
+            else None
+        )
         try:
             update_yamazumi_pitch(
                 project_id, current_pitch_area_id, str(pitch_id),
                 {
-                    "pitch_number": pitch_number,
-                    "pitch_name": pitch_name,
-                    "status": status,
-                    "model_variants": selected_variants,
-                    "pitch_type": pitch_type,
-                    "feeds_into_pitch_id": feed_target_id,
+                    "pitch_number": merged_pitch["pitch_number"],
+                    "pitch_name": merged_pitch["pitch_name"],
+                    "status": merged_pitch["status"],
+                    "model_variants": effective_variants,
+                    "pitch_type": merged_pitch["pitch_type"],
+                    "feeds_into_pitch_id": effective_feed_target,
                 },
             )
             record_audit_event(
@@ -3460,21 +3536,21 @@ def edit_pitch_dialog() -> None:
                 st.session_state.get("current_editor", ""),
                 {
                     "source_pitch_id": pitch_id,
-                    "source_pitch_address": pitch_number,
+                    "source_pitch_address": merged_pitch["pitch_number"],
                     "old_feeds_into_pitch_id": current_feed_target_id,
                     "old_feed_target": feed_target_label_by_id.get(
                         str(current_feed_target_id), ""
                     ),
-                    "new_feeds_into_pitch_id": feed_target_id,
+                    "new_feeds_into_pitch_id": effective_feed_target,
                     "new_feed_target": feed_target_label_by_id.get(
-                        str(feed_target_id), ""
+                        str(effective_feed_target), ""
                     ),
                 },
             )
             st.session_state.pop(state_key, None)
             _clear_edit_pitch_widget_state(pitch_id)
             request_table_editor_reset(pitch_editor_key)
-            st.toast(f"Updated pitch {pitch_number}", icon=":material/check_circle:")
+            st.toast(f"Updated pitch {merged_pitch['pitch_number']}", icon=":material/check_circle:")
             st.rerun(scope="app")
         except ValueError as exc:
             st.error(str(exc))
@@ -3510,7 +3586,15 @@ def edit_pitch_dialog() -> None:
 
 
 def close_edit_element_dialog() -> None:
-    st.session_state.pop(edit_element_dialog_key, None)
+    prev_target = st.session_state.pop(edit_element_dialog_key, None)
+    prev_eid = (
+        str(prev_target.get("element_id") or "")
+        if isinstance(prev_target, dict)
+        else str(prev_target or "")
+    ).strip()
+    if prev_eid:
+        st.session_state.pop(f"edit_element_baseline_{prev_eid}", None)
+        st.session_state.pop(f"edit_element_conflict_{prev_eid}", None)
 
 
 def close_move_pitch_dialog() -> None:
@@ -3898,6 +3982,11 @@ def edit_element_dialog(
             st.rerun()
         return
     current = matches.iloc[0]
+    baseline_key = f"edit_element_baseline_{element_id}"
+    conflict_key = f"edit_element_conflict_{element_id}"
+    if baseline_key not in st.session_state:
+        st.session_state[baseline_key] = current.to_dict()
+    baseline_row = st.session_state.get(baseline_key) or current.to_dict()
     restored = st.session_state.pop(element_edit_restore_key, None)
     if isinstance(restored, dict) and str(restored.get("id")) == str(element_id):
         restored_values = dict(restored.get("values") or {})
@@ -4023,9 +4112,96 @@ def edit_element_dialog(
             key=f"destructive_request_edit_element_delete_{element_id}",
             help="Review the relationship impact before deleting this work element.",
         )
-    if save_edit:
+    force_overwrite_edit = False
+    pending_elem_conflict = st.session_state.get(conflict_key)
+    if isinstance(pending_elem_conflict, dict) and pending_elem_conflict.get("conflicts"):
+        c_who = str(pending_elem_conflict.get("editor_name") or "another collaborator").strip()
+        c_list = list(pending_elem_conflict.get("conflicts") or [])
+        st.warning(
+            f"**{c_who}** already saved changes to **{len(c_list)} field(s)** on this work element. "
+            "Choose whether to overwrite their saved values with your changes or discard your edits.",
+            icon=":material/sync_problem:",
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Field": str(item.get("field") or ""),
+                        "Original value": str(item.get("base_value") or ""),
+                        f"Saved by {c_who}": str(item.get("saved_value") or ""),
+                        "Your unsaved edit": str(item.get("your_value") or ""),
+                    }
+                    for item in c_list
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        c_bar = st.container(horizontal=True, horizontal_alignment="right")
+        if c_bar.button(
+            "Overwrite with my changes",
+            type="primary",
+            icon=":material/save:",
+            key=f"overwrite_edit_element_{element_id}",
+        ):
+            st.session_state.pop(conflict_key, None)
+            force_overwrite_edit = True
+        if c_bar.button(
+            "Discard my changes",
+            icon=":material/delete:",
+            key=f"destructive_discard_edit_element_{element_id}",
+        ):
+            st.session_state.pop(conflict_key, None)
+            st.session_state.pop(baseline_key, None)
+            st.session_state.pop(state_key, None)
+            st.rerun(scope="app")
+
+    if save_edit or force_overwrite_edit:
         try:
             current_element_area_id = str(current.get("area_id") or area_id)
+            if not force_overwrite_edit:
+                fresh_elem_df = yamazumi_elements(project_id, current_element_area_id)
+                fresh_matches = (
+                    fresh_elem_df.loc[fresh_elem_df["id"].astype(str) == str(element_id)]
+                    if not fresh_elem_df.empty
+                    else pd.DataFrame()
+                )
+                if not fresh_matches.empty:
+                    live_elem = fresh_matches.iloc[0].to_dict()
+                    base_pid = str(baseline_row.get("pitch_id") or "").strip() or None
+                    live_pid = str(live_elem.get("pitch_id") or "").strip() or None
+                    user_pid = str(selected_pitch_id or "").strip() or None
+                    elem_conflicts: list[dict[str, str]] = []
+                    if user_pid != base_pid and live_pid != base_pid:
+                        elem_conflicts.append(
+                            {
+                                "field": "Pitch",
+                                "base_value": pitch_label_by_id.get(str(base_pid), "Unassigned") if base_pid else "Unassigned",
+                                "saved_value": pitch_label_by_id.get(str(live_pid), "Unassigned") if live_pid else "Unassigned",
+                                "your_value": pitch_label_by_id.get(str(user_pid), "Unassigned") if user_pid else "Unassigned",
+                            }
+                        )
+                    base_desc = str(baseline_row.get("description") or "").strip()
+                    live_desc = str(live_elem.get("description") or "").strip()
+                    user_desc = str(description or "").strip()
+                    if user_desc != base_desc and live_desc != base_desc:
+                        elem_conflicts.append(
+                            {
+                                "field": "Work Description",
+                                "base_value": base_desc,
+                                "saved_value": live_desc,
+                                "your_value": user_desc,
+                            }
+                        )
+                    if elem_conflicts:
+                        from utils.cache_store import get_last_write_metadata
+
+                        last_meta = get_last_write_metadata()
+                        st.session_state[conflict_key] = {
+                            "conflicts": elem_conflicts,
+                            "editor_name": str(last_meta.get("editor_name") or "another collaborator").strip(),
+                        }
+                        st.rerun()
             updated_element_id = update_yamazumi_element(
                 project_id, current_element_area_id, str(element_id),
                 {
@@ -4056,6 +4232,8 @@ def edit_element_dialog(
                 project_id, "Yamazumi elements", "Edit from interactive board", 1,
                 st.session_state.get("current_editor", ""), {"element_id": updated_element_id or element_id, "description": description},
             )
+            st.session_state.pop(conflict_key, None)
+            st.session_state.pop(baseline_key, None)
             st.session_state.pop(state_key, None)
             request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
@@ -4318,6 +4496,11 @@ def confirm_interactive_element_delete() -> None:
             "Close",
             key=f"close_missing_interactive_element_{project_id}_{area_id}",
         ):
+            current_baseline = st.session_state.get(board_clean_baseline_key)
+            if isinstance(current_baseline, list):
+                st.session_state[board_clean_baseline_key] = [
+                    row for row in current_baseline if str(row.get("id")) != element_id
+                ]
             st.session_state.pop(delete_element_dialog_key, None)
             st.rerun()
         return
@@ -4409,6 +4592,11 @@ def confirm_interactive_element_delete() -> None:
                     st.session_state[board_draft_key] = updated_draft
                 else:
                     st.session_state.pop(board_draft_key, None)
+            current_baseline = st.session_state.get(board_clean_baseline_key)
+            if isinstance(current_baseline, list):
+                st.session_state[board_clean_baseline_key] = [
+                    row for row in current_baseline if str(row.get("id")) != element_id
+                ]
             st.session_state.pop(delete_element_dialog_key, None)
             st.session_state.pop(edit_element_dialog_key, None)
             request_table_editor_reset(element_editor_key)
@@ -4566,21 +4754,31 @@ with interactive_yamazumi_tab:
     )
     persisted_board_elements = elements.to_dict("records")
     raw_board_draft = st.session_state.get(board_draft_key)
+    baseline_board_elements = st.session_state.get(board_clean_baseline_key)
+    if (
+        not isinstance(raw_board_draft, dict)
+        or not isinstance(baseline_board_elements, list)
+        or not baseline_board_elements
+    ):
+        baseline_board_elements = [dict(e) for e in persisted_board_elements]
+        st.session_state[board_clean_baseline_key] = baseline_board_elements
+        if not isinstance(raw_board_draft, dict):
+            st.session_state.pop(board_moved_ids_key, None)
     if isinstance(raw_board_draft, dict):
         valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
         board_draft = reconcile_stack_draft(
-            raw_board_draft, persisted_board_elements, valid_pitch_ids=valid_p_ids
+            raw_board_draft, baseline_board_elements, valid_pitch_ids=valid_p_ids
         )
         if board_draft != raw_board_draft:
             st.session_state[board_draft_key] = board_draft
     else:
         board_draft = None
-    has_board_draft = (
-        isinstance(board_draft, dict)
-        and draft_differs(persisted_board_elements, board_draft)
+    has_board_draft = isinstance(board_draft, dict) and (
+        draft_differs(persisted_board_elements, board_draft)
+        or draft_differs(baseline_board_elements, board_draft)
     )
     board_elements = (
-        apply_stack_draft_to_elements(persisted_board_elements, board_draft)
+        apply_stack_draft_to_elements(baseline_board_elements, board_draft)
         if has_board_draft else persisted_board_elements
     )
     ordered_board_pitches = order_yamazumi_pitches_for_board(pitches)
@@ -4627,8 +4825,82 @@ with interactive_yamazumi_tab:
     )
     if draft_error := st.session_state.pop(board_draft_error_key, None):
         st.error(str(draft_error))
+    board_footer_editor_key = f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}"
+    board_pitch_label_by_id = (
+        {
+            str(row["id"]): yamazumi_pitch_label(row.get("pitch_number"), row.get("pitch_name"))
+            for _, row in pitches.iterrows()
+        }
+        if not pitches.empty
+        else {}
+    )
+
+    def _build_board_conflict_df(elem_records: list[dict]) -> pd.DataFrame:
+        if not elem_records:
+            return pd.DataFrame(
+                columns=["id", "description", "pitch", "stack_order"]
+            )
+        stacks_map = build_stack_draft(elem_records)
+        pos_by_eid: dict[str, str] = {}
+        for _, stack_eids in stacks_map.items():
+            for idx_pos, s_eid in enumerate(stack_eids, start=1):
+                pos_by_eid[str(s_eid)] = f"#{idx_pos}"
+        rows_out = []
+        for rec in elem_records:
+            eid_val = str(rec.get("id") or "").strip()
+            pid_val = str(rec.get("pitch_id") or "").strip()
+            p_lbl = (
+                board_pitch_label_by_id.get(pid_val, "Unassigned")
+                if pid_val and pid_val.lower() not in {"none", "nan", "<na>"}
+                else "Unassigned"
+            )
+            rows_out.append(
+                {
+                    "id": eid_val,
+                    "description": str(rec.get("description") or "").strip(),
+                    "pitch": p_lbl,
+                    "stack_order": pos_by_eid.get(eid_val, "#1"),
+                }
+            )
+        return pd.DataFrame(rows_out)
+
+    board_base_conflict_df = _build_board_conflict_df(baseline_board_elements)
+    board_live_conflict_df = _build_board_conflict_df(persisted_board_elements)
+    board_draft_conflict_df = _build_board_conflict_df(board_elements)
+    st.session_state[f"_table_clean_base_df_{board_footer_editor_key}"] = board_base_conflict_df
+    st.session_state[f"_table_live_df_{board_footer_editor_key}"] = board_live_conflict_df
+    st.session_state[f"_table_undo_meta_{board_footer_editor_key}"] = {
+        "col_labels": {"pitch": "Pitch", "stack_order": "Stack Order"},
+        "row_labels": {},
+    }
+    board_id_draft: dict[str, dict[str, object]] = {}
+    if has_board_draft and not board_base_conflict_df.empty and not board_draft_conflict_df.empty:
+        moved_id_set = {
+            str(x).strip()
+            for x in (st.session_state.get(board_moved_ids_key) or [])
+            if str(x).strip()
+        }
+        base_by_eid = {
+            str(r["id"]): r for _, r in board_base_conflict_df.iterrows() if str(r.get("id") or "")
+        }
+        for _, d_row in board_draft_conflict_df.iterrows():
+            d_eid = str(d_row.get("id") or "").strip()
+            if not d_eid or d_eid not in base_by_eid:
+                continue
+            b_row = base_by_eid[d_eid]
+            row_patch: dict[str, object] = {}
+            if str(d_row.get("pitch")) != str(b_row.get("pitch")):
+                row_patch["pitch"] = d_row.get("pitch")
+            elif d_eid in moved_id_set and str(d_row.get("stack_order")) != str(
+                b_row.get("stack_order")
+            ):
+                row_patch["stack_order"] = d_row.get("stack_order")
+            if row_patch:
+                board_id_draft[d_eid] = row_patch
+    st.session_state[f"_table_id_draft_{board_footer_editor_key}"] = board_id_draft
+
     board_actions = editable_table_footer(
-        editor_key=f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}",
+        editor_key=board_footer_editor_key,
         key_prefix=f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
         additional_unsaved_changes=has_board_draft,
         additional_action_label="Print",
@@ -4641,6 +4913,8 @@ with interactive_yamazumi_tab:
         st.rerun()
     if board_actions.undo:
         st.session_state.pop(board_draft_key, None)
+        st.session_state.pop(board_clean_baseline_key, None)
+        st.session_state.pop(board_moved_ids_key, None)
         st.session_state.pop(board_draft_error_key, None)
         st.toast("Restored the last-saved Yamazumi stack order", icon=":material/undo:")
         st.rerun()
@@ -4656,9 +4930,39 @@ with interactive_yamazumi_tab:
             else:
                 fresh_elements = yamazumi_elements(project_id, area_id).to_dict("records")
             valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
-            reconciled_draft = reconcile_stack_draft(
-                board_draft, fresh_elements, valid_pitch_ids=valid_p_ids
-            )
+            moved_ids_for_save = [
+                str(x).strip()
+                for x in (st.session_state.get(board_moved_ids_key) or [])
+                if str(x).strip()
+            ]
+            if moved_ids_for_save and isinstance(board_draft, dict):
+                merged_stacks = reconcile_stack_draft(
+                    build_stack_draft(fresh_elements),
+                    fresh_elements,
+                    valid_pitch_ids=valid_p_ids,
+                )
+                for m_eid in moved_ids_for_save:
+                    target_stack = None
+                    target_idx = None
+                    for s_key, s_list in board_draft.items():
+                        if m_eid in s_list:
+                            target_stack = stack_id(s_key)
+                            target_idx = s_list.index(m_eid)
+                            break
+                    if target_stack is not None:
+                        merged_stacks = apply_stack_drop(
+                            merged_stacks,
+                            element_id=m_eid,
+                            pitch_id=None if target_stack == UNASSIGNED_STACK_ID else target_stack,
+                            insert_index=target_idx,
+                        )
+                reconciled_draft = reconcile_stack_draft(
+                    merged_stacks, fresh_elements, valid_pitch_ids=valid_p_ids
+                )
+            else:
+                reconciled_draft = reconcile_stack_draft(
+                    board_draft, fresh_elements, valid_pitch_ids=valid_p_ids
+                )
             result = save_yamazumi_stack_draft(
                 project_id,
                 scenario_id,
@@ -4678,6 +4982,8 @@ with interactive_yamazumi_tab:
                 },
             )
             st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(board_clean_baseline_key, None)
+            st.session_state.pop(board_moved_ids_key, None)
             if result["enabled_variants"]:
                 request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)

@@ -29,7 +29,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v34", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v48", inspect.getsource(board_module))
         self.assertIn(
             "setTriggerValue('edit_element', { element_id: item.id, model_variant: variant })",
             board_module._JS,
@@ -132,8 +132,8 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn(".board.fullscreen-board .fullscreen-zoom-controls", board_module._CSS)
         self.assertIn("const setZoomScale = (nextScale, anchor = null) =>", board_module._JS)
         self.assertIn("const fitBoardView = () =>", board_module._JS)
-        self.assertIn("board.addEventListener('wheel', handleBoardWheel, { passive: false })", board_module._JS)
-        self.assertIn("board.removeEventListener('wheel', handleBoardWheel)", board_module._JS)
+        self.assertIn("scrollContainer.addEventListener('wheel', handleBoardWheel, { passive: false })", board_module._JS)
+        self.assertIn("scrollContainer.removeEventListener('wheel', handleBoardWheel)", board_module._JS)
         self.assertIn("const delta = event.deltaY < 0 ? 1.12 : 0.89", board_module._JS)
         self.assertIn("boardContent.style.transform = `scale(${activeScale})`", board_module._JS)
         self.assertIn("(stackRect.bottom - laneRect.top) / activeScale - taktPixels", board_module._JS)
@@ -147,11 +147,11 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn('id="scale-readable"', board_module._HTML)
         self.assertIn('id="print-board"', board_module._HTML)
         self.assertIn('id="full-screen"', board_module._HTML)
-        self.assertIn(".board.fullscreen-board .board-actions { position:fixed; top:0; left:0; right:0;", board_module._CSS)
+        self.assertIn(".board.fullscreen-board .board-actions { width:100%; box-sizing:border-box;", board_module._CSS)
         self.assertIn("const setBoardScaleMode = (nextMode, { notify = true } = {}) =>", board_module._JS)
         self.assertIn("setTriggerValue('scale_mode', { scale_mode: isReadableMode ? 'readable' : 'to_scale' })", board_module._JS)
-        self.assertIn("const printYamazumiBoard = () =>", board_module._JS)
-        self.assertIn("printBtn.onclick = printYamazumiBoard", board_module._JS)
+        self.assertIn("const printYamazumiBoard = (filterMode = 'all') =>", board_module._JS)
+        self.assertIn("printBtn.onclick = openPrintDialog", board_module._JS)
 
     def test_dialog_actions_keep_document_full_screen(self) -> None:
         for trigger_name in ("add_pitch", "add_element", "edit_pitch", "edit_element"):

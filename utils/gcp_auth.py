@@ -157,16 +157,10 @@ def _get_streamlit_request_headers() -> Mapping[str, Any]:
     return {}
 
 
-def detect_authenticated_user_email(
+def detect_verified_sso_email(
     headers: Mapping[str, Any] | None = None,
 ) -> str:
-    """Return the authenticated collaborator email from GCP IAP / Okta headers if present.
-
-    Order of precedence:
-    1. Direct identity headers (e.g., `X-Goog-Authenticated-User-Email` from GCP IAP / Okta)
-    2. Signed JWT assertions (`X-Goog-IAP-JWT-Assertion` / Okta OIDC claims)
-    3. `PAAG_DEFAULT_EDITOR` environment variable (if configured)
-    """
+    """Return the verified SSO collaborator email from GCP IAP / Okta HTTP headers or JWTs only."""
     active_headers = headers if headers is not None else _get_streamlit_request_headers()
     if active_headers:
         lower_map: dict[str, str] = {}
@@ -185,6 +179,22 @@ def detect_authenticated_user_email(
             extracted = _extract_email_from_jwt_payload(raw_jwt)
             if extracted:
                 return extracted
+    return ""
+
+
+def detect_authenticated_user_email(
+    headers: Mapping[str, Any] | None = None,
+) -> str:
+    """Return the authenticated collaborator email from GCP IAP / Okta headers if present.
+
+    Order of precedence:
+    1. Direct identity headers (e.g., `X-Goog-Authenticated-User-Email` from GCP IAP / Okta)
+    2. Signed JWT assertions (`X-Goog-IAP-JWT-Assertion` / Okta OIDC claims)
+    3. `PAAG_DEFAULT_EDITOR` environment variable (if configured)
+    """
+    verified = detect_verified_sso_email(headers=headers)
+    if verified:
+        return verified
 
     env_default = clean_iap_okta_identity(os.environ.get("PAAG_DEFAULT_EDITOR"))
     if env_default:

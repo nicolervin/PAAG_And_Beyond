@@ -633,6 +633,18 @@ TROUBLESHOOTING_FAQS: list[dict[str, str]] = [
             "- **Edit first, then Save**: Update the row in the main table (or card) and click **Save & Refresh** / **Update**—saving your edit automatically refreshes the upstream snapshot and clears the flag in one step."
         ),
     },
+    {
+        "question": "How does live collaboration work when multiple teammates view or edit the same project?",
+        "answer": (
+            "The sidebar shows **🟢 Live** collaborator badges whenever teammates are viewing the same project. "
+            "When another collaborator saves changes, a subtle **Live update** notification appears in the **bottom-left corner** "
+            "for 10 seconds (or until the next change), and you can toggle **Pause live notifications** in the sidebar at any time "
+            "to mute these updates while every change continues to be logged in each page's **History** table. "
+            "Upper-right toast notifications are reserved strictly for your own actions. "
+            "If you try to save edits to a cell that another collaborator already changed and saved, a **Save Conflict Detected** "
+            "popup window prompts you to either **Overwrite with my changes**, **Discard my changes**, or **Return to review**."
+        ),
+    },
 ]
 
 

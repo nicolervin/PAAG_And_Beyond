@@ -45,7 +45,7 @@ If a request describes a new page, module, table, persisted field, or feature no
 2. What exact relationship or foreign key links the data to the critical thread (Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance)?
 3. Is the module project-wide or scenario-specific under the scope rules in `DATA_DICTIONARY.md`?
 4. Does it require a new table, or can an existing table serve it? If new, what fields are required and why is an existing table insufficient?
-5. Which `DESIGN_SYSTEM.md` standards apply, including deletion, save action, audit logging, history, scenario badges, and help text?
+5. Which `DESIGN_SYSTEM.md` standards apply, including deletion, save action, concurrent conflict protection, audit logging, history, scenario badges, and help text?
 
 After answers are supplied, add or update the `Proposed modules — pending owner review` section in `DATA_DICTIONARY.md` with the module name, answers, proposer, and date. Then implementation may proceed in the requester's branch. Do not skip this gate. If questions 1–3 cannot be answered, stop and direct the proposal to the project owner.
 
@@ -84,7 +84,11 @@ Read and follow `DESIGN_SYSTEM.md` before changing any table or UI. Reuse `utils
 - Apply `apply_pending_table_editor_reset(editor_key)` before constructing an editor that may need clearing. After a successful write, call `request_table_editor_reset(editor_key)` and rerun so stale edits or selections do not replay.
 - Unsaved-change Undo normally clears the editor state and reruns. Use the existing model/fishbone snapshot pattern only when a multi-table operation genuinely needs saved-state Undo.
 - Consume one-shot custom-component triggers so they cannot replay on later reruns.
-- Preserve rows hidden by filters with `merge_filtered_edits()` and retain hidden internal IDs for callback/write resolution. Remove truly sensitive fields before sending data to the browser.
+- Preserve rows hidden by filters with `merge_filtered_edits()` and retain hidden internal IDs for callback/write resolution. Always resolve edited row IDs from the `st.data_editor` return DataFrame (never by positional index into a freshly re-queried DataFrame) so concurrent row reordering cannot mis-target records. Remove truly sensitive fields before sending data to the browser.
+- Protect every save path against silent concurrent overwrites using the shared helpers in `utils/table_ui.py`:
+  - **Editable tables (`st.data_editor`):** Always pair with `editable_table_footer(editor_key=...)` and retain the `"id"` column so cell-level conflict detection (`Save Conflict Detected` modal) and unedited-column auto-merging run automatically.
+  - **Modal record-edit dialogs (`@st.dialog`):** Capture a baseline snapshot in `st.session_state` when the dialog opens, run `compare_record_field_conflicts()` against the live DB record on submit to auto-merge untouched fields, and block conflicting saves with `render_inline_conflict_resolution()`.
+  - **Interactive canvases, drag-and-drop boards, and standalone forms:** Track clean baseline state in `st.session_state`, compare changed items by stable ID against live DB state before persisting, and invoke `trigger_standalone_conflict_dialog()`, `check_standalone_conflict_resolution()`, and `render_standalone_conflict_dialog()`.
 - Validate a complete bulk operation before writing; never partially apply it.
 - Record every persisted change with `record_audit_event()` and Current editor attribution, then expose the relevant `audit_history()` at the bottom of the screen as required by `DESIGN_SYSTEM.md`.
 - Do not invent universal business statuses. Status values are specific to their table.

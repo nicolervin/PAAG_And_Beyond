@@ -10,6 +10,7 @@ from pathlib import Path
 import pickle
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, TypeVar
 import zlib
 
@@ -150,6 +151,16 @@ _SCOPE_WRITE_EPOCHS: dict[str, int] = {
     "catalog": 0,
     "scenario": 0,
 }
+_LAST_WRITE_METADATA: dict[str, Any] = {
+    "epoch": 0,
+    "project_id": "",
+    "table_name": "",
+    "action": "",
+    "editor_name": "",
+    "timestamp": "",
+    "session_id": "",
+}
+_COLLABORATOR_PRESENCE: dict[str, dict[str, Any]] = {}
 _SCENARIO_MIGRATION_GUARD: set[tuple[Any, ...]] = set()
 _INITIALIZED_SCHEMAS: set[tuple[Any, ...]] = set()
 
@@ -209,6 +220,7 @@ def bump_write_epoch(
     global _DB_WRITE_EPOCH
     with _EPOCH_LOCK:
         _DB_WRITE_EPOCH += 1
+        _LAST_WRITE_METADATA["epoch"] = _DB_WRITE_EPOCH
         normalized_tables = {str(t).strip().lower() for t in (modified_tables or ()) if str(t).strip()}
         if scope == "scenario" or (
             scope is None
@@ -225,6 +237,107 @@ def bump_write_epoch(
             if scope and scope not in _SCOPE_WRITE_EPOCHS:
                 _SCOPE_WRITE_EPOCHS[scope] = 1
         return _DB_WRITE_EPOCH
+
+
+def record_write_attribution(
+    *,
+    project_id: str = "",
+    table_name: str = "",
+    action: str = "",
+    editor_name: str = "",
+    timestamp: str = "",
+    session_id: str = "",
+) -> None:
+    """Record who performed the most recent database write for live collaboration banners."""
+    with _EPOCH_LOCK:
+        _LAST_WRITE_METADATA["project_id"] = str(project_id or "").strip()
+        _LAST_WRITE_METADATA["table_name"] = str(table_name or "").strip()
+        _LAST_WRITE_METADATA["action"] = str(action or "").strip()
+        _LAST_WRITE_METADATA["editor_name"] = str(editor_name or "").strip()
+        _LAST_WRITE_METADATA["timestamp"] = str(timestamp or "").strip()
+        _LAST_WRITE_METADATA["session_id"] = str(session_id or "").strip()
+
+
+def get_last_write_metadata() -> dict[str, Any]:
+    """Return a copy of the latest write attribution metadata and epoch."""
+    with _EPOCH_LOCK:
+        meta = dict(_LAST_WRITE_METADATA)
+        meta["epoch"] = _DB_WRITE_EPOCH
+        return meta
+
+
+def record_collaborator_heartbeat(
+    session_id: str,
+    *,
+    editor_name: str = "",
+    project_id: str | None = None,
+    scenario_id: str | None = None,
+    page_title: str = "",
+    ttl_seconds: float = 45.0,
+) -> None:
+    """Update the live presence entry for an active browser session and prune expired sessions."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    now_mono = time.monotonic()
+    cutoff = now_mono - max(5.0, float(ttl_seconds))
+    with _EPOCH_LOCK:
+        stale_ids = [
+            k
+            for k, v in _COLLABORATOR_PRESENCE.items()
+            if float(v.get("last_seen_monotonic", 0.0)) < cutoff
+        ]
+        for k in stale_ids:
+            _COLLABORATOR_PRESENCE.pop(k, None)
+        _COLLABORATOR_PRESENCE[sid] = {
+            "session_id": sid,
+            "editor_name": str(editor_name or "").strip() or "Anonymous collaborator",
+            "project_id": str(project_id or "").strip(),
+            "scenario_id": str(scenario_id or "").strip(),
+            "page_title": str(page_title or "").strip() or "Overview",
+            "last_seen_monotonic": now_mono,
+        }
+
+
+def get_active_collaborators(
+    *,
+    project_id: str | None = None,
+    scenario_id: str | None = None,
+    exclude_session_id: str | None = None,
+    ttl_seconds: float = 45.0,
+) -> list[dict[str, Any]]:
+    """Return active collaborator sessions matching the optional project/scenario filter."""
+    now_mono = time.monotonic()
+    cutoff = now_mono - max(5.0, float(ttl_seconds))
+    want_proj = str(project_id or "").strip()
+    want_scen = str(scenario_id or "").strip()
+    exclude_sid = str(exclude_session_id or "").strip()
+    results: list[dict[str, Any]] = []
+    with _EPOCH_LOCK:
+        stale_ids = [
+            k
+            for k, v in _COLLABORATOR_PRESENCE.items()
+            if float(v.get("last_seen_monotonic", 0.0)) < cutoff
+        ]
+        for k in stale_ids:
+            _COLLABORATOR_PRESENCE.pop(k, None)
+        for sid, info in _COLLABORATOR_PRESENCE.items():
+            if exclude_sid and sid == exclude_sid:
+                continue
+            if want_proj and info.get("project_id") != want_proj:
+                continue
+            if want_scen and info.get("scenario_id") != want_scen:
+                continue
+            results.append(
+                {
+                    "session_id": sid,
+                    "editor_name": info.get("editor_name", "Anonymous collaborator"),
+                    "project_id": info.get("project_id", ""),
+                    "scenario_id": info.get("scenario_id", ""),
+                    "page_title": info.get("page_title", "Overview"),
+                }
+            )
+    return results
 
 
 def get_write_epoch(scope: str = "all") -> int:

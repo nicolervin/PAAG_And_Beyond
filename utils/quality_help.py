@@ -225,16 +225,16 @@ The **PFMEA line items** table presents the multi-level PFMEA hierarchy (`Failur
 
 | Code | Meaning |
 | --- | --- |
-| **S** | Safety (Critical to Product Safety) |
-| **R** | Regulatory |
-| **E** | Engineering CTQ |
-| **P** | Process CTQ |
-| **C** | Critical Characteristic |
-| **H** | High Impact / High RPN |
-| **K** | Key Characteristic |
-| **F** | Fit / Function |
-| **V** | Verification / Visual |
-| **L** | Low Impact / Minor |
+| S | Critical to Product Safety |
+| R | Regulatory |
+| E | Engineering CTQ |
+| P | Process CTQ |
+| P- | Process CTQ done at qualification |
+| Q | Quality Specific |
+| E- | Engineering CTQ at qualification |
+| M | Maintain Control |
+| PM | Preventative Maintenance |
+
 """,
     ),
     (

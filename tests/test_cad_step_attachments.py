@@ -94,6 +94,8 @@ class CadStepAttachmentTests(unittest.TestCase):
         # Delete view
         img_id = matching[0]["id"]
         store.delete_part_image(img_id)
+        self.assertTrue(saved_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(saved_path.exists())
         views_after = store.part_images(part_id)
         self.assertFalse(any(v["id"] == img_id for v in views_after))
@@ -152,6 +154,8 @@ class CadStepAttachmentTests(unittest.TestCase):
 
         # Delete visual aid
         store.delete_pitch_visual_media(self.project_id, self.scenario_id, media_id)
+        self.assertTrue(file_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(file_path.exists())
         remaining = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
         self.assertFalse(any(m["id"] == media_id for m in remaining))

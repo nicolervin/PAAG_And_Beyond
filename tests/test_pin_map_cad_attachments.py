@@ -251,6 +251,9 @@ class PinMapCadAttachmentsTests(unittest.TestCase):
         self.assertIn(str(cad_path), impact["image_paths"])
 
         delete_layout_revision(self.project_id, rev["id"], self.editor)
+        self.assertTrue(img_path.exists())
+        self.assertTrue(cad_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(img_path.exists())
         self.assertFalse(cad_path.exists())
 

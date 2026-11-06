@@ -144,6 +144,19 @@ _NAV_CSS = """
 _NAV_JS = """
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component
+  if (!window.__paagBeforeUnloadGuardInstalled && typeof window !== 'undefined') {
+    window.__paagBeforeUnloadGuardInstalled = true
+    window.addEventListener('beforeunload', (event) => {
+      const hasUnsavedMarker = typeof document !== 'undefined' && Boolean(
+        document.querySelector('[data-paag-unsaved="true"]')
+      )
+      if (window.__paagHasUnsavedChanges || hasUnsavedMarker) {
+        event.preventDefault()
+        event.returnValue = ''
+        return ''
+      }
+    })
+  }
   if (window.__paagEmptyMultiSelectObserver) {
     try {
       window.__paagEmptyMultiSelectObserver.disconnect()
@@ -353,7 +366,7 @@ export default function(component) {
 """
 
 _SPLIT_NAVIGATION = st.components.v2.component(
-    "paag_split_navigation_v5",
+    "paag_split_navigation_v6",
     html=_NAV_HTML,
     css=_NAV_CSS,
     js=_NAV_JS,

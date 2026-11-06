@@ -2379,6 +2379,19 @@ def infer_part_feature_rules(
             "val_tokens_by_val": val_tok_map,
         }
 
+    existing_part_rules_map: dict[str, list[str]] = {}
+    for r_row in read_rows(
+        "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+        (project_id,),
+    ):
+        r_pid = str(r_row.get("part_id") or "").strip()
+        r_fid = str(r_row.get("feature_id") or "").strip()
+        r_val = str(r_row.get("value") or "").strip()
+        if r_pid and r_fid in active_features_by_id and r_val:
+            tok = f"{r_fid}::{r_val}"
+            if tok not in existing_part_rules_map.setdefault(r_pid, []):
+                existing_part_rules_map[r_pid].append(tok)
+
     ordered_active_feature_ids = [
         str(row["id"])
         for row in sorted(
@@ -2459,7 +2472,9 @@ def infer_part_feature_rules(
         p_models = raw_models & part_eval_tree_models
 
         if not p_models:
-            if str(p.get("model_applicability") or "").strip().lower() in ("all", "all models"):
+            if pid in existing_part_rules_map:
+                inferred[pid] = existing_part_rules_map[pid]
+            elif str(p.get("model_applicability") or "").strip().lower() in ("all", "all models"):
                 inferred[pid] = ["All models"]
             continue
 

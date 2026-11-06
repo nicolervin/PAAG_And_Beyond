@@ -4352,6 +4352,7 @@ def import_yamazumi_rows(
     section_ids_by_name: dict[str, str],
     *,
     replace_existing_elements: bool = False,
+    replace_imported_pitches_only: bool = False,
     source_label: str = "Excel import",
     pitch_rows: pd.DataFrame | None = None,
 ) -> tuple[int, int, int]:
@@ -4472,7 +4473,7 @@ def import_yamazumi_rows(
             )
             for aid in dict.fromkeys(area_ids.values())
         }
-        if False and replace_existing_elements:
+        if replace_existing_elements and not replace_imported_pitches_only:
             for area_id in dict.fromkeys(area_ids.values()):
                 conn.execute(
                     "DELETE FROM yamazumi_elements WHERE project_id=? AND area_id=?",
@@ -4491,7 +4492,7 @@ def import_yamazumi_rows(
         for row, area_name, pitch_number in prepared_pitches:
             area_id = area_ids[area_name]
             pitch_key = (area_id, pitch_number.casefold())
-            if pitch_key not in pitch_ids:
+            if replace_imported_pitches_only and pitch_key not in pitch_ids:
                 existing_pitch = conn.execute(
                     """SELECT p.id, p.area_id, p.pitch_number, p.pitch_type,
                               p.feeds_into_pitch_id, p.model_variants, p.sequence
@@ -4587,7 +4588,7 @@ def import_yamazumi_rows(
                      pitch_sequence, json.dumps(pitch_variants),
                      row_pitch_type, existing_target_id, timestamp),
                 )
-            if False and pitch_key not in pitch_ids:
+            if not replace_imported_pitches_only and pitch_key not in pitch_ids:
                 existing_pitch = conn.execute(
                     """SELECT id, pitch_number, pitch_type, feeds_into_pitch_id, model_variants
                        FROM yamazumi_pitches

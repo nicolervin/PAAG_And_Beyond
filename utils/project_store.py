@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys as _sys
 from utils import db_core as _db_core
+from utils.gcp_auth import detect_authenticated_user_email
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
@@ -21,8 +22,17 @@ def _last_active_workspace_path() -> Path:
     return db_path.with_name(f"{db_path.name}-session")
 
 
-def get_last_active_workspace() -> dict[str, str | None]:
-    """Return the last active project_id and scenario_id for the current local database."""
+def _normalize_workspace_editor_key(editor_name: str | None = None) -> str:
+    if editor_name is not None:
+        return str(editor_name).strip().lower()
+    try:
+        return str(detect_authenticated_user_email() or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def get_last_active_workspace(editor_name: str | None = None) -> dict[str, str | None]:
+    """Return the last active project_id and scenario_id for the current collaborator or local database."""
     path = _last_active_workspace_path()
     if not path.is_file():
         return {"project_id": None, "scenario_id": None}
@@ -32,6 +42,14 @@ def get_last_active_workspace() -> dict[str, str | None]:
         return {"project_id": None, "scenario_id": None}
     if not isinstance(payload, dict):
         return {"project_id": None, "scenario_id": None}
+    editor_key = _normalize_workspace_editor_key(editor_name)
+    by_editor = payload.get("by_editor")
+    if editor_key and isinstance(by_editor, dict):
+        user_entry = by_editor.get(editor_key)
+        if isinstance(user_entry, dict):
+            u_proj = str(user_entry.get("project_id") or "").strip() or None
+            u_scen = str(user_entry.get("scenario_id") or "").strip() or None
+            return {"project_id": u_proj, "scenario_id": u_scen}
     project_id = str(payload.get("project_id") or "").strip() or None
     scenario_id = str(payload.get("scenario_id") or "").strip() or None
     return {"project_id": project_id, "scenario_id": scenario_id}
@@ -40,29 +58,68 @@ def get_last_active_workspace() -> dict[str, str | None]:
 def set_last_active_workspace(
     project_id: str | None,
     scenario_id: str | None = None,
+    *,
+    editor_name: str | None = None,
 ) -> None:
-    """Persist the last active project_id and scenario_id for the current local database."""
+    """Persist the last active project_id and scenario_id per collaborator and database."""
     path = _last_active_workspace_path()
     normalized_project_id = str(project_id or "").strip() or None
     normalized_scenario_id = (
         (str(scenario_id or "").strip() or None) if normalized_project_id else None
     )
-    current = get_last_active_workspace()
-    if (
-        current.get("project_id") == normalized_project_id
-        and current.get("scenario_id") == normalized_scenario_id
-        and path.is_file()
-    ):
-        return
+    editor_key = _normalize_workspace_editor_key(editor_name)
+    payload: dict[str, object] = {}
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = dict(loaded)
+        except (OSError, json.JSONDecodeError, TypeError):
+            payload = {}
+
+    by_editor_raw = payload.get("by_editor")
+    by_editor: dict[str, dict[str, str | None]] = (
+        dict(by_editor_raw) if isinstance(by_editor_raw, dict) else {}
+    )
+    target_pair = {
+        "project_id": normalized_project_id,
+        "scenario_id": normalized_scenario_id,
+    }
+    if editor_key:
+        existing_user = by_editor.get(editor_key)
+        if (
+            isinstance(existing_user, dict)
+            and existing_user.get("project_id") == normalized_project_id
+            and existing_user.get("scenario_id") == normalized_scenario_id
+            and payload.get("project_id") == normalized_project_id
+            and payload.get("scenario_id") == normalized_scenario_id
+            and path.is_file()
+        ):
+            return
+        by_editor[editor_key] = target_pair
+        payload["project_id"] = normalized_project_id
+        payload["scenario_id"] = normalized_scenario_id
+    else:
+        if (
+            payload.get("project_id") == normalized_project_id
+            and payload.get("scenario_id") == normalized_scenario_id
+            and path.is_file()
+        ):
+            return
+        payload["project_id"] = normalized_project_id
+        payload["scenario_id"] = normalized_scenario_id
+        if normalized_project_id is None:
+            by_editor.clear()
+
+    if by_editor:
+        payload["by_editor"] = by_editor
+    else:
+        payload.pop("by_editor", None)
+
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(
-                {
-                    "project_id": normalized_project_id,
-                    "scenario_id": normalized_scenario_id,
-                }
-            ),
+            json.dumps(payload),
             encoding="utf-8",
         )
     except OSError:

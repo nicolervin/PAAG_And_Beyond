@@ -65,7 +65,7 @@ class FishboneYamazumiAreaTests(unittest.TestCase):
                 {self.primary_scenario_id, self.archived_scenario_id},
             )
             self.assertEqual({str(row["name"]) for row in rows}, {expected_name})
-            self.assertTrue(all(row["takt_override_s"] is None for row in rows))
+            self.assertTrue(all(float(row["takt_override_s"]) == 60.0 for row in rows))
             self.assertEqual(len({str(row["id"]) for row in rows}), 2)
 
     def test_creation_is_idempotent(self) -> None:

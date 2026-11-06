@@ -158,7 +158,7 @@ class ProjectManagementTests(unittest.TestCase):
         result = store.delete_project(proj_id, editor_name="Test Editor")
         self.assertEqual(result["project_id"], proj_id)
         self.assertEqual(result["project_name"], "Gamma Project")
-        self.assertGreater(result["deleted_files_count"], 0)
+        self.assertEqual(result["deleted_files_count"], 0)
 
         # Check project is deleted
         self.assertIsNone(store.get_project(proj_id))
@@ -179,6 +179,8 @@ class ProjectManagementTests(unittest.TestCase):
             )
 
         # Check upload file on disk was unlinked
+        self.assertTrue(mock_upload_file.exists())
+        store.empty_recycle_bin(proj_id)
         self.assertFalse(mock_upload_file.exists())
 
     def test_delete_nonexistent_project_raises_value_error(self) -> None:

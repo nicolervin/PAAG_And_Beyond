@@ -400,6 +400,8 @@ class LayoutStoreTests(unittest.TestCase):
         self.assertEqual(list_layout_revisions(layout_id), [])
 
         # Verify image file is cleaned up from disk
+        self.assertTrue(img_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(img_path.exists())
 
     def test_single_revision_deletion(self) -> None:
@@ -445,11 +447,15 @@ class LayoutStoreTests(unittest.TestCase):
         self.assertEqual(revisions_remaining[0]["id"], rev2["id"])
 
         # Verify Rev 1 file is deleted, Rev 2 file remains
+        self.assertTrue(img1_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(img1_path.exists())
         self.assertTrue(img2_path.exists())
 
         # Cleanup Rev 2
         delete_layout(self.project_id, layout_id, self.editor)
+        self.assertTrue(img2_path.exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(img2_path.exists())
 
     @unittest.skipUnless(HAS_PYPDFIUM2, "pypdfium2 is not installed")
@@ -482,6 +488,8 @@ class LayoutStoreTests(unittest.TestCase):
 
         # Cleanup
         delete_layout(self.project_id, layout_id, self.editor)
+        self.assertTrue(Path(rev["image_path"]).exists())
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(Path(rev["image_path"]).exists())
 
     @unittest.skipUnless(HAS_PYPDFIUM2, "pypdfium2 is not installed")

@@ -266,7 +266,7 @@ class TestYamazumiPdfImport(unittest.TestCase):
 
         df = result["dataframe"]
         self.assertFalse(df.empty)
-        self.assertEqual(len(df), 63)
+        self.assertEqual(len(df), 59)
 
         # Check required columns
         expected_cols = {
@@ -282,7 +282,7 @@ class TestYamazumiPdfImport(unittest.TestCase):
         self.assertIn("01-PED-007", unique_pitches)
         self.assertIn("01-PED-011", unique_pitches)
         self.assertIn("01-PED-036", unique_pitches)
-        self.assertEqual(len(unique_pitches), 11)
+        self.assertEqual(len(unique_pitches), 13)
 
         # Check pitch friendly name for 01-PED-036
         ped36 = df[df["Pitch_number"] == "01-PED-036"]
@@ -304,7 +304,7 @@ class TestYamazumiPdfImport(unittest.TestCase):
 
         self.assertEqual(
             result["dataframe"]["Work_Type"].value_counts().to_dict(),
-            {"Cycle": 46, "Fluctuation": 10, "Periodic": 9},
+            {"Cycle": 35, "Fluctuation": 9, "Periodic": 9},
         )
 
     def test_import_yamazumi_rows_pdf_and_replace(self):
@@ -352,11 +352,11 @@ class TestYamazumiPdfImport(unittest.TestCase):
             source_label="PDF import",
         )
         self.assertEqual(area_count, 1)
-        self.assertEqual(pitch_count, 11)
-        self.assertEqual(element_count, 63)
+        self.assertEqual(pitch_count, 13)
+        self.assertEqual(element_count, 59)
 
         elems = yamazumi_elements_for_scenario(project_id, scenario_id)
-        self.assertEqual(len(elems), 63)
+        self.assertEqual(len(elems), 59)
         self.assertTrue((elems["source"] == "PDF import").all())
 
         # 2. Second import WITH replace_existing_elements=True
@@ -369,10 +369,10 @@ class TestYamazumiPdfImport(unittest.TestCase):
             replace_existing_elements=True,
             source_label="PDF import",
         )
-        self.assertEqual(element_count2, 63)
+        self.assertEqual(element_count2, 59)
 
         elems2 = yamazumi_elements_for_scenario(project_id, scenario_id)
-        self.assertEqual(len(elems2), 63)
+        self.assertEqual(len(elems2), 59)
         self.assertTrue((elems2["source"] == "PDF import").all())
 
 
