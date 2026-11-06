@@ -1607,3 +1607,579 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
             supp_path.unlink(missing_ok=True)
             if "copied_path" in locals():
                 copied_path.unlink(missing_ok=True)
+
+    def test_search_parts_remembers_selected_parts_across_searches(self) -> None:
+        part_id_1 = str(uuid4())
+        part_id_2 = str(uuid4())
+        assign_1 = str(uuid4())
+        assign_2 = str(uuid4())
+        yam_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, factory_nickname,
+                    model_applicability, updated_at)
+                   VALUES (?, ?, 'PART-100', 'Bracket Assembly', 'Front clip', 'All', ?),
+                          (?, ?, 'PART-200', 'Screw Hex Head', 'Tiny bolt', 'All', ?)""",
+                (part_id_1, self.project_id, timestamp, part_id_2, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, part_id, section_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 2, 'Mount bracket', ?),
+                          (?, ?, ?, ?, 2, 4, 'Fasten bracket', ?)""",
+                (
+                    assign_1,
+                    self.project_id,
+                    part_id_1,
+                    self.section_id,
+                    timestamp,
+                    assign_2,
+                    self.project_id,
+                    part_id_2,
+                    self.section_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'Base', '["Base"]', 'Cycle',
+                           'Install bracket and screws', 12.0, 10, ?)""",
+                (yam_id, self.project_id, self.area_id, self.pitch_id, timestamp),
+            )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Persistent Search Tester"
+        app.session_state[
+            f"process_yamazumi_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        part_source_key = (
+            f"process_part_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        )
+        selected_ids_key = f"process_selected_part_ids_{self.scenario_id}_{self.section_id}"
+
+        # 1. Search for PART-100 and select it
+        search_box = [ti for ti in app.text_input if ti.label == "Search parts"][0]
+        search_box.set_value("PART-100").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        app.session_state[part_source_key] = {
+            "selection": {"rows": [0], "columns": [], "cells": []}
+        }
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.session_state[selected_ids_key]), [part_id_1])
+
+        # 2. Clear search and verify PART-100 remains selected
+        search_box = [ti for ti in app.text_input if ti.label == "Search parts"][0]
+        search_box.set_value("").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.session_state[selected_ids_key]), [part_id_1])
+
+        # 3. Search for PART-200 and verify PART-100 is still remembered
+        search_box = [ti for ti in app.text_input if ti.label == "Search parts"][0]
+        search_box.set_value("PART-200").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.session_state[selected_ids_key]), [part_id_1])
+
+        # 4. Select PART-200 while searching for PART-200; both PART-100 and PART-200 are now selected
+        app.session_state[part_source_key] = {
+            "selection": {"rows": [0], "columns": [], "cells": []}
+        }
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(
+            list(app.session_state[selected_ids_key]),
+            [part_id_1, part_id_2],
+        )
+
+        # Verify both parts' classification widgets are rendered and submit creates a group with both parts
+        submit_btn = app.button(
+            key=f"process_pairing_submit_{self.scenario_id}_{self.section_id}_{yam_id}"
+        )
+        self.assertIn("2 parts", submit_btn.label)
+        submit_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.error), [])
+
+        we_id = str(
+            store.query(
+                "SELECT process_element_id FROM yamazumi_elements WHERE id=?",
+                (yam_id,),
+            )[0]["process_element_id"]
+        )
+        groups = store.process_part_groups(
+            self.project_id, self.scenario_id, we_id, active_only=True
+        )
+        self.assertEqual(len(groups), 1)
+        paired_part_numbers = [opt["part_number"] for opt in groups[0]["options"]]
+        paired_part_numbers = [opt["part_number"] for opt in groups[0]["options"]]
+        self.assertEqual(
+            paired_part_numbers,
+            ["PART-100", "PART-200"],
+            msg=f"groups={groups}, warnings={[w.value for w in app.warning]}, toasts={[t.value for t in app.toast]}",
+        )
+
+    def test_fully_consumed_part_defaults_to_handle_in_create_paag_elements(self) -> None:
+        part_full_id = str(uuid4())
+        part_partial_id = str(uuid4())
+        assign_full_id = str(uuid4())
+        assign_partial_id = str(uuid4())
+        we_initial_id = str(uuid4())
+        yam_target_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, factory_nickname,
+                    model_applicability, updated_at)
+                   VALUES (?, ?, 'PART-FULL', 'Fully Consumed Bracket', 'Bracket', 'All', ?),
+                          (?, ?, 'PART-PARTIAL', 'Partially Consumed Screw', 'Screw', 'All', ?)""",
+                (
+                    part_full_id,
+                    self.project_id,
+                    timestamp,
+                    part_partial_id,
+                    self.project_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, part_id, section_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 1, 'Mount bracket', ?),
+                          (?, ?, ?, ?, 2, 3, 'Fasten bracket', ?)""",
+                (
+                    assign_full_id,
+                    self.project_id,
+                    part_full_id,
+                    self.section_id,
+                    timestamp,
+                    assign_partial_id,
+                    self.project_id,
+                    part_partial_id,
+                    self.section_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, description,
+                    cycle_time_s, model_applicability, status, updated_at)
+                   VALUES (?, ?, ?, 10, 'P01', 'Initial consume step', 'Initial consume step',
+                           10.0, 'All', 'Confirmed', ?)""",
+                (we_initial_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'Base', '["Base"]', 'Cycle',
+                           'Subsequent handling step', 8.0, 20, ?)""",
+                (yam_target_id, self.project_id, self.area_id, self.pitch_id, timestamp),
+            )
+
+        # Consume 1 of 1 of PART-FULL (fully consumed) and 1 of 3 of PART-PARTIAL (partially consumed)
+        store.save_process_part_group(
+            self.project_id,
+            self.scenario_id,
+            we_initial_id,
+            self.section_id,
+            None,
+            "Initial Consume",
+            "Use all",
+            1.0,
+            [part_full_id, part_partial_id],
+            handling_types_by_part={
+                part_full_id: "Consume",
+                part_partial_id: "Consume",
+            },
+            fishbone_assignment_ids_by_part={
+                part_full_id: assign_full_id,
+                part_partial_id: assign_partial_id,
+            },
+            quantities_by_part={
+                part_full_id: 1.0,
+                part_partial_id: 1.0,
+            },
+        )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Handle Default Tester"
+        app.session_state[
+            f"process_yamazumi_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.session_state[
+            f"process_part_source_consumed_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        ] = {"selection": {"rows": [0, 1], "columns": [], "cells": []}}
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        full_ht_sb = app.selectbox(
+            key=f"process_pairing_handling_{self.scenario_id}_{self.section_id}_{yam_target_id}_{part_full_id}"
+        )
+        partial_ht_sb = app.selectbox(
+            key=f"process_pairing_handling_{self.scenario_id}_{self.section_id}_{yam_target_id}_{part_partial_id}"
+        )
+        self.assertEqual(full_ht_sb.value, "Handle")
+        self.assertEqual(partial_ht_sb.value, "Consume")
+
+    def test_selecting_tool_before_create_paag_elements_links_parts_and_clears_selection(
+        self,
+    ) -> None:
+        part_id = str(uuid4())
+        assign_id = str(uuid4())
+        yam_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, factory_nickname,
+                    model_applicability, updated_at)
+                   VALUES (?, ?, 'SCR-GND-01', 'GROUND SCREW', 'Ground screw', 'All', ?)""",
+                (part_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, part_id, section_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 2, 'Ground screw mount', ?)""",
+                (assign_id, self.project_id, part_id, self.section_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'All models', '["All models"]', 'Cycle',
+                           'Drive ground screw to front control bracket', 3.72, 10, ?)""",
+                (yam_id, self.project_id, self.area_id, self.pitch_id, timestamp),
+            )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Tool Pairing Tester"
+        app.session_state[
+            f"process_yamazumi_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.session_state[
+            f"process_part_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        ] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Select "Torque tool" in Tool category before clicking Create PAAG Elements
+        tool_sb = app.selectbox(
+            key=f"process_tool_cat_{self.scenario_id}_{self.section_id}_{yam_id}"
+        )
+        tool_sb.select("Torque tool").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Selecting the tool must NOT prematurely reconcile the Yamazumi element before submission
+        self.assertIsNone(
+            store.process_element_id_for_yamazumi(
+                self.project_id, self.scenario_id, yam_id
+            )
+        )
+
+        # Clicking Create PAAG Elements now reconciles the step, saves the tool, links the part, and clears selection
+        submit_btn = app.button(
+            key=f"process_pairing_submit_{self.scenario_id}_{self.section_id}_{yam_id}"
+        )
+        submit_btn.click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(list(app.error), [])
+
+        we_id = store.process_element_id_for_yamazumi(
+            self.project_id, self.scenario_id, yam_id
+        )
+        self.assertIsNotNone(we_id)
+        we_row = store.query(
+            "SELECT tool, resource_type FROM work_elements WHERE id=?",
+            (we_id,),
+        )[0]
+        self.assertEqual(we_row["tool"], "Torque tool")
+        self.assertEqual(we_row["resource_type"], "Human")
+
+        groups = store.process_part_groups(
+            self.project_id, self.scenario_id, str(we_id), active_only=True
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(
+            [opt["part_number"] for opt in groups[0]["options"]],
+            ["SCR-GND-01"],
+        )
+        selected_ids_key = f"process_selected_part_ids_{self.scenario_id}_{self.section_id}"
+        self.assertEqual(list(app.session_state[selected_ids_key]), [])
+
+    def test_switching_between_process_plan_and_paag_slides_preserves_selections(
+        self,
+    ) -> None:
+        other_section_id = store.add_assembly_section(
+            self.project_id, "Subassembly 2", "Assembly", self.section_id, ""
+        )
+        other_area_id = str(uuid4())
+        other_pitch_id = str(uuid4())
+        yam_id = str(uuid4())
+        part_id = str(uuid4())
+        assign_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_areas
+                   (id, project_id, scenario_id, section_id, name, updated_at)
+                   VALUES (?, ?, ?, ?, 'Sub Area 2', ?)""",
+                (other_area_id, self.project_id, self.scenario_id, other_section_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, 'S02', 'Pitch S02', ?)""",
+                (other_pitch_id, self.project_id, other_area_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, model_applicability, updated_at)
+                   VALUES (?, ?, 'TAB-PART-01', 'Tab Persistence Part', 'All', ?)""",
+                (part_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 1, 2, 'Tab persistence location', ?)""",
+                (assign_id, self.project_id, other_section_id, part_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'All models', '["All models"]', 'Cycle',
+                           'Install tab persistence part', 5.0, 10, ?)""",
+                (yam_id, self.project_id, other_area_id, other_pitch_id, timestamp),
+            )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Tab Switch Tester"
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Select the second Fishbone section on Process Plan
+        sec_sb = app.selectbox(key=f"process_pairing_section_{self.scenario_id}")
+        sec_sb.select(other_section_id).run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Select the Yamazumi work element and the part in Not consumed parts
+        work_key = f"process_yamazumi_source_{self.scenario_id}_{other_section_id}__editor_instance_0"
+        part_key = f"process_part_source_{self.scenario_id}_{other_section_id}__editor_instance_0"
+        app.session_state[work_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.session_state[part_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Select "Torque tool", update quantity, and enter parts search on Process Plan
+        tool_sb = app.selectbox(
+            key=f"process_tool_cat_{self.scenario_id}_{other_section_id}_{yam_id}"
+        )
+        tool_sb.select("Torque tool").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        qty_in = app.number_input(
+            key=f"process_pairing_quantity_{self.scenario_id}_{other_section_id}_{yam_id}_{part_id}"
+        )
+        qty_in.set_value(2.0).run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        search_in = app.text_input(
+            key=f"process_parts_search_{self.scenario_id}_{other_section_id}"
+        )
+        search_in.set_value("TAB-PART").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Switch to PAAG Slides tab
+        app.session_state["paag_tab"] = "PAAG Slides"
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertIsNotNone(app.selectbox(key=f"sec_active_select_{self.scenario_id}"))
+
+        # Switch back to Process Plan tab
+        app.session_state["paag_tab"] = "Process Plan"
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        # Verify section, work element selection, part selection, search, quantity, and tool category are all intact
+        self.assertEqual(
+            app.selectbox(key=f"process_pairing_section_{self.scenario_id}").value,
+            other_section_id,
+        )
+        self.assertEqual(
+            app.text_input(
+                key=f"process_parts_search_{self.scenario_id}_{other_section_id}"
+            ).value,
+            "TAB-PART",
+        )
+        self.assertEqual(
+            app.session_state[work_key]["selection"]["rows"],
+            [0],
+        )
+        self.assertEqual(
+            app.session_state[part_key]["selection"]["rows"],
+            [0],
+        )
+        self.assertEqual(
+            list(
+                app.session_state[
+                    f"process_selected_part_ids_{self.scenario_id}_{other_section_id}"
+                ]
+            ),
+            [part_id],
+        )
+        self.assertEqual(
+            app.selectbox(
+                key=f"process_tool_cat_{self.scenario_id}_{other_section_id}_{yam_id}"
+            ).value,
+            "Torque tool",
+        )
+        self.assertEqual(
+            app.number_input(
+                key=f"process_pairing_quantity_{self.scenario_id}_{other_section_id}_{yam_id}_{part_id}"
+            ).value,
+            2.0,
+        )
+
+    def test_handle_part_does_not_require_use_location_selection(self) -> None:
+        """Handling a consumed part disables Use / installation location and never fails with missing location."""
+        part_id = str(uuid4())
+        assign_1 = str(uuid4())
+        assign_2 = str(uuid4())
+        consume_we_id = str(uuid4())
+        consume_group_id = str(uuid4())
+        consume_opt_id = str(uuid4())
+        handle_yam_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, factory_nickname, model_applicability, updated_at)
+                   VALUES (?, ?, '308D3065P001', 'BRACKET FRONT CONTROL', 'Front Control Bracket', 'All', ?)""",
+                (part_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 10, 1, 'Location 1', ?),
+                          (?, ?, ?, ?, 20, 1, 'Location 2', ?)""",
+                (
+                    assign_1,
+                    self.project_id,
+                    self.section_id,
+                    part_id,
+                    timestamp,
+                    assign_2,
+                    self.project_id,
+                    self.section_id,
+                    part_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, description,
+                    cycle_time_s, model_applicability, status, updated_at)
+                   VALUES (?, ?, ?, 10, 'P1', 'Consume bracket', 'Consume bracket', 10.0, 'All', 'Draft', ?)""",
+                (consume_we_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO process_part_groups
+                   (id, project_id, scenario_id, work_element_id, section_id, name, selection_rule, quantity, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'Consume Bracket', 'Use all', 1, ?)""",
+                (
+                    consume_group_id,
+                    self.project_id,
+                    self.scenario_id,
+                    consume_we_id,
+                    self.section_id,
+                    timestamp,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO process_part_options
+                   (id, group_id, part_id, handling_type, fishbone_assignment_id, quantity, updated_at)
+                   VALUES (?, ?, ?, 'Consume', ?, 1, ?)""",
+                (consume_opt_id, consume_group_id, part_id, assign_1, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'All models', '["All models"]', 'Cycle',
+                           'Handle front control bracket', 8.0, 20, ?)""",
+                (handle_yam_id, self.project_id, self.area_id, self.pitch_id, timestamp),
+            )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Handle Tester"
+
+        work_key = f"process_yamazumi_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        part_key = f"process_part_source_consumed_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        placement_key = (
+            f"process_pairing_location_{self.scenario_id}_{self.section_id}_"
+            f"{handle_yam_id}_{part_id}"
+        )
+        handling_key = (
+            f"process_pairing_handling_{self.scenario_id}_{self.section_id}_"
+            f"{handle_yam_id}_{part_id}"
+        )
+        # Simulate a stale None placement in session_state while selecting Handle
+        app.session_state[work_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.session_state[part_key] = {"selection": {"rows": [0], "columns": [], "cells": []}}
+        app.session_state[placement_key] = None
+        app.session_state[handling_key] = "Handle"
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        loc_sb = app.selectbox(key=placement_key)
+        self.assertTrue(loc_sb.disabled)
+        self.assertEqual(loc_sb.value, assign_1)
+
+        grp_name_key = (
+            f"process_pairing_requirement_{self.scenario_id}_{self.section_id}_{handle_yam_id}"
+        )
+        submit_key = (
+            f"process_pairing_submit_{self.scenario_id}_{self.section_id}_{handle_yam_id}"
+        )
+        app.text_input(key=grp_name_key).set_value("Handle Bracket Step")
+        app.button(key=submit_key).click().run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual([e.value for e in app.error], [])
+
+        with store.connection() as conn:
+            saved_handle = conn.execute(
+                """SELECT o.handling_type, o.fishbone_assignment_id
+                   FROM process_part_options o
+                   JOIN process_part_groups g ON g.id = o.group_id
+                   WHERE g.project_id=? AND g.scenario_id=? AND o.part_id=? AND o.handling_type='Handle'""",
+                (self.project_id, self.scenario_id, part_id),
+            ).fetchone()
+        self.assertIsNotNone(saved_handle)
+        self.assertEqual(str(saved_handle["fishbone_assignment_id"]), assign_1)
+
+
+

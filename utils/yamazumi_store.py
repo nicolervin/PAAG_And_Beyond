@@ -2910,7 +2910,7 @@ def delete_yamazumi_elements(
     scenario_id: str,
     element_ids: list[str],
     *,
-    audit_editor_name: str,
+    audit_editor_name: str = "",
 ) -> dict[str, object]:
     """Delete selected scenario-owned work elements in one audited transaction."""
     normalized_ids = list(dict.fromkeys(
@@ -2919,9 +2919,8 @@ def delete_yamazumi_elements(
     if not normalized_ids:
         raise ValueError("Select at least one Yamazumi work element to delete.")
     editor_name = str(audit_editor_name or "").strip()
-    if not editor_name:
-        raise ValueError("Enter the Current editor before deleting work elements.")
     placeholders = ",".join("?" for _ in normalized_ids)
+    timestamp = now_iso()
     with connection() as conn:
         targets = conn.execute(
             f"""SELECT element.id, element.area_id
@@ -2973,6 +2972,7 @@ def delete_yamazumi_elements(
                     "The selected Yamazumi work elements changed before they could be "
                     "deleted. No work elements were deleted."
                 )
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
         record_audit_event(
             project_id,
             "Yamazumi elements",
@@ -2991,10 +2991,11 @@ def delete_yamazumi_pitch(
     pitch_id: str,
     *,
     scenario_id: str | None = None,
+    delete_elements: bool = False,
     audit_editor_name: str | None = None,
     audit_details: dict | None = None,
 ) -> int:
-    """Delete one pitch and return its work elements to the unassigned pool."""
+    """Delete one pitch and either return its work elements to Unassigned or delete them."""
     editor_name = None if audit_editor_name is None else audit_editor_name.strip()
     if audit_editor_name is not None and not editor_name:
         raise ValueError("Enter the Current editor before deleting a pitch.")
@@ -3034,16 +3035,23 @@ def delete_yamazumi_pitch(
             entity_label=pitch_label,
             deleted_by=editor_name or "",
         ):
-            conn.execute(
-                """UPDATE yamazumi_elements
-                   SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
-                   WHERE pitch_id=?""",
-                (timestamp, pitch_id),
-            )
+            if delete_elements:
+                conn.execute(
+                    "DELETE FROM yamazumi_elements WHERE project_id=? AND area_id=? AND pitch_id=?",
+                    (project_id, area_id, pitch_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE yamazumi_elements
+                       SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                       WHERE pitch_id=?""",
+                    (timestamp, pitch_id),
+                )
             conn.execute(
                 "DELETE FROM yamazumi_pitches WHERE id=? AND project_id=? AND area_id=?",
                 (pitch_id, project_id, area_id),
             )
+        _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
         if editor_name is not None:
             details = {
                 **(audit_details or {}),
@@ -3052,7 +3060,8 @@ def delete_yamazumi_pitch(
                 "pitch_id": pitch_id,
                 "pitch_number": str(existing["pitch_number"] or ""),
                 "pitch_name": str(existing["pitch_name"] or ""),
-                "elements_unassigned": int(moved),
+                "elements_unassigned": 0 if delete_elements else int(moved),
+                "elements_deleted": int(moved) if delete_elements else 0,
             }
             record_audit_event(
                 project_id,
@@ -3396,7 +3405,13 @@ def move_yamazumi_pitches(
         "element_count": int(moved_elements),
     }
 
-def replace_yamazumi_pitches(project_id: str, area_id: str | list[str], edited: pd.DataFrame) -> int:
+def replace_yamazumi_pitches(
+    project_id: str,
+    area_id: str | list[str],
+    edited: pd.DataFrame,
+    *,
+    delete_removed_pitch_elements: bool = False,
+) -> int:
     required = {"id", "pitch_number", "pitch_name", "status", "sequence", "model_variants", "pitch_type"}
     if not required.issubset(edited.columns):
         raise ValueError("The pitch table is missing required columns.")
@@ -3472,19 +3487,34 @@ def replace_yamazumi_pitches(project_id: str, area_id: str | list[str], edited: 
                     f"UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL WHERE id IN ({placeholders})",
                     tuple(removed),
                 )
-                conn.execute(
-                    f"""UPDATE yamazumi_elements
-                        SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
-                        WHERE pitch_id IN ({placeholders})""",
-                    (timestamp, *removed),
-                )
+                if delete_removed_pitch_elements:
+                    conn.execute(
+                        f"DELETE FROM yamazumi_elements WHERE project_id=? AND pitch_id IN ({placeholders})",
+                        (project_id, *removed),
+                    )
+                else:
+                    conn.execute(
+                        f"""UPDATE yamazumi_elements
+                            SET pitch_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                            WHERE pitch_id IN ({placeholders})""",
+                        (timestamp, *removed),
+                    )
                 conn.execute(
                     f"DELETE FROM yamazumi_pitches WHERE id IN ({placeholders})",
                     tuple(removed),
                 )
+            _sync_linked_process_work_elements(conn, project_id, timestamp=timestamp)
         staged_targets: dict[str, tuple[str, str | None]] = {}
         for index, row in enumerate(records, start=1):
-            pitch_id = str(row.get("id") or "").strip() or str(uuid4())
+            raw_pid = row.get("id")
+            clean_pid = (
+                str(raw_pid).strip()
+                if raw_pid is not None and not pd.isna(raw_pid)
+                else ""
+            )
+            if clean_pid.casefold() in {"", "nan", "none", "<na>"} or clean_pid.startswith("__draft_new__"):
+                clean_pid = ""
+            pitch_id = clean_pid or str(uuid4())
             elsewhere = conn.execute(
                 f"""SELECT 1 FROM yamazumi_pitches
                    WHERE id=? AND (project_id<>? OR area_id NOT IN ({area_placeholders}))""",
@@ -3833,34 +3863,87 @@ def replace_yamazumi_elements(project_id: str, area_id: str | list[str], edited:
     area_placeholders = ",".join("?" for _ in area_ids)
     records = edited.to_dict("records")
     timestamp = now_iso()
-    valid_pitches = {
-        str(row["id"]): str(row["area_id"])
-        for row in query(
-            f"SELECT id, area_id FROM yamazumi_pitches WHERE project_id=? AND area_id IN ({area_placeholders}) AND status='Active'",
-            (project_id, *area_ids),
-        )
-    }
+
+    def _clean_nullable_id(value: object) -> str | None:
+        if value is None or pd.isna(value):
+            return None
+        text = str(value).strip()
+        if (
+            not text
+            or text.casefold() in {"nan", "none", "<na>", "unassigned"}
+            or text.startswith("__draft_new__")
+        ):
+            return None
+        return text
+
     with connection() as conn:
-        existing = {
-            row[0]
-            for row in conn.execute(
-                f"SELECT id FROM yamazumi_elements WHERE project_id=? AND area_id IN ({area_placeholders})",
-                (project_id, *area_ids),
-            )
+        pitch_query_rows = conn.execute(
+            f"""SELECT p.id, p.area_id, p.pitch_number, p.pitch_name
+                FROM yamazumi_pitches p
+                JOIN yamazumi_areas a ON a.id = p.area_id
+                WHERE p.project_id=?
+                  AND (
+                      p.area_id IN ({area_placeholders})
+                      OR a.scenario_id IN (
+                          SELECT scenario_id FROM yamazumi_areas
+                          WHERE project_id=? AND id IN ({area_placeholders})
+                      )
+                  )
+                  AND UPPER(TRIM(COALESCE(p.status, 'Active')))='ACTIVE'""",
+            (project_id, *area_ids, project_id, *area_ids),
+        ).fetchall()
+        valid_pitches = {
+            str(row["id"]): str(row["area_id"])
+            for row in pitch_query_rows
+        }
+        valid_pitch_id_by_number: dict[str, str] = {}
+        for row in pitch_query_rows:
+            pid_str = str(row["id"])
+            pnum = str(row["pitch_number"] or "").strip()
+            pname = str(row["pitch_name"] or "").strip()
+            if pnum:
+                valid_pitch_id_by_number[pnum.casefold()] = pid_str
+                full_lbl = yamazumi_pitch_label(pnum, pname).strip()
+                if full_lbl:
+                    valid_pitch_id_by_number[full_lbl.casefold()] = pid_str
+        existing_rows = conn.execute(
+            f"SELECT id, pitch_id FROM yamazumi_elements WHERE project_id=? AND area_id IN ({area_placeholders})",
+            (project_id, *area_ids),
+        ).fetchall()
+        existing = {str(row["id"]) for row in existing_rows}
+        existing_pitch_by_id = {
+            str(row["id"]): _clean_nullable_id(row["pitch_id"])
+            for row in existing_rows
         }
         kept: set[str] = set()
         for index, row in enumerate(records, start=1):
-            description = str(row.get("description") or "").strip()
+            raw_desc = row.get("description")
+            description = (
+                str(raw_desc).strip()
+                if raw_desc is not None and not pd.isna(raw_desc)
+                else ""
+            )
             if not description:
                 raise ValueError("Every Yamazumi work element needs a description.")
-            time_s = float(row.get("time_s") or 0)
+            raw_time = row.get("time_s")
+            time_s = (
+                float(raw_time)
+                if raw_time is not None and not pd.isna(raw_time) and str(raw_time).strip()
+                else 0.0
+            )
             if time_s < 0:
                 raise ValueError("Work-element time cannot be negative.")
-            element_id = str(row.get("id") or "").strip() or str(uuid4())
-            pitch_id = str(row.get("pitch_id") or "").strip() or None
+            element_id = _clean_nullable_id(row.get("id")) or str(uuid4())
+            pitch_id = _clean_nullable_id(row.get("pitch_id"))
             if pitch_id and pitch_id not in valid_pitches:
-                raise ValueError("Choose an Active pitch from the selected Yamazumi area.")
-            raw_row_area_id = str(row.get("area_id") or "").strip()
+                mapped_pid = valid_pitch_id_by_number.get(pitch_id.casefold())
+                if mapped_pid and mapped_pid in valid_pitches:
+                    pitch_id = mapped_pid
+                elif element_id in existing_pitch_by_id and existing_pitch_by_id[element_id] in valid_pitches:
+                    pitch_id = existing_pitch_by_id[element_id]
+                else:
+                    raise ValueError("Choose an Active pitch from the selected Yamazumi area.")
+            raw_row_area_id = _clean_nullable_id(row.get("area_id")) or ""
             row_area_id = (
                 valid_pitches[pitch_id]
                 if pitch_id
@@ -3872,7 +3955,12 @@ def replace_yamazumi_elements(project_id: str, area_id: str | list[str], edited:
             if not model_variants:
                 raise ValueError("Choose at least one model variant for every work element.")
             primary_variant = model_variants[0]
-            work_type = str(row.get("work_type") or "Cycle").strip().title()
+            raw_wtype = row.get("work_type")
+            work_type = (
+                str(raw_wtype).strip().title()
+                if raw_wtype is not None and not pd.isna(raw_wtype) and str(raw_wtype).strip()
+                else "Cycle"
+            )
             if work_type not in {"Cycle", "Periodic", "Fluctuation"}:
                 raise ValueError("Work type must be Cycle, Periodic, or Fluctuation.")
             if pitch_id:
@@ -3922,6 +4010,21 @@ def replace_yamazumi_elements(project_id: str, area_id: str | list[str], edited:
                             ),
                         )
             kept.add(element_id)
+            raw_seq = row.get("sequence")
+            seq_val = (
+                int(float(raw_seq))
+                if raw_seq is not None and not pd.isna(raw_seq) and str(raw_seq).strip()
+                else index * 10
+            )
+            raw_wreg = row.get("work_region")
+            wreg_val = (
+                str(raw_wreg).strip()
+                if raw_wreg is not None and not pd.isna(raw_wreg) and str(raw_wreg).strip()
+                else "None"
+            )
+            source_val = _clean_nullable_id(row.get("source")) or "Manual"
+            process_elem_id = _clean_nullable_id(row.get("process_element_id"))
+            sync_status_val = _clean_nullable_id(row.get("process_sync_status")) or "Needs IE review"
             conn.execute(
                 """INSERT INTO yamazumi_elements
                    (id, project_id, area_id, pitch_id, model_variant, model_variants,
@@ -3939,9 +4042,9 @@ def replace_yamazumi_elements(project_id: str, area_id: str | list[str], edited:
                 (element_id, project_id, row_area_id, pitch_id, primary_variant,
                  json.dumps(model_variants),
                  work_type, description, time_s,
-                 str(row.get("work_region") or "None").strip(),
-                 int(row.get("sequence") or index * 10), str(row.get("source") or "Manual"),
-                 row.get("process_element_id"), str(row.get("process_sync_status") or "Needs IE review"), timestamp),
+                 wreg_val,
+                 seq_val, source_val,
+                 process_elem_id, sync_status_val, timestamp),
             )
         removed = existing - kept
         if removed:
@@ -4633,7 +4736,7 @@ def import_yamazumi_rows(
         )
     return len(area_ids), len(pitch_ids), elements_added
 
-_YAMAZUMI_STORE_HOT_RELOAD_REV = 11
+_YAMAZUMI_STORE_HOT_RELOAD_REV = 14
 __domain_exports__ = ['yamazumi_areas', 'yamazumi_area_link_status', 'yamazumi_pitches', 'yamazumi_elements', 'yamazumi_pitches_for_scenario', 'yamazumi_elements_for_scenario', 'yamazumi_work_regions', 'replace_yamazumi_work_regions', 'migrate_legacy_yamazumi_flags', 'rename_yamazumi_variants', 'clear_yamazumi_data', 'upsert_yamazumi_area', '_validate_yamazumi_area_link', 'update_yamazumi_settings', 'update_yamazumi_areas_table', 'sync_yamazumi_areas_from_fishbone', 'yamazumi_pitch_label', '_yamazumi_pitch_address_conflict_rows', 'yamazumi_pitch_address_conflicts', '_yamazumi_pitch_address_owner', '_validate_yamazumi_pitch_address_available', '_validate_yamazumi_scenario_pitch_addresses', '_validate_yamazumi_pitch_conflict_progress', 'yamazumi_pitch_feed_target_status', '_normalize_yamazumi_pitch_type', '_normalize_yamazumi_feed_target', '_validate_yamazumi_pitch_feeds', '_validate_yamazumi_feed_target_context', '_require_yamazumi_feed_target_for_pitch_write', '_yamazumi_pitch_reference_blockers', 'yamazumi_pitch_delete_blockers', '_raise_yamazumi_pitch_reference_blockers', 'add_yamazumi_pitch', 'add_yamazumi_element', '_prepare_yamazumi_copy', 'preview_yamazumi_copy', 'copy_yamazumi_records', 'duplicate_yamazumi_elements', 'update_yamazumi_pitch', 'update_yamazumi_element', '_yamazumi_element_delete_impact', 'yamazumi_element_delete_impact', 'delete_yamazumi_element', 'delete_yamazumi_elements', 'delete_yamazumi_pitch', '_prepare_yamazumi_pitch_move', 'preview_yamazumi_pitch_move', 'move_yamazumi_pitches', 'replace_yamazumi_pitches', 'yamazumi_pitch_address_suggestion', 'generate_yamazumi_pitch_range', 'replace_yamazumi_elements', 'move_yamazumi_element', 'save_yamazumi_stack_draft', 'import_yamazumi_rows']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

@@ -8,6 +8,8 @@ buttonRadius = "0.4rem"
 
 [server]
 maxUploadSize = 50
+maxMessageSize = 200
+maxWidgetStateSize = 200
 enableWebsocketCompression = true
 
 [browser]

@@ -307,6 +307,25 @@ def _file_stat_signature(path: Path) -> tuple[int, int]:
         return (0, 0)
 
 
+def get_workspace_sync_state() -> dict[str, int]:
+    """Return a monotonic write-epoch and SQLite mtime snapshot for cross-tab synchronization."""
+    epoch = int(get_write_epoch("all"))
+    mtime_ns = 0
+    try:
+        from utils import db_core
+
+        db_path = Path(db_core.DB_PATH)
+        main_sig = _file_stat_signature(db_path)
+        wal_sig = _file_stat_signature(Path(f"{db_path}-wal"))
+        mtime_ns = int(max(main_sig[0], wal_sig[0]))
+    except Exception:
+        mtime_ns = 0
+    return {
+        "write_epoch": epoch,
+        "db_mtime_ns": mtime_ns,
+    }
+
+
 def current_db_state_token(scope: str = "all") -> tuple[Any, ...] | None:
     """Return a fast state token for the active database, or None if mocked."""
     from utils import db_core

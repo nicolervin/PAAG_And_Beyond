@@ -1526,6 +1526,211 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("? (shapeOrUrl.dataUrl || shapeOrUrl.data_url || \"\")", _JS)
         self.assertNotIn("const cachedImg = getCachedShapeImage(s);", _JS)
 
+    def test_image_annotator_callout_font_size_controls_and_resolution_normalization(self) -> None:
+        from utils.image_annotator import _HTML, _JS
+
+        self.assertIn('id="font-size-select"', _HTML)
+        self.assertIn('id="btn-font-dec"', _HTML)
+        self.assertIn('id="btn-font-inc"', _HTML)
+        self.assertIn("function getVisualNormFactor()", _JS)
+        self.assertIn("const normFactor = getVisualNormFactor();", _JS)
+        self.assertIn("const visScale = sc * normFactor;", _JS)
+        self.assertIn("const baseFontPx = Number(s.fontSize) || 18;", _JS)
+        self.assertIn("fontSize: currentFontSize,", _JS)
+        self.assertIn("commitPendingTextOverlay(false);", _JS)
+        self.assertIn("const MAX_EXPORT_DIM = 1920;", _JS)
+        self.assertIn('offscreen.toDataURL("image/jpeg", 0.92)', _JS)
+
+    def test_update_pitch_visual_annotations_persists_markup_and_handles_reassigned_pitch(self) -> None:
+        orig_bytes = b"\x89PNG\r\n\x1a\noriginal_unmarked_image"
+        comp_bytes = b"\x89PNG\r\n\x1a\nannotated_composite_image"
+        saved = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="photo.png",
+            file_bytes=orig_bytes,
+            caption="Test visual aid",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Tester",
+        )
+        media_id = saved["id"]
+        created_files = [Path(saved["file_path"])]
+        if saved.get("original_file_path"):
+            created_files.append(Path(saved["original_file_path"]))
+        try:
+            # Simulate pitch_id reassignment where media record still points to another pitch_id
+            other_pitch_id = str(uuid4())
+            with store.connection() as conn:
+                conn.execute(
+                    """INSERT INTO yamazumi_pitches
+                       (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                       VALUES (?, ?, ?, '01-SW1-052', 'Other pitch', ?)""",
+                    (other_pitch_id, self.project_id, self.area_id, store.now_iso()),
+                )
+                conn.execute(
+                    "UPDATE process_visual_media SET pitch_id = ?, original_file_path = '' WHERE id = ?",
+                    (other_pitch_id, media_id),
+                )
+            ann_json = json.dumps(
+                [
+                    {
+                        "id": "shape_1",
+                        "type": "text",
+                        "x": 100,
+                        "y": 150,
+                        "text": "Torque M8 bolt",
+                        "color": "#ef4444",
+                        "strokeWidth": 4,
+                        "fontSize": 26,
+                    }
+                ]
+            )
+            store.update_pitch_visual_annotations(
+                project_id=self.project_id,
+                scenario_id=self.scenario_id,
+                media_id=media_id,
+                composite_image_bytes=comp_bytes,
+                annotations_json=ann_json,
+                current_editor="Tester",
+            )
+            items = store.get_pitch_visual_media(
+                self.project_id, self.scenario_id, self.pitch_id
+            )
+            updated = next(m for m in items if m["id"] == media_id)
+            self.assertEqual(updated["annotations_json"], ann_json)
+            self.assertTrue(updated["original_file_path"])
+            created_files.append(Path(updated["original_file_path"]))
+            created_files.append(Path(updated["file_path"]))
+            self.assertEqual(Path(updated["file_path"]).read_bytes(), comp_bytes)
+            self.assertEqual(Path(updated["original_file_path"]).read_bytes(), orig_bytes)
+        finally:
+            for f in created_files:
+                f.unlink(missing_ok=True)
+
+    def test_tag_to_work_elements_populates_and_reconciles_unlinked_and_station_matched_elements(self) -> None:
+        mixed_pitch_id = str(uuid4())
+        linked_we_id = str(uuid4())
+        station_matched_we_id = str(uuid4())
+        station_only_we_id = str(uuid4())
+        linked_yam_id = str(uuid4())
+        station_matched_yam_id = str(uuid4())
+        unlinked_yam_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, '01-AY1-099', 'Mixed Tag Pitch', ?)""",
+                (mixed_pitch_id, self.project_id, self.area_id, timestamp),
+            )
+            # 1. Linked work element + yamazumi element
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, model_applicability, updated_at)
+                   VALUES (?, ?, ?, 10, '01-AY1-099', 'Step 1 Linked', 'All', ?)""",
+                (linked_we_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, process_element_id, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'Step 1 Linked', 5.0, 10, ?)""",
+                (linked_yam_id, self.project_id, self.area_id, mixed_pitch_id, linked_we_id, timestamp),
+            )
+            # 2. Unlinked yamazumi element with a matching station work_elements row
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, model_applicability, updated_at)
+                   VALUES (?, ?, ?, 20, '01-AY1-099', 'Step 2 Station Match', 'All', ?)""",
+                (station_matched_we_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, process_element_id, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, NULL, 'Step 2 Station Match', 6.0, 20, ?)""",
+                (station_matched_yam_id, self.project_id, self.area_id, mixed_pitch_id, timestamp),
+            )
+            # 3. Unlinked yamazumi element with NO work_elements row yet
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, process_element_id, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, NULL, 'Step 3 Unlinked Yamazumi', 7.0, 30, ?)""",
+                (unlinked_yam_id, self.project_id, self.area_id, mixed_pitch_id, timestamp),
+            )
+            # 4. Station-only work_elements row with no yamazumi_elements row
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, model_applicability, updated_at)
+                   VALUES (?, ?, ?, 40, '01-AY1-099', 'Step 4 Station Only', 'All', ?)""",
+                (station_only_we_id, self.project_id, self.scenario_id, timestamp),
+            )
+
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, mixed_pitch_id
+        )
+        elements = summary["elements"]
+        self.assertEqual(len(elements), 4)
+        self.assertEqual(elements[0]["work_element_id"], linked_we_id)
+        self.assertEqual(elements[1]["work_element_id"], station_matched_we_id)
+        self.assertEqual(elements[2]["work_element_id"], f"yam::{unlinked_yam_id}")
+        self.assertEqual(elements[3]["work_element_id"], station_only_we_id)
+
+        # Save visual aid tagged to Step 2 (station-matched) and Step 3 (unlinked yamazumi)
+        saved = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=mixed_pitch_id,
+            filename="tag_test.png",
+            file_bytes=b"\x89PNG\r\n\x1a\ntag_test_bytes",
+            caption="Tagging unlinked and station-matched steps",
+            tagged_work_element_ids=[
+                elements[1]["work_element_id"],
+                elements[2]["work_element_id"],
+            ],
+            sequence=10,
+            current_editor="Tester",
+        )
+        try:
+            self.assertEqual(len(saved["tagged_work_element_ids"]), 2)
+            self.assertIn(station_matched_we_id, saved["tagged_work_element_ids"])
+            reconciled_step3_we_id = next(
+                wid for wid in saved["tagged_work_element_ids"] if wid != station_matched_we_id
+            )
+
+            # Both yamazumi elements should now have process_element_id linked in DB
+            with store.connection() as conn:
+                y2_proc = conn.execute(
+                    "SELECT process_element_id FROM yamazumi_elements WHERE id=?",
+                    (station_matched_yam_id,),
+                ).fetchone()[0]
+                y3_proc = conn.execute(
+                    "SELECT process_element_id FROM yamazumi_elements WHERE id=?",
+                    (unlinked_yam_id,),
+                ).fetchone()[0]
+            self.assertEqual(y2_proc, station_matched_we_id)
+            self.assertEqual(y3_proc, reconciled_step3_we_id)
+
+            # Re-fetching summary now shows real work_element_id for all 4 steps
+            summary_after = store.process_pitch_visual_summary(
+                self.project_id, self.scenario_id, mixed_pitch_id
+            )
+            self.assertEqual(
+                [el["work_element_id"] for el in summary_after["elements"]],
+                [linked_we_id, station_matched_we_id, reconciled_step3_we_id, station_only_we_id],
+            )
+            media_after = summary_after["visual_media"]
+            self.assertEqual(len(media_after), 1)
+            self.assertEqual(
+                set(media_after[0]["tagged_work_element_ids"]),
+                {station_matched_we_id, reconciled_step3_we_id},
+            )
+        finally:
+            Path(saved["file_path"]).unlink(missing_ok=True)
+            if saved.get("original_file_path"):
+                Path(saved["original_file_path"]).unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

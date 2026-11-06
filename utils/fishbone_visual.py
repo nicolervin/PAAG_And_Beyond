@@ -17,6 +17,10 @@ _HTML = """
       <span id="fishbone-summary"></span>
     </div>
     <div class="fishbone-actions">
+      <button id="undo-fishbone-btn" type="button" title="Revert the most recent canvas edit" class="btn-tool" disabled>↶ Undo last edit</button>
+      <button id="redo-fishbone-btn" type="button" title="Reapply the most recently undone canvas edit" class="btn-tool" disabled>↷ Redo last edit</button>
+      <button id="discard-fishbone-btn" type="button" title="Discard all unsaved canvas changes and restore the last saved values" class="btn-tool" disabled>↻ Discard all edits</button>
+      <button id="save-fishbone-btn" type="button" title="Save and refresh fishbone changes" class="btn-tool" style="background:#16a34a; color:white; border-color:#16a34a; font-weight:700;">💾 Save &amp; Refresh</button>
       <button id="print-fishbone-btn" type="button" title="Print the fishbone diagram with readable part numbers" class="btn-tool">🖨️ Print</button>
       <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
       <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
@@ -222,7 +226,8 @@ _CSS = """
 .fishbone-title span { color: var(--st-secondary-text-color); font-size: .82rem; white-space: nowrap; }
 .fishbone-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .fishbone-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 30px; min-height: 30px; height: auto; padding: 4px 10px; white-space: nowrap; flex-shrink: 0; line-height: 1.2; box-sizing: border-box; border: 1px solid var(--st-border-color); border-radius: var(--st-button-radius); color: var(--st-text-color); background: var(--st-background-color); cursor: pointer; font: inherit; font-size: .81rem; font-weight: 600; }
-.fishbone-actions button:hover { border-color: var(--st-primary-color); color: var(--st-primary-color); }
+.fishbone-actions button:hover:not(:disabled) { border-color: var(--st-primary-color); color: var(--st-primary-color); }
+.fishbone-actions button:disabled { opacity: 0.48; cursor: not-allowed; }
 .fishbone-actions button.btn-tool { background: var(--st-secondary-background-color); }
 @media (max-width: 1100px) {
   .fishbone-toolbar { padding: 8px 10px; gap: 6px 10px; }
@@ -772,6 +777,10 @@ export default function renderFishbone(component) {
   const togglePaletteBtn = parentElement.querySelector("#toggle-palette")
   const autoArrangeBtn = parentElement.querySelector("#auto-arrange")
   const clearFishboneBtn = parentElement.querySelector("#clear-fishbone-btn")
+  const undoFishboneBtn = parentElement.querySelector("#undo-fishbone-btn")
+  const redoFishboneBtn = parentElement.querySelector("#redo-fishbone-btn")
+  const discardFishboneBtn = parentElement.querySelector("#discard-fishbone-btn")
+  const saveFishboneBtn = parentElement.querySelector("#save-fishbone-btn")
   const printFishboneBtn = parentElement.querySelector("#print-fishbone-btn")
 
   const assemblyModal = parentElement.querySelector("#assembly-drop-modal")
@@ -964,6 +973,40 @@ export default function renderFishbone(component) {
   if (clearFishboneBtn) {
     clearFishboneBtn.onclick = () => {
       component.setTriggerValue("clear_fishbone_request", { timestamp: Date.now() })
+    }
+  }
+  const unsavedCount = Number(data.unsaved_count) || 0
+  const canUndoLast = Boolean(data.can_undo_last)
+  const canRedoLast = Boolean(data.can_redo_last)
+  const canDiscardAll = Boolean(data.can_discard_all) || unsavedCount > 0
+  if (undoFishboneBtn) {
+    undoFishboneBtn.disabled = !canUndoLast
+    undoFishboneBtn.onclick = () => {
+      if (!canUndoLast) return
+      component.setTriggerValue("undo_last_edit", { timestamp: Date.now() })
+    }
+  }
+  if (redoFishboneBtn) {
+    redoFishboneBtn.disabled = !canRedoLast
+    redoFishboneBtn.onclick = () => {
+      if (!canRedoLast) return
+      component.setTriggerValue("redo_last_edit", { timestamp: Date.now() })
+    }
+  }
+  if (discardFishboneBtn) {
+    discardFishboneBtn.disabled = !canDiscardAll
+    discardFishboneBtn.onclick = () => {
+      if (!canDiscardAll) return
+      component.setTriggerValue("discard_all_edits", { timestamp: Date.now() })
+    }
+  }
+  if (saveFishboneBtn) {
+    saveFishboneBtn.textContent = unsavedCount > 0 ? `💾 Save & Refresh (${unsavedCount})` : "💾 Save & Refresh"
+    saveFishboneBtn.title = unsavedCount > 0
+      ? `Save and refresh fishbone changes (${unsavedCount} unsaved edit${unsavedCount === 1 ? "" : "s"})`
+      : "Save and refresh fishbone changes"
+    saveFishboneBtn.onclick = () => {
+      component.setTriggerValue("save_and_refresh", { timestamp: Date.now() })
     }
   }
 
@@ -5036,10 +5079,10 @@ export default function renderFishbone(component) {
 }
 """
 
-_FISHBONE_VISUAL_HOT_RELOAD_REV = 7
+_FISHBONE_VISUAL_HOT_RELOAD_REV = 9
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v42",
+    "paag_interactive_fishbone_builder_v44",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -5101,6 +5144,14 @@ def interactive_fishbone(
     on_move_part_assignment: Callable[[], None] | None = None,
     on_replicate_part_uses: Callable[[], None] | None = None,
     on_unstack_part_variant: Callable[[], None] | None = None,
+    on_undo_last_edit: Callable[[], None] | None = None,
+    on_redo_last_edit: Callable[[], None] | None = None,
+    on_discard_all_edits: Callable[[], None] | None = None,
+    on_save_and_refresh: Callable[[], None] | None = None,
+    unsaved_count: int = 0,
+    can_undo_last: bool = False,
+    can_redo_last: bool = False,
+    can_discard_all: bool = False,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
     _noop = lambda: None  # noqa: E731
@@ -5113,6 +5164,10 @@ def interactive_fishbone(
             "parts": parts,
             "palette_items": palette_items or [],
             "all_sections": all_sections or sections,
+            "unsaved_count": int(unsaved_count or 0),
+            "can_undo_last": bool(can_undo_last),
+            "can_redo_last": bool(can_redo_last),
+            "can_discard_all": bool(can_discard_all),
         },
         "width": "stretch",
         "height": "content",
@@ -5131,6 +5186,10 @@ def interactive_fishbone(
         "on_move_part_assignment_change": on_move_part_assignment or _noop,
         "on_replicate_part_uses_change": on_replicate_part_uses or _noop,
         "on_unstack_part_variant_change": on_unstack_part_variant or _noop,
+        "on_undo_last_edit_change": on_undo_last_edit or _noop,
+        "on_redo_last_edit_change": on_redo_last_edit or _noop,
+        "on_discard_all_edits_change": on_discard_all_edits or _noop,
+        "on_save_and_refresh_change": on_save_and_refresh or _noop,
     }
 
     return _FISHBONE_COMPONENT(**kwargs)

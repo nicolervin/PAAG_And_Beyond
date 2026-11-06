@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-_IMAGE_ANNOTATOR_REV_20261103 = 3
+_IMAGE_ANNOTATOR_REV_20261103 = 5
 
 
 _HTML = """
@@ -43,30 +43,26 @@ _HTML = """
       </div>
       <div class="tool-group props-bar">
         <span class="toolbar-label" style="margin-left:4px;">Line:</span>
-        <button type="button" id="btn-stroke-dec" class="action-btn" title="Decrease Arrow / Line Thickness">−</button>
-        <select id="stroke-width-select" class="toolbar-select" title="Arrow, Box, Circle, Badge & Pen Thickness">
-          <option value="2">2px (Thin)</option>
-          <option value="4" selected>4px (Med)</option>
-          <option value="7">7px (Thick)</option>
-          <option value="10">10px (X-Thick)</option>
-          <option value="14">14px (Heavy)</option>
-          <option value="20">20px (Ultra)</option>
+        <select id="stroke-width-select" class="toolbar-select">
+          <option value="2">Thin</option>
+          <option value="4" selected>Med</option>
+          <option value="7">Thick</option>
         </select>
-        <button type="button" id="btn-stroke-inc" class="action-btn" title="Increase Arrow / Line Thickness">+</button>
-        <span class="toolbar-label" style="margin-left:6px;">Text:</span>
-        <button type="button" id="btn-font-dec" class="action-btn" title="Decrease Callout Font Size">A−</button>
-        <select id="font-size-select" class="toolbar-select" title="Callout / Text Box Font Size">
-          <option value="14">14px (XS)</option>
-          <option value="18">18px (S)</option>
-          <option value="22">22px (M)</option>
-          <option value="28" selected>28px (Default)</option>
-          <option value="34">34px (L)</option>
-          <option value="42">42px (XL)</option>
-          <option value="52">52px (2XL)</option>
-          <option value="64">64px (3XL)</option>
-          <option value="76">76px (Huge)</option>
+        <span class="toolbar-label" style="margin-left:4px;">Text:</span>
+        <select id="font-size-select" class="toolbar-select" title="Callout Text Font Size">
+          <option value="12">12px</option>
+          <option value="14">14px</option>
+          <option value="16">16px</option>
+          <option value="18" selected>18px (Default)</option>
+          <option value="22">22px</option>
+          <option value="26">26px</option>
+          <option value="32">32px</option>
+          <option value="40">40px</option>
+          <option value="48">48px</option>
+          <option value="60">60px</option>
         </select>
-        <button type="button" id="btn-font-inc" class="action-btn" title="Increase Callout Font Size">A+</button>
+        <button type="button" id="btn-font-dec" class="action-btn" title="Decrease Callout Text Font Size">A−</button>
+        <button type="button" id="btn-font-inc" class="action-btn" title="Increase Callout Text Font Size">A+</button>
       </div>
     </div>
     <div class="toolbar-row toolbar-row-bottom">
@@ -99,17 +95,6 @@ _HTML = """
     <canvas id="annotation-canvas"></canvas>
     <div id="text-edit-overlay" class="text-edit-overlay" style="display:none;">
       <input type="text" id="text-edit-input" placeholder="Type callout note..." />
-      <select id="text-edit-size" class="toolbar-select" title="Callout Font Size">
-        <option value="14">14px (XS)</option>
-        <option value="18">18px (S)</option>
-        <option value="22">22px (M)</option>
-        <option value="28" selected>28px (Default)</option>
-        <option value="34">34px (L)</option>
-        <option value="42">42px (XL)</option>
-        <option value="52">52px (2XL)</option>
-        <option value="64">64px (3XL)</option>
-        <option value="76">76px (Huge)</option>
-      </select>
       <button type="button" id="text-edit-ok">OK</button>
       <button type="button" id="text-edit-cancel">Cancel</button>
     </div>
@@ -383,7 +368,6 @@ _CSS = """
   position: absolute;
   z-index: 20;
   display: flex;
-  align-items: center;
   gap: 4px;
   background: #0f172a;
   padding: 6px;
@@ -392,22 +376,13 @@ _CSS = """
   box-shadow: 0 8px 24px rgba(0,0,0,0.6);
 }
 #text-edit-input {
-  width: 210px;
+  width: 200px;
   padding: 4px 8px;
   border-radius: 4px;
   border: 1px solid #64748b;
   background: #ffffff;
   color: #0f172a;
   font-size: 0.82rem;
-  font-weight: 600;
-}
-#text-edit-size {
-  padding: 4px 6px;
-  border-radius: 4px;
-  border: 1px solid #64748b;
-  background: #ffffff;
-  color: #0f172a;
-  font-size: 0.78rem;
   font-weight: 600;
 }
 #text-edit-ok, #text-edit-cancel {
@@ -736,6 +711,9 @@ _CSS = """
 _JS = r"""
 export default function(component) {
   const { parentElement, data, setTriggerValue } = component;
+  if (typeof parentElement.__paagAnnotatorCleanup === "function") {
+    try { parentElement.__paagAnnotatorCleanup(); } catch (e) {}
+  }
   const shell = parentElement.querySelector("#annotator-shell");
   const canvas = parentElement.querySelector("#annotation-canvas");
   const viewport = parentElement.querySelector("#canvas-viewport");
@@ -747,12 +725,9 @@ export default function(component) {
   const textOkBtn = parentElement.querySelector("#text-edit-ok");
   const textCancelBtn = parentElement.querySelector("#text-edit-cancel");
   const strokeSelect = parentElement.querySelector("#stroke-width-select");
-  const strokeDecBtn = parentElement.querySelector("#btn-stroke-dec");
-  const strokeIncBtn = parentElement.querySelector("#btn-stroke-inc");
   const fontSizeSelect = parentElement.querySelector("#font-size-select");
   const fontDecBtn = parentElement.querySelector("#btn-font-dec");
   const fontIncBtn = parentElement.querySelector("#btn-font-inc");
-  const textEditSize = parentElement.querySelector("#text-edit-size");
   const nextBadgeInput = parentElement.querySelector("#next-badge-num");
   const applyCropBtn = parentElement.querySelector("#btn-apply-crop");
   const cancelCropBtn = parentElement.querySelector("#btn-cancel-crop");
@@ -792,14 +767,10 @@ export default function(component) {
 
   let currentTool = "select";
   let currentColor = "#ef4444";
-  const STROKE_WIDTHS = [2, 4, 7, 10, 14, 20];
   let currentStrokeWidth = 4;
-  const FONT_SIZES = [14, 18, 22, 28, 34, 42, 52, 64, 76];
-  const DEFAULT_FONT_SIZE = 28;
-  let currentFontSize = DEFAULT_FONT_SIZE;
+  const FONT_SIZE_STEPS = [12, 14, 16, 18, 22, 26, 32, 40, 48, 60];
+  let currentFontSize = 18;
   let editingTextShapeId = null;
-  let isResizingText = false;
-  let resizeStartFontSize = DEFAULT_FONT_SIZE;
   let shapes = [];
   let transformOps = [];
   let undoStack = [];
@@ -813,8 +784,6 @@ export default function(component) {
   let cropRect = null;
   let dragStartX = 0;
   let dragStartY = 0;
-  let drawStartNatX = 0;
-  let drawStartNatY = 0;
   let activeShape = null;
   let img = new Image();
   let workingCanvas = document.createElement("canvas");
@@ -944,127 +913,16 @@ export default function(component) {
     return workingCanvas.height || img.naturalHeight || 500;
   }
 
-  function getResolutionScale() {
-    const w = getWorkingWidth();
-    const h = getWorkingHeight();
-    const longSide = Math.max(w, h);
-    const shortSide = Math.min(w, h);
-    return Math.max(longSide / 800, shortSide / 540, 0.35);
+  function getBaseFitScale() {
+    const natW = Math.max(1, getWorkingWidth());
+    const natH = Math.max(1, getWorkingHeight());
+    const fitW = 784 / natW;
+    const fitH = 524 / natH;
+    return Math.max(0.02, Math.min(fitW, fitH, 4.0));
   }
 
-  function getShapeFontSize(s) {
-    const raw = Number(s && s.fontSize);
-    if (Number.isFinite(raw) && raw >= 10 && raw <= 140) {
-      return Math.round(raw);
-    }
-    if (s && Number(s.strokeWidth) >= 7) return 34;
-    return DEFAULT_FONT_SIZE;
-  }
-
-  function setSelectStrokeValue(selectEl, widthPx) {
-    if (!selectEl) return;
-    const strVal = String(widthPx);
-    let customOpt = selectEl.querySelector('option[data-custom="1"]');
-    if (STROKE_WIDTHS.includes(widthPx)) {
-      if (customOpt) customOpt.remove();
-      selectEl.value = strVal;
-    } else {
-      if (!customOpt) {
-        customOpt = document.createElement("option");
-        customOpt.setAttribute("data-custom", "1");
-        selectEl.appendChild(customOpt);
-      }
-      customOpt.value = strVal;
-      customOpt.textContent = `${widthPx}px`;
-      selectEl.value = strVal;
-    }
-  }
-
-  function syncStrokeWidthUI(widthPx) {
-    const clamped = Math.max(1, Math.min(36, Math.round(Number(widthPx) || 4)));
-    currentStrokeWidth = clamped;
-    setSelectStrokeValue(strokeSelect, clamped);
-  }
-
-  function applyStrokeWidthChange(newWidthPx) {
-    const clamped = Math.max(1, Math.min(36, Math.round(Number(newWidthPx) || 4)));
-    syncStrokeWidthUI(clamped);
-    if (selectedShapeId) {
-      const sel = shapes.find(s => s.id === selectedShapeId);
-      if (sel) {
-        pushUndo();
-        sel.strokeWidth = clamped;
-        statusEl.textContent = `${formatShapeLabel(sel)} line thickness set to ${clamped}px`;
-        render();
-        return;
-      }
-    }
-    statusEl.textContent = `Line thickness set to ${clamped}px`;
-  }
-
-  function setSelectFontSizeValue(selectEl, sizePx) {
-    if (!selectEl) return;
-    const strVal = String(sizePx);
-    let customOpt = selectEl.querySelector('option[data-custom="1"]');
-    if (FONT_SIZES.includes(sizePx)) {
-      if (customOpt) customOpt.remove();
-      selectEl.value = strVal;
-    } else {
-      if (!customOpt) {
-        customOpt = document.createElement("option");
-        customOpt.setAttribute("data-custom", "1");
-        selectEl.appendChild(customOpt);
-      }
-      customOpt.value = strVal;
-      customOpt.textContent = `${sizePx}px (Custom)`;
-      selectEl.value = strVal;
-    }
-  }
-
-  function syncFontSizeUI(sizePx) {
-    const clamped = Math.max(12, Math.min(96, Math.round(Number(sizePx) || DEFAULT_FONT_SIZE)));
-    currentFontSize = clamped;
-    setSelectFontSizeValue(fontSizeSelect, clamped);
-    setSelectFontSizeValue(textEditSize, clamped);
-  }
-
-  function syncToolbarToShape(s) {
-    if (!s) return;
-    if (s.color) {
-      currentColor = s.color;
-      parentElement.querySelectorAll(".color-swatch").forEach(sw => {
-        sw.classList.toggle("active", sw.dataset.color === s.color);
-      });
-    }
-    if (s.strokeWidth) {
-      syncStrokeWidthUI(Number(s.strokeWidth) || 4);
-    }
-    if (s.type === "text") {
-      syncFontSizeUI(getShapeFontSize(s));
-    }
-  }
-
-  function applyFontSizeChange(newSizePx) {
-    const clamped = Math.max(12, Math.min(96, Math.round(Number(newSizePx) || DEFAULT_FONT_SIZE)));
-    syncFontSizeUI(clamped);
-    if (selectedShapeId) {
-      const sel = shapes.find(s => s.id === selectedShapeId);
-      if (sel && sel.type === "text") {
-        pushUndo();
-        sel.fontSize = clamped;
-        statusEl.textContent = `Callout font size set to ${clamped}px · Double-click callout to edit text`;
-        render();
-        return;
-      }
-    }
-    if (editingTextShapeId) {
-      const editing = shapes.find(s => s.id === editingTextShapeId);
-      if (editing && editing.type === "text") {
-        editing.fontSize = clamped;
-        render();
-      }
-    }
-    statusEl.textContent = `Callout font size: ${clamped}px · Click on image with 💬 Callout to add text`;
+  function getVisualNormFactor() {
+    return 1.0 / getBaseFitScale();
   }
 
   function rebuildWorkingImage() {
@@ -1232,12 +1090,12 @@ export default function(component) {
   // Initialize tool buttons
   parentElement.querySelectorAll(".tool-btn").forEach(btn => {
     btn.onclick = () => {
+      commitPendingTextOverlay(false);
       parentElement.querySelectorAll(".tool-btn").forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       currentTool = btn.dataset.tool;
-      if (currentTool === "crop") {
-        selectedShapeId = null;
-      } else if (cropRect) {
+      selectedShapeId = null;
+      if (currentTool !== "crop" && cropRect) {
         cropRect = null;
         syncCropActionButtons();
       }
@@ -1250,6 +1108,9 @@ export default function(component) {
   // Initialize color swatches
   parentElement.querySelectorAll(".color-swatch").forEach(swatch => {
     swatch.onclick = () => {
+      if (textOverlay.style.display === "flex" && textInput.value.trim()) {
+        commitPendingTextOverlay(true);
+      }
       parentElement.querySelectorAll(".color-swatch").forEach(s => s.classList.remove("active"));
       swatch.classList.add("active");
       currentColor = swatch.dataset.color;
@@ -1264,63 +1125,82 @@ export default function(component) {
     };
   });
 
+  function syncFontSizeSelectValue(val) {
+    if (!fontSizeSelect) return;
+    const numVal = Math.round(Number(val) || 18);
+    let closest = FONT_SIZE_STEPS[0];
+    for (const step of FONT_SIZE_STEPS) {
+      if (Math.abs(step - numVal) < Math.abs(closest - numVal)) {
+        closest = step;
+      }
+    }
+    fontSizeSelect.value = String(closest);
+  }
+
+  function applyFontSize(newSize) {
+    if (textOverlay.style.display === "flex" && textInput.value.trim()) {
+      commitPendingTextOverlay(true);
+    }
+    const clamped = Math.max(10, Math.min(72, Math.round(Number(newSize) || 18)));
+    currentFontSize = clamped;
+    syncFontSizeSelectValue(clamped);
+    if (selectedShapeId) {
+      const sel = shapes.find(s => s.id === selectedShapeId);
+      if (sel && sel.type === "text") {
+        pushUndo();
+        sel.fontSize = currentFontSize;
+        statusEl.textContent = `Callout text font size set to ${currentFontSize}px`;
+        render();
+      }
+    }
+  }
+
+  if (fontSizeSelect) {
+    fontSizeSelect.onchange = () => {
+      applyFontSize(parseInt(fontSizeSelect.value, 10) || 18);
+    };
+  }
+  if (fontDecBtn) {
+    fontDecBtn.onclick = () => {
+      let idx = FONT_SIZE_STEPS.findIndex(v => v >= currentFontSize);
+      if (idx === -1) idx = FONT_SIZE_STEPS.length - 1;
+      const nextIdx = Math.max(0, idx - 1);
+      applyFontSize(FONT_SIZE_STEPS[nextIdx]);
+    };
+  }
+  if (fontIncBtn) {
+    fontIncBtn.onclick = () => {
+      let idx = FONT_SIZE_STEPS.findIndex(v => v > currentFontSize);
+      if (idx === -1) idx = FONT_SIZE_STEPS.length - 1;
+      applyFontSize(FONT_SIZE_STEPS[idx]);
+    };
+  }
+
   strokeSelect.onchange = () => {
-    const chosen = parseInt(strokeSelect.value, 10) || 4;
-    applyStrokeWidthChange(chosen);
-  };
-
-  strokeDecBtn.onclick = () => {
-    const lowerPresets = STROKE_WIDTHS.filter(w => w < currentStrokeWidth);
-    const nextWidth = lowerPresets.length > 0
-      ? lowerPresets[lowerPresets.length - 1]
-      : Math.max(1, currentStrokeWidth - 1);
-    applyStrokeWidthChange(nextWidth);
-  };
-
-  strokeIncBtn.onclick = () => {
-    const higherPresets = STROKE_WIDTHS.filter(w => w > currentStrokeWidth);
-    const nextWidth = higherPresets.length > 0
-      ? higherPresets[0]
-      : Math.min(36, currentStrokeWidth + 4);
-    applyStrokeWidthChange(nextWidth);
-  };
-
-  fontSizeSelect.onchange = () => {
-    const chosen = parseInt(fontSizeSelect.value, 10) || DEFAULT_FONT_SIZE;
-    applyFontSizeChange(chosen);
-  };
-
-  textEditSize.onchange = () => {
-    const chosen = parseInt(textEditSize.value, 10) || DEFAULT_FONT_SIZE;
-    applyFontSizeChange(chosen);
-  };
-
-  fontDecBtn.onclick = () => {
-    const lowerPresets = FONT_SIZES.filter(s => s < currentFontSize);
-    const nextSize = lowerPresets.length > 0
-      ? lowerPresets[lowerPresets.length - 1]
-      : Math.max(12, currentFontSize - 2);
-    applyFontSizeChange(nextSize);
-  };
-
-  fontIncBtn.onclick = () => {
-    const higherPresets = FONT_SIZES.filter(s => s > currentFontSize);
-    const nextSize = higherPresets.length > 0
-      ? higherPresets[0]
-      : Math.min(96, currentFontSize + 6);
-    applyFontSizeChange(nextSize);
+    if (textOverlay.style.display === "flex" && textInput.value.trim()) {
+      commitPendingTextOverlay(true);
+    }
+    currentStrokeWidth = parseInt(strokeSelect.value, 10) || 4;
+    if (selectedShapeId) {
+      const sel = shapes.find(s => s.id === selectedShapeId);
+      if (sel) {
+        pushUndo();
+        sel.strokeWidth = currentStrokeWidth;
+        render();
+      }
+    }
   };
 
   function getToolHint(t) {
     switch(t) {
-      case "select": return "Click shape/photo to select · Drag to move · Drag corners or use Line/Text toolbar controls to resize · Double-click callout to edit";
+      case "select": return "Click shape/photo to select · Drag to move · Drag corners to resize · Del to delete";
       case "crop": return "Click and drag to select crop area, then click ✓ Apply Crop (or Enter)";
-      case "arrow": return "Click and drag to point arrow · Adjust thickness with Line dropdown or − / +";
-      case "rect": return "Click and drag to draw focus box · Adjust thickness with Line dropdown or − / +";
-      case "circle": return "Click and drag to circle component · Adjust thickness with Line dropdown or − / +";
-      case "text": return "Click image to place callout (or click existing callout to edit) · Adjust size with Text dropdown or A− / A+";
-      case "badge": return "Click where you want the step number badge · Adjust badge size with Line dropdown or − / +";
-      case "pen": return "Click and drag to draw freehand markup · Adjust thickness with Line dropdown or − / +";
+      case "arrow": return "Click and drag to point arrow";
+      case "rect": return "Click and drag to draw focus box";
+      case "circle": return "Click and drag to circle component";
+      case "text": return "Click where you want the callout note";
+      case "badge": return "Click where you want the step number badge";
+      case "pen": return "Click and drag to draw freehand markup";
       default: return "";
     }
   }
@@ -1584,7 +1464,7 @@ export default function(component) {
     }
   };
 
-  window.addEventListener("paste", (e) => {
+  const onWindowPaste = (e) => {
     if (!imgLoaded) return;
     const activeEl = document.activeElement;
     if (activeEl === textInput || activeEl === partPhotoSearch) return;
@@ -1604,7 +1484,8 @@ export default function(component) {
     if (pastePhotoModal.style.display === "flex" && pastePhotoFeedback) {
       pastePhotoFeedback.textContent = "Clipboard does not contain an image. Copy a screenshot or image first, then press Ctrl+V.";
     }
-  });
+  };
+  window.addEventListener("paste", onWindowPaste);
 
   function syncDeleteModalDownstream() {
     if (radioDelSelected.checked && !radioDelSelected.disabled) {
@@ -1688,7 +1569,7 @@ export default function(component) {
   };
 
   // Keyboard shortcuts for Crop Apply/Cancel & Delete
-  window.addEventListener("keydown", (e) => {
+  const onWindowKeydown = (e) => {
     if (textOverlay.style.display === "flex") return;
     if (partPhotoModal.style.display === "flex") {
       if (e.key === "Escape") {
@@ -1729,27 +1610,52 @@ export default function(component) {
       e.preventDefault();
       openDeleteConfirmModal();
     }
-  });
+  };
+  window.addEventListener("keydown", onWindowKeydown);
 
   // Save composite button
   parentElement.querySelector("#btn-save").onclick = () => {
     if (!imgLoaded) return;
+    commitPendingTextOverlay(false);
     if (cropRect && Math.abs(cropRect.w) >= 12 && Math.abs(cropRect.h) >= 12) {
       applyPendingCrop();
     }
     statusEl.textContent = "Generating high-resolution composite...";
     const workW = getWorkingWidth();
     const workH = getWorkingHeight();
+    const MAX_EXPORT_DIM = 1920;
+    const exportScale = Math.min(1.0, MAX_EXPORT_DIM / Math.max(1, workW, workH));
+    const exportW = Math.max(1, Math.round(workW * exportScale));
+    const exportH = Math.max(1, Math.round(workH * exportScale));
     const offscreen = document.createElement("canvas");
-    offscreen.width = workW;
-    offscreen.height = workH;
+    offscreen.width = exportW;
+    offscreen.height = exportH;
     const offCtx = offscreen.getContext("2d");
-    offCtx.drawImage(workingCanvas, 0, 0, workW, workH);
+    offCtx.imageSmoothingEnabled = true;
+    offCtx.imageSmoothingQuality = "high";
+    offCtx.drawImage(workingCanvas, 0, 0, exportW, exportH);
 
-    // Draw all shapes at 1:1 scale
-    shapes.forEach(shape => drawShape(offCtx, shape, 1.0, false));
+    // Draw all shapes at exportScale so proportions match the working canvas
+    shapes.forEach(shape => drawShape(offCtx, shape, exportScale, false));
 
-    const dataUrl = offscreen.toDataURL("image/png");
+    const srcUrl = String((data && data.image_data_url) || "");
+    const preferJpeg = srcUrl.startsWith("data:image/jpeg") || srcUrl.startsWith("data:image/jpg");
+    let dataUrl = "";
+    if (preferJpeg) {
+      dataUrl = offscreen.toDataURL("image/jpeg", 0.92);
+    } else {
+      dataUrl = offscreen.toDataURL("image/png");
+      if (dataUrl.length > 4000000) {
+        const jpgCanvas = document.createElement("canvas");
+        jpgCanvas.width = exportW;
+        jpgCanvas.height = exportH;
+        const jCtx = jpgCanvas.getContext("2d");
+        jCtx.fillStyle = "#ffffff";
+        jCtx.fillRect(0, 0, exportW, exportH);
+        jCtx.drawImage(offscreen, 0, 0);
+        dataUrl = jpgCanvas.toDataURL("image/jpeg", 0.92);
+      }
+    }
     const serializedList = transformOps.length > 0
       ? [{ id: "__transform__", type: "__transform__", ops: transformOps }, ...shapes]
       : shapes;
@@ -1782,9 +1688,6 @@ export default function(component) {
               if (item && item.type === "__transform__" && Array.isArray(item.ops)) {
                 transformOps = item.ops;
               } else if (item && item.type) {
-                if (item.type === "text" && !item.fontSize) {
-                  item.fontSize = getShapeFontSize(item);
-                }
                 shapes.push(item);
               }
             });
@@ -1812,8 +1715,8 @@ export default function(component) {
     const natW = getWorkingWidth();
     const natH = getWorkingHeight();
 
-    const rW = Math.max(0.1, (vpW - 16) / natW);
-    const rH = Math.max(0.1, (vpH - 16) / natH);
+    const rW = Math.max(0.02, (vpW - 16) / natW);
+    const rH = Math.max(0.02, (vpH - 16) / natH);
     const fitScale = Math.min(rW, rH, 4.0);
     scale = fitScale * zoomMultiplier;
     canvasDispW = Math.max(1, Math.round(natW * scale));
@@ -1828,10 +1731,11 @@ export default function(component) {
     ctx.scale(dpr, dpr);
   }
 
-  window.addEventListener("resize", () => {
+  const onWindowResize = () => {
     resizeCanvas();
     render();
-  });
+  };
+  window.addEventListener("resize", onWindowResize);
 
   // Coordinate transforms
   function getCanvasPos(e) {
@@ -1869,29 +1773,6 @@ export default function(component) {
     return null;
   }
 
-  function isHitTextResizeHandle(s, nx, ny) {
-    if (!s || s.type !== "text") return false;
-    const tw = s.boxW || 120;
-    const th = s.boxH || 30;
-    const hx = s.x + tw;
-    const hy = s.y + th;
-    const tol = Math.max(14 / scale, 8);
-    return Math.abs(nx - hx) <= tol && Math.abs(ny - hy) <= tol;
-  }
-
-  // Double-click to edit existing Callout text/font size in place
-  canvas.ondblclick = (e) => {
-    if (!imgLoaded) return;
-    const pos = getCanvasPos(e);
-    const hit = findHitShape(pos.natX, pos.natY);
-    if (hit && hit.type === "text") {
-      e.preventDefault();
-      selectedShapeId = hit.id;
-      syncToolbarToShape(hit);
-      render();
-      openTextOverlay(pos.dispX, pos.dispY, hit.x, hit.y, hit);
-    }
-  };
   // Pointer interactions
   canvas.onpointerdown = (e) => {
     if (!imgLoaded) return;
@@ -1906,20 +1787,6 @@ export default function(component) {
       syncCropActionButtons();
       render();
       return;
-    }
-
-    // Check if user is dragging the corner resize handle of a selected Callout
-    if (selectedShapeId && (currentTool === "select" || currentTool === "text")) {
-      const currentSel = shapes.find(s => s.id === selectedShapeId);
-      if (currentSel && currentSel.type === "text" && isHitTextResizeHandle(currentSel, pos.natX, pos.natY)) {
-        pushUndo();
-        isResizingText = true;
-        resizeStartFontSize = getShapeFontSize(currentSel);
-        dragStartX = pos.natX;
-        dragStartY = pos.natY;
-        canvas.style.cursor = "nwse-resize";
-        return;
-      }
     }
 
     if (currentTool === "select") {
@@ -1941,16 +1808,14 @@ export default function(component) {
       if (hit) {
         pushUndo();
         selectedShapeId = hit.id;
-        syncToolbarToShape(hit);
+        if (hit.type === "text") {
+          currentFontSize = Number(hit.fontSize) || 18;
+          syncFontSizeSelectValue(currentFontSize);
+        }
         isDragging = true;
         dragStartX = pos.natX;
         dragStartY = pos.natY;
         canvas.style.cursor = "move";
-        if (hit.type === "text") {
-          statusEl.textContent = `Selected callout (${getShapeFontSize(hit)}px) · Use A−/A+ or Text dropdown to resize · Double-click to edit text`;
-        } else {
-          statusEl.textContent = `Selected ${formatShapeLabel(hit)} (${hit.strokeWidth || 4}px) · Use Line dropdown or − / + to adjust thickness`;
-        }
       } else {
         selectedShapeId = null;
       }
@@ -1959,22 +1824,27 @@ export default function(component) {
     }
 
     if (currentTool === "text") {
-      const hit = findHitShape(pos.natX, pos.natY);
-      if (hit && hit.type === "text") {
-        selectedShapeId = hit.id;
-        syncToolbarToShape(hit);
+      const existingTextHit = findHitShape(pos.natX, pos.natY);
+      if (existingTextHit && existingTextHit.type === "text") {
+        pushUndo();
+        selectedShapeId = existingTextHit.id;
+        currentFontSize = Number(existingTextHit.fontSize) || 18;
+        syncFontSizeSelectValue(currentFontSize);
+        isDragging = true;
+        dragStartX = pos.natX;
+        dragStartY = pos.natY;
+        canvas.style.cursor = "move";
         render();
-        openTextOverlay(pos.dispX, pos.dispY, hit.x, hit.y, hit);
         return;
       }
-      openTextOverlay(pos.dispX, pos.dispY, pos.natX, pos.natY, null);
+      openTextOverlay(pos.dispX, pos.dispY, pos.natX, pos.natY);
       return;
     }
 
     if (currentTool === "badge") {
       pushUndo();
       const bNum = parseInt(nextBadgeInput.value, 10) || 1;
-      const newBadge = {
+      shapes.push({
         id: `shape_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
         type: "badge",
         x: pos.natX,
@@ -1982,9 +1852,7 @@ export default function(component) {
         badgeNum: bNum,
         color: currentColor,
         strokeWidth: currentStrokeWidth,
-      };
-      shapes.push(newBadge);
-      selectedShapeId = newBadge.id;
+      });
       nextBadgeInput.value = bNum + 1;
       render();
       return;
@@ -1992,8 +1860,6 @@ export default function(component) {
 
     // Tools requiring drag
     isDrawing = true;
-    drawStartNatX = pos.natX;
-    drawStartNatY = pos.natY;
     const newId = `shape_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     if (currentTool === "arrow") {
       activeShape = {
@@ -2036,19 +1902,6 @@ export default function(component) {
   canvas.onpointermove = (e) => {
     if (!imgLoaded) return;
     const pos = getCanvasPos(e);
-
-    if (isResizingText && selectedShapeId) {
-      const sel = shapes.find(s => s.id === selectedShapeId);
-      if (sel && sel.type === "text") {
-        const deltaDisp = ((pos.natX - dragStartX) * 0.35 + (pos.natY - dragStartY) * 0.65) * scale;
-        const nextSize = Math.max(12, Math.min(96, Math.round(resizeStartFontSize + deltaDisp * 0.5)));
-        sel.fontSize = nextSize;
-        syncFontSizeUI(nextSize);
-        statusEl.textContent = `Callout font size: ${nextSize}px (release to finish resize)`;
-        render();
-      }
-      return;
-    }
 
     if (isCropping && cropRect) {
       const clampedX = Math.max(0, Math.min(getWorkingWidth(), pos.natX));
@@ -2109,10 +1962,6 @@ export default function(component) {
     if (currentTool === "select" && !isDragging && !isResizing) {
       if (selectedShapeId) {
         const currentSel = shapes.find(s => s.id === selectedShapeId);
-        if (currentSel && currentSel.type === "text" && isHitTextResizeHandle(currentSel, pos.natX, pos.natY)) {
-          canvas.style.cursor = "nwse-resize";
-          return;
-        }
         const hId = findResizeHandle(currentSel, pos.natX, pos.natY);
         if (hId) {
           canvas.style.cursor = (hId === "nw" || hId === "se") ? "nwse-resize" : "nesw-resize";
@@ -2121,6 +1970,12 @@ export default function(component) {
       }
       const hoverHit = findHitShape(pos.natX, pos.natY);
       canvas.style.cursor = hoverHit ? "move" : "default";
+      return;
+    }
+
+    if (currentTool === "text" && !isDragging && !isResizing) {
+      const hoverText = findHitShape(pos.natX, pos.natY);
+      canvas.style.cursor = (hoverText && hoverText.type === "text") ? "move" : "crosshair";
       return;
     }
 
@@ -2135,28 +1990,10 @@ export default function(component) {
         activeShape.points.push({ x: pos.natX, y: pos.natY });
       }
       render();
-      return;
-    }
-
-    // Update hover cursor for selected text resize handle
-    if (selectedShapeId && (currentTool === "select" || currentTool === "text")) {
-      const sel = shapes.find(s => s.id === selectedShapeId);
-      if (sel && sel.type === "text" && isHitTextResizeHandle(sel, pos.natX, pos.natY)) {
-        canvas.style.cursor = "nwse-resize";
-        return;
-      }
-    }
-    if (!isDragging && !isDrawing && !isCropping) {
-      canvas.style.cursor = currentTool === "select" ? "default" : "crosshair";
     }
   };
 
   canvas.onpointerup = (e) => {
-    if (isResizingText) {
-      isResizingText = false;
-      canvas.style.cursor = currentTool === "select" ? "default" : "crosshair";
-      return;
-    }
     if (isCropping) {
       isCropping = false;
       if (cropRect) {
@@ -2191,23 +2028,9 @@ export default function(component) {
     }
     if (isDrawing && activeShape) {
       isDrawing = false;
-      const pos = getCanvasPos(e);
-      const dragDisp = Math.hypot((pos.natX - drawStartNatX) * scale, (pos.natY - drawStartNatY) * scale);
-      if (activeShape.type !== "pen" && dragDisp < 5) {
-        activeShape = null;
-        const hit = findHitShape(pos.natX, pos.natY);
-        if (hit) {
-          selectedShapeId = hit.id;
-          syncToolbarToShape(hit);
-          statusEl.textContent = `Selected ${formatShapeLabel(hit)} · Use Line or Text controls in toolbar to resize`;
-        }
-        render();
-        return;
-      }
       pushUndo();
       shapes.push(activeShape);
       selectedShapeId = activeShape.id;
-      statusEl.textContent = `Added ${formatShapeLabel(activeShape)} (${activeShape.strokeWidth || 4}px) · Use Line dropdown or − / + to adjust thickness`;
       activeShape = null;
       render();
     }
@@ -2225,43 +2048,40 @@ export default function(component) {
   }
 
   function findHitShape(nx, ny) {
-    const resScale = getResolutionScale();
+    const normFactor = getVisualNormFactor();
     for (let i = shapes.length - 1; i >= 0; i--) {
       const s = shapes[i];
-      const sw = Number(s.strokeWidth) || 4;
+      const sw = (Number(s.strokeWidth) || 4) * normFactor;
       if (s.type === "arrow") {
         const d = distToSegment(nx, ny, s.x1, s.y1, s.x2, s.y2);
-        const tol = Math.max(14 / scale, sw * resScale * 2.5);
-        if (d <= tol) return s;
+        if (d < Math.max(18 * normFactor, sw * 3)) return s;
       } else if (s.type === "rect" || s.type === "image") {
+        const tol = 10 * normFactor;
         const xMin = Math.min(s.x, s.x + s.w);
         const xMax = Math.max(s.x, s.x + s.w);
         const yMin = Math.min(s.y, s.y + s.h);
         const yMax = Math.max(s.y, s.y + s.h);
-        const pad = Math.max(10 / scale, sw * resScale);
-        if (nx >= xMin - pad && nx <= xMax + pad && ny >= yMin - pad && ny <= yMax + pad) return s;
+        if (nx >= xMin - tol && nx <= xMax + tol && ny >= yMin - tol && ny >= yMin - tol && ny <= yMax + tol) return s;
       } else if (s.type === "circle") {
+        const tol = 10 * normFactor;
         const cx = s.x + s.w / 2;
         const cy = s.y + s.h / 2;
-        const pad = Math.max(10 / scale, sw * resScale);
-        const rx = Math.abs(s.w / 2) + pad;
-        const ry = Math.abs(s.h / 2) + pad;
+        const rx = Math.abs(s.w / 2) + tol;
+        const ry = Math.abs(s.h / 2) + tol;
         const norm = Math.pow((nx - cx)/rx, 2) + Math.pow((ny - cy)/ry, 2);
         if (norm <= 1.0) return s;
       } else if (s.type === "badge") {
         const d = Math.hypot(nx - s.x, ny - s.y);
-        const rNat = Math.max(13 * resScale, sw * 3.6 * resScale);
-        if (d <= rNat + 6 / scale) return s;
+        if (d <= Math.max(20 * normFactor, sw * 4.5)) return s;
       } else if (s.type === "text") {
-        const tw = s.boxW || 120;
-        const th = s.boxH || 30;
-        const pad = Math.max(6 / scale, 4);
-        if (nx >= s.x - pad && nx <= s.x + tw + pad && ny >= s.y - pad && ny <= s.y + th + pad) return s;
+        const tw = s.boxW || (120 * normFactor);
+        const th = s.boxH || (30 * normFactor);
+        const tol = Math.max(10 * normFactor, Math.round(10 / Math.max(0.05, scale)));
+        if (nx >= s.x - tol && nx <= s.x + tw + tol && ny >= s.y - tol && ny <= s.y + th + tol) return s;
       } else if (s.type === "pen") {
-        const tol = Math.max(12 / scale, sw * resScale * 2.5);
         for (let j = 0; j < s.points.length - 1; j++) {
           const d = distToSegment(nx, ny, s.points[j].x, s.points[j].y, s.points[j+1].x, s.points[j+1].y);
-          if (d <= tol) return s;
+          if (d < Math.max(16 * normFactor, sw * 3)) return s;
         }
       }
     }
@@ -2278,46 +2098,13 @@ export default function(component) {
 
   // Text overlay
   let pendingTextNatPos = null;
-  function openTextOverlay(dx, dy, nx, ny, existingShape) {
-    if (existingShape && existingShape.type === "text") {
-      editingTextShapeId = existingShape.id;
-      pendingTextNatPos = { nx: existingShape.x, ny: existingShape.y };
-      textInput.value = existingShape.text || "";
-      syncFontSizeUI(getShapeFontSize(existingShape));
-    } else {
-      editingTextShapeId = null;
-      pendingTextNatPos = { nx, ny };
-      textInput.value = "";
-      syncFontSizeUI(currentFontSize);
-    }
-    textOverlay.style.left = `${Math.min(Math.max(10, viewport.clientWidth - 360), Math.max(10, dx))}px`;
-    textOverlay.style.top = `${Math.min(Math.max(10, viewport.clientHeight - 60), Math.max(10, dy))}px`;
-    textOverlay.style.display = "flex";
-    setTimeout(() => {
-      textInput.focus();
-      if (editingTextShapeId) textInput.select();
-    }, 50);
-  }
-
-  textOkBtn.onclick = () => {
-    const txt = textInput.value.trim();
-    const chosenFontSize = parseInt(textEditSize.value, 10) || currentFontSize || DEFAULT_FONT_SIZE;
-    syncFontSizeUI(chosenFontSize);
-
-    if (editingTextShapeId) {
-      const existing = shapes.find(s => s.id === editingTextShapeId);
-      if (existing && txt) {
-        pushUndo();
-        existing.text = txt;
-        existing.fontSize = chosenFontSize;
-        existing.color = currentColor;
-        selectedShapeId = existing.id;
-        statusEl.textContent = `Updated callout (${chosenFontSize}px) · Use A− / A+ or Text dropdown to adjust size`;
-        render();
-      }
-    } else if (txt && pendingTextNatPos) {
+  function commitPendingTextOverlay(keepTool) {
+    if (textOverlay.style.display !== "flex") return false;
+    const txt = (textInput.value || "").trim();
+    let created = false;
+    if (txt && pendingTextNatPos) {
       pushUndo();
-      const newShape = {
+      shapes.push({
         id: `shape_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
         type: "text",
         x: pendingTextNatPos.nx,
@@ -2325,22 +2112,45 @@ export default function(component) {
         text: txt,
         color: currentColor,
         strokeWidth: currentStrokeWidth,
-        fontSize: chosenFontSize,
-      };
-      shapes.push(newShape);
-      selectedShapeId = newShape.id;
-      statusEl.textContent = `Added callout (${chosenFontSize}px) · Use A− / A+ or Text dropdown to adjust size`;
-      render();
+        fontSize: currentFontSize,
+      });
+      const createdCallout = shapes[shapes.length - 1];
+      if (createdCallout) {
+        selectedShapeId = createdCallout.id;
+      }
+      if (!keepTool) {
+        activateSelectTool();
+      }
+      statusEl.textContent = "Callout added · Drag callout to move it";
+      created = true;
     }
     textOverlay.style.display = "none";
     pendingTextNatPos = null;
-    editingTextShapeId = null;
+    if (created) {
+      render();
+    }
+    return created;
+  }
+
+  function openTextOverlay(dx, dy, nx, ny) {
+    if (textOverlay.style.display === "flex" && (textInput.value || "").trim()) {
+      commitPendingTextOverlay(true);
+    }
+    pendingTextNatPos = { nx, ny };
+    textOverlay.style.left = `${Math.min(viewport.clientWidth - 260, Math.max(10, dx))}px`;
+    textOverlay.style.top = `${Math.min(viewport.clientHeight - 60, Math.max(10, dy))}px`;
+    textOverlay.style.display = "flex";
+    textInput.value = "";
+    setTimeout(() => textInput.focus(), 50);
+  }
+
+  textOkBtn.onclick = () => {
+    commitPendingTextOverlay(false);
   };
 
   textCancelBtn.onclick = () => {
     textOverlay.style.display = "none";
     pendingTextNatPos = null;
-    editingTextShapeId = null;
   };
 
   textInput.onkeydown = (e) => {
@@ -2433,31 +2243,26 @@ export default function(component) {
 
   function drawShape(targetCtx, s, sc, isSelected) {
     targetCtx.save();
-    const resScale = getResolutionScale();
-    const baseStroke = Number(s.strokeWidth) || 4;
-    const strokePx = Math.max(1.5 * sc, baseStroke * resScale * sc);
+    const normFactor = getVisualNormFactor();
+    const visScale = sc * normFactor;
+    const sw = Number(s.strokeWidth) || 4;
     targetCtx.strokeStyle = s.color;
     targetCtx.fillStyle = s.color;
-    targetCtx.lineWidth = strokePx;
+    targetCtx.lineWidth = Math.max(1.5, sw * visScale);
     targetCtx.lineCap = "round";
     targetCtx.lineJoin = "round";
 
     if (s.type === "arrow") {
       const x1 = s.x1 * sc, y1 = s.y1 * sc;
       const x2 = s.x2 * sc, y2 = s.y2 * sc;
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      const dist = Math.hypot(x2 - x1, y2 - y1);
-      const headLen = Math.max(12 * resScale * sc, strokePx * 3.5);
-      const shaftPullback = dist > headLen * 0.85 ? headLen * 0.55 : 0;
-      const shaftEndX = x2 - shaftPullback * Math.cos(angle);
-      const shaftEndY = y2 - shaftPullback * Math.sin(angle);
-
       targetCtx.beginPath();
       targetCtx.moveTo(x1, y1);
-      targetCtx.lineTo(shaftEndX, shaftEndY);
+      targetCtx.lineTo(x2, y2);
       targetCtx.stroke();
 
       // Arrowhead
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const headLen = Math.max(14 * visScale, targetCtx.lineWidth * 3.8);
       targetCtx.beginPath();
       targetCtx.moveTo(x2, y2);
       targetCtx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
@@ -2485,14 +2290,14 @@ export default function(component) {
 
     } else if (s.type === "badge") {
       const bx = s.x * sc, by = s.y * sc;
-      const r = Math.max(13 * resScale * sc, baseStroke * 3.6 * resScale * sc);
+      const r = Math.max(13 * visScale, sw * 3.6 * visScale);
       // Outer high-contrast dark disc with border
       targetCtx.beginPath();
       targetCtx.arc(bx, by, r, 0, Math.PI * 2);
       targetCtx.fillStyle = "#0f172a";
       targetCtx.fill();
       targetCtx.strokeStyle = s.color;
-      targetCtx.lineWidth = Math.max(2 * sc, 2.5 * resScale * sc);
+      targetCtx.lineWidth = Math.max(2, 2.5 * visScale);
       targetCtx.stroke();
 
       // Number text inside
@@ -2500,17 +2305,17 @@ export default function(component) {
       targetCtx.font = `800 ${Math.round(r * 1.15)}px sans-serif`;
       targetCtx.textAlign = "center";
       targetCtx.textBaseline = "middle";
-      targetCtx.fillText(String(s.badgeNum || 1), bx, by + 1 * sc);
+      targetCtx.fillText(String(s.badgeNum || 1), bx, by + 1);
 
     } else if (s.type === "text") {
       const tx = s.x * sc, ty = s.y * sc;
-      const userFontPx = getShapeFontSize(s);
-      const fontSize = Math.max(10 * sc, userFontPx * resScale * sc);
-      targetCtx.font = `700 ${Math.round(fontSize)}px sans-serif`;
+      const baseFontPx = Number(s.fontSize) || 18;
+      const fontSize = Math.max(10 * visScale, baseFontPx * visScale);
+      targetCtx.font = `700 ${Math.round(fontSize * 10) / 10}px sans-serif`;
       const txt = s.text || "";
       const metrics = targetCtx.measureText(txt);
-      const padX = Math.max(6 * sc, fontSize * 0.42);
-      const padY = Math.max(4 * sc, fontSize * 0.28);
+      const padX = Math.max(6, Math.round(baseFontPx * 0.45)) * visScale;
+      const padY = Math.max(4, Math.round(baseFontPx * 0.28)) * visScale;
       const boxW = metrics.width + padX * 2;
       const boxH = fontSize + padY * 2;
       s.boxW = boxW / sc;
@@ -2518,20 +2323,20 @@ export default function(component) {
 
       // Callout box with subtle shadow
       targetCtx.shadowColor = "rgba(0,0,0,0.5)";
-      targetCtx.shadowBlur = Math.max(4, 6 * resScale * sc);
+      targetCtx.shadowBlur = 6 * visScale;
       targetCtx.fillStyle = "#0f172a";
       targetCtx.fillRect(tx, ty, boxW, boxH);
       targetCtx.shadowBlur = 0;
 
       targetCtx.strokeStyle = s.color;
-      targetCtx.lineWidth = Math.max(1.5, Math.max(2, baseStroke * 0.65) * resScale * sc);
+      targetCtx.lineWidth = Math.max(1.5, 2 * visScale);
       targetCtx.strokeRect(tx, ty, boxW, boxH);
 
       // Callout text
       targetCtx.fillStyle = "#ffffff";
       targetCtx.textAlign = "left";
-      targetCtx.textBaseline = "middle";
-      targetCtx.fillText(txt, tx + padX, ty + boxH / 2);
+      targetCtx.textBaseline = "top";
+      targetCtx.fillText(txt, tx + padX, ty + padY);
 
     } else if (s.type === "pen") {
       if (s.points && s.points.length > 1) {
@@ -2551,7 +2356,7 @@ export default function(component) {
 
       targetCtx.save();
       targetCtx.shadowColor = "rgba(0, 0, 0, 0.55)";
-      targetCtx.shadowBlur = 8 * sc;
+      targetCtx.shadowBlur = 8 * visScale;
       targetCtx.fillStyle = "#ffffff";
       targetCtx.fillRect(rx, ry, rw, rh);
       targetCtx.shadowBlur = 0;
@@ -2564,8 +2369,8 @@ export default function(component) {
       }
 
       if (s.label) {
-        const lblFontSize = Math.max(11, Math.min(18 * sc, Math.round(rh * 0.14)));
-        const bannerH = Math.min(rh * 0.36, lblFontSize + 8 * sc);
+        const lblFontSize = Math.max(11 * visScale, Math.min(18 * visScale, Math.round(rh * 0.14)));
+        const bannerH = Math.min(rh * 0.36, lblFontSize + 8 * visScale);
         const by = ry + rh - bannerH;
         targetCtx.fillStyle = "rgba(15, 23, 42, 0.86)";
         targetCtx.fillRect(rx, by, rw, bannerH);
@@ -2573,11 +2378,11 @@ export default function(component) {
         targetCtx.font = `700 ${Math.round(lblFontSize)}px sans-serif`;
         targetCtx.textAlign = "center";
         targetCtx.textBaseline = "middle";
-        targetCtx.fillText(String(s.label), rx + rw / 2, by + bannerH / 2, Math.max(8, rw - 8 * sc));
+        targetCtx.fillText(String(s.label), rx + rw / 2, by + bannerH / 2, Math.max(8, rw - 8 * visScale));
       }
 
       targetCtx.strokeStyle = s.color || "#38bdf8";
-      targetCtx.lineWidth = Math.max(2, (s.strokeWidth || 3) * 0.75 * sc);
+      targetCtx.lineWidth = Math.max(2, (s.strokeWidth || 3) * 0.75 * visScale);
       targetCtx.strokeRect(rx, ry, rw, rh);
       targetCtx.restore();
     }
@@ -2588,25 +2393,23 @@ export default function(component) {
       targetCtx.lineWidth = 1.5;
       targetCtx.setLineDash([4, 4]);
       if (s.type === "badge") {
-        const r = Math.max(13 * resScale * sc, baseStroke * 3.6 * resScale * sc) + 5;
+        const r = Math.max(13 * visScale, sw * 3.6 * visScale) + 5;
         targetCtx.beginPath();
         targetCtx.arc(s.x * sc, s.y * sc, r, 0, Math.PI * 2);
         targetCtx.stroke();
       } else if (s.type === "arrow") {
-        const pad = Math.max(8, strokePx + 4);
         targetCtx.strokeRect(
-          Math.min(s.x1, s.x2) * sc - pad,
-          Math.min(s.y1, s.y2) * sc - pad,
-          Math.abs(s.x2 - s.x1) * sc + pad * 2,
-          Math.abs(s.y2 - s.y1) * sc + pad * 2
+          Math.min(s.x1, s.x2) * sc - 6,
+          Math.min(s.y1, s.y2) * sc - 6,
+          Math.abs(s.x2 - s.x1) * sc + 12,
+          Math.abs(s.y2 - s.y1) * sc + 12
         );
       } else if (s.type === "rect" || s.type === "circle") {
-        const pad = Math.max(6, strokePx / 2 + 4);
         targetCtx.strokeRect(
-          Math.min(s.x, s.x + s.w) * sc - pad,
-          Math.min(s.y, s.y + s.h) * sc - pad,
-          Math.abs(s.w) * sc + pad * 2,
-          Math.abs(s.h) * sc + pad * 2
+          Math.min(s.x, s.x + s.w) * sc - 6,
+          Math.min(s.y, s.y + s.h) * sc - 6,
+          Math.abs(s.w) * sc + 12,
+          Math.abs(s.h) * sc + 12
         );
       } else if (s.type === "image") {
         const rx = Math.min(s.x, s.x + s.w) * sc;
@@ -2629,30 +2432,24 @@ export default function(component) {
           targetCtx.strokeRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
         });
       } else if (s.type === "text") {
-        const bx = s.x * sc - 4;
-        const by = s.y * sc - 4;
-        const bw = (s.boxW || 100) * sc + 8;
-        const bh = (s.boxH || 30) * sc + 8;
-        targetCtx.strokeRect(bx, by, bw, bh);
-        // Bottom-right corner resize handle for callout font size
-        targetCtx.setLineDash([]);
-        const hSize = 9;
-        const hx = s.x * sc + (s.boxW || 100) * sc;
-        const hy = s.y * sc + (s.boxH || 30) * sc;
-        targetCtx.fillStyle = "#0284c7";
-        targetCtx.fillRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
-        targetCtx.strokeStyle = "#ffffff";
-        targetCtx.lineWidth = 1.5;
-        targetCtx.strokeRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
+        targetCtx.strokeRect(s.x * sc - 4, s.y * sc - 4, (s.boxW || 100) * sc + 8, (s.boxH || 30) * sc + 8);
       }
     }
     targetCtx.restore();
   }
+
+  const cleanup = () => {
+    window.removeEventListener("paste", onWindowPaste);
+    window.removeEventListener("keydown", onWindowKeydown);
+    window.removeEventListener("resize", onWindowResize);
+  };
+  parentElement.__paagAnnotatorCleanup = cleanup;
+  return cleanup;
 }
 """
 
 _IMAGE_ANNOTATOR = st.components.v2.component(
-    "paag_image_annotator_v9",
+    "paag_image_annotator_v11",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -2668,19 +2465,38 @@ def image_annotator(
     catalog_photos: list[dict[str, Any]] | None = None,
 ) -> Any:
     """Render the in-app interactive image annotation and markup tool."""
+    safe_key = str(key or "annotator").replace("__", "_")
+    pending_save_key = f"_annotator_pending_save_{safe_key}"
+
+    def _on_save() -> None:
+        state_obj = st.session_state.get(safe_key)
+        save_payload = getattr(state_obj, "save", None)
+        if save_payload is None and isinstance(state_obj, dict):
+            save_payload = state_obj.get("save")
+        if isinstance(save_payload, dict) and save_payload.get("data_url"):
+            st.session_state[pending_save_key] = dict(save_payload)
+
     try:
-        return _IMAGE_ANNOTATOR(
-            key=key,
+        res = _IMAGE_ANNOTATOR(
+            key=safe_key,
             data={
                 "image_data_url": image_data_url,
                 "annotations_json": annotations_json,
                 "initial_badge_number": initial_badge_number,
                 "catalog_photos": catalog_photos or [],
             },
-            on_save_change=lambda: None,
+            on_save_change=_on_save,
             width="stretch",
             height="content",
         )
+        save_val = getattr(res, "save", None)
+        if isinstance(save_val, dict) and save_val.get("data_url"):
+            st.session_state.pop(pending_save_key, None)
+            return res
+        pending = st.session_state.pop(pending_save_key, None)
+        if isinstance(pending, dict) and pending.get("data_url"):
+            return type("_AnnotatorSaveResult", (), {"save": pending})()
+        return res
     except Exception:
         return None
 

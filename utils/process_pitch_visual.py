@@ -1756,7 +1756,7 @@ def render_pitch_canvas(
       .parts-table {{
         width: 100%;
         max-width: 100%;
-        table-layout: fixed;
+        table-layout: auto;
         border-collapse: collapse;
         font-size: 0.74rem;
         box-sizing: border-box;
@@ -1772,6 +1772,21 @@ def render_pitch_canvas(
         border-bottom: 2px solid #e2e8f0;
         overflow-wrap: anywhere;
         word-break: break-word;
+      }}
+      .parts-table th {{
+        white-space: nowrap;
+        overflow-wrap: normal;
+        word-break: normal;
+      }}
+      .parts-table th.col-qty {{
+        text-align: center;
+      }}
+      .parts-table th.col-handling {{
+        text-align: center;
+        white-space: normal;
+        overflow-wrap: normal;
+        word-break: keep-all;
+        line-height: 1.15;
       }}
       .parts-table td {{
         padding: 3px 4px;
@@ -1859,6 +1874,8 @@ def render_pitch_canvas(
         display: block;
       }}
       .part-pnum-container {{
+        flex-wrap: nowrap !important;
+        white-space: nowrap !important;
         display: inline-flex;
         align-items: center;
         flex-wrap: wrap;
@@ -1866,6 +1883,9 @@ def render_pitch_canvas(
         max-width: 100%;
       }}
       .part-pnum-container strong {{
+        white-space: nowrap !important;
+        overflow-wrap: normal !important;
+        word-break: normal !important;
         overflow-wrap: anywhere;
         word-break: break-word;
         line-height: 1.15;
@@ -1926,8 +1946,8 @@ def render_pitch_canvas(
         border-radius: 4px;
         margin: 0 auto;
       }}
-      .col-pnum {{ width: 23%; white-space: normal; font-weight: 700; font-size: 0.76rem; color: #1e293b; overflow: visible; }}
-      .col-desc {{ width: auto; min-width: 0; }}
+      .col-pnum {{ width: 1%; white-space: nowrap; font-weight: 700; font-size: 0.76rem; color: #1e293b; overflow: visible; }}
+      .col-desc {{ width: auto; min-width: 90px; white-space: normal; }}
       .part-desc-text {{
         font-weight: 600;
         color: #0f172a;
@@ -1949,8 +1969,8 @@ def render_pitch_canvas(
       .part-nick-space {{
         display: none;
       }}
-      .col-qty {{ width: 30px; text-align: center; font-weight: 800; font-size: 0.78rem; white-space: nowrap; padding: 2px 3px; }}
-      .col-handling {{ width: 52px; text-align: center; white-space: normal; word-break: break-word; padding: 2px 3px; }}
+      .col-qty {{ width: 1%; min-width: 28px; text-align: center; font-weight: 800; font-size: 0.78rem; white-space: nowrap; padding: 2px 4px; }}
+      .col-handling {{ width: 64px; min-width: 60px; text-align: center; white-space: normal; overflow-wrap: normal; word-break: keep-all; padding: 2px 4px; }}
       .h-badge {{
         display: inline-block;
         font-size: 0.68rem;

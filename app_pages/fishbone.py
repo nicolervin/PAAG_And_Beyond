@@ -1,3 +1,4 @@
+import copy
 import pandas as pd
 import streamlit as st
 
@@ -70,7 +71,7 @@ if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 3:
     add_assembly_section = _store_mod.add_assembly_section
     update_assembly_section_rows = _store_mod.update_assembly_section_rows
 
-if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 7:
+if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 9:
     _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
@@ -1167,6 +1168,10 @@ if fishbone_tab.open:
 
             # Canvas draft management
             canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
+            canvas_undo_stack_key = f"fishbone_canvas_undo_stack_{project_id}"
+            canvas_redo_stack_key = f"fishbone_canvas_redo_stack_{project_id}"
+            canvas_undo_stack: list[dict] = st.session_state.setdefault(canvas_undo_stack_key, [])
+            canvas_redo_stack: list[dict] = st.session_state.setdefault(canvas_redo_stack_key, [])
             persistent_conn_nodes_key = f"fishbone_conn_nodes_{project_id}"
             persistent_conn_nodes = st.session_state.setdefault(persistent_conn_nodes_key, {})
             draft = st.session_state.setdefault(
@@ -1188,6 +1193,15 @@ if fishbone_tab.open:
                 draft["connection_nodes"] = {}
             if "variant_links" not in draft:
                 draft["variant_links"] = []
+
+            draft_before_canvas_action = copy.deepcopy(draft)
+
+            def _record_canvas_draft_history() -> None:
+                if draft != draft_before_canvas_action:
+                    canvas_undo_stack.append(copy.deepcopy(draft_before_canvas_action))
+                    if len(canvas_undo_stack) > 50:
+                        del canvas_undo_stack[:-50]
+                    canvas_redo_stack.clear()
 
             canvas_key = f"interactive_fishbone_{project_id}"
             canvas_state = st.session_state.get(canvas_key)
@@ -1414,6 +1428,30 @@ if fishbone_tab.open:
                     st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
                     try:
                         delattr(canvas_state, "clear_fishbone_request")
+                    except (AttributeError, TypeError):
+                        pass
+                if getattr(canvas_state, "save_and_refresh", None):
+                    st.session_state[f"pending_interactive_save_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_state, "save_and_refresh")
+                    except (AttributeError, TypeError):
+                        pass
+                if getattr(canvas_state, "undo_last_edit", None):
+                    st.session_state[f"pending_interactive_undo_last_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_state, "undo_last_edit")
+                    except (AttributeError, TypeError):
+                        pass
+                if getattr(canvas_state, "redo_last_edit", None):
+                    st.session_state[f"pending_interactive_redo_last_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_state, "redo_last_edit")
+                    except (AttributeError, TypeError):
+                        pass
+                if getattr(canvas_state, "discard_all_edits", None):
+                    st.session_state[f"pending_interactive_discard_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_state, "discard_all_edits")
                     except (AttributeError, TypeError):
                         pass
                 def _apply_ordered_sequences(target_sec_id: str, ordered_list: list) -> bool:
@@ -1908,6 +1946,7 @@ if fishbone_tab.open:
                                 f"Staged {pnum} across {sec_count} section(s). Click 'Save & Refresh' to persist.",
                                 icon=":material/content_copy:",
                             )
+                        _record_canvas_draft_history()
                         st.rerun()
                 if p := getattr(canvas_state, "move_part_assignment", None):
                     try:
@@ -2149,9 +2188,11 @@ if fishbone_tab.open:
                                     f"Linked {len(kept_aids) or len(distinct_kept_pns)} cards in model variant group",
                                     icon=":material/layers:",
                                 )
+                            _record_canvas_draft_history()
                             st.rerun()
                         except ValueError as err:
                             st.error(str(err))
+                _record_canvas_draft_history()
 
             image_path_by_part = (
                 all_catalog_parts.set_index(all_catalog_parts["id"].astype(str))["image_path"].to_dict()
@@ -3012,12 +3053,34 @@ if fishbone_tab.open:
                     except ValueError as exc:
                         st.error(str(exc))
 
+            canvas_unsaved_count = (
+                len(draft["positions"])
+                + len(draft["connections"])
+                + len(draft["deleted_connections"])
+                + len(draft.get("connection_nodes", {}))
+                + len(draft["new_assignments"])
+                + len(draft.get("updated_assignments", []))
+                + len(draft["deleted_assignments"])
+                + len(draft.get("variant_links", []))
+            )
+            can_undo_canvas = bool(
+                canvas_undo_stack
+                or (not canvas_unsaved_count and framework_undo_key in st.session_state)
+            )
+            can_redo_canvas = bool(canvas_redo_stack)
+            can_discard_canvas = bool(
+                canvas_unsaved_count > 0 or framework_undo_key in st.session_state
+            )
             canvas_output = interactive_fishbone(
                 sections=node_rows,
                 connections=conn_rows,
                 parts=visual_parts,
                 palette_items=palette_items,
                 all_sections=all_sections_list,
+                unsaved_count=canvas_unsaved_count,
+                can_undo_last=can_undo_canvas,
+                can_redo_last=can_redo_canvas,
+                can_discard_all=can_discard_canvas,
                 key=canvas_key,
             )
             if canvas_output:
@@ -3033,6 +3096,34 @@ if fishbone_tab.open:
                     st.session_state[f"pending_interactive_clear_fishbone_{project_id}"] = True
                     try:
                         delattr(canvas_output, "clear_fishbone_request")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+                if getattr(canvas_output, "undo_last_edit", None):
+                    st.session_state[f"pending_interactive_undo_last_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_output, "undo_last_edit")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+                if getattr(canvas_output, "redo_last_edit", None):
+                    st.session_state[f"pending_interactive_redo_last_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_output, "redo_last_edit")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+                if getattr(canvas_output, "discard_all_edits", None):
+                    st.session_state[f"pending_interactive_discard_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_output, "discard_all_edits")
+                    except (AttributeError, TypeError):
+                        pass
+                    st.rerun()
+                if getattr(canvas_output, "save_and_refresh", None):
+                    st.session_state[f"pending_interactive_save_fishbone_{project_id}"] = True
+                    try:
+                        delattr(canvas_output, "save_and_refresh")
                     except (AttributeError, TypeError):
                         pass
                     st.rerun()
@@ -3067,15 +3158,42 @@ if fishbone_tab.open:
                     + len(draft.get("variant_links", []))
                 )
                 st.info(
-                    f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh below to commit."
+                    f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh in the toolbar to commit."
                 )
 
-            canvas_actions = editable_table_footer(
+            trigger_canvas_save, trigger_canvas_discard = register_unsaved_source(
+                f"fishbone_canvas_{project_id}",
                 editor_key=f"fishbone_canvas_footer_{project_id}",
-                key_prefix=f"fishbone_canvas_{project_id}",
-                additional_unsaved_changes=has_canvas_draft,
+                additional_unsaved=has_canvas_draft,
             )
-            if canvas_actions.undo:
+            top_undo_last = bool(
+                st.session_state.pop(f"pending_interactive_undo_last_fishbone_{project_id}", False)
+            )
+            top_redo_last = bool(
+                st.session_state.pop(f"pending_interactive_redo_last_fishbone_{project_id}", False)
+            )
+            top_discard_all = bool(
+                st.session_state.pop(f"pending_interactive_discard_fishbone_{project_id}", False)
+            )
+            if top_undo_last:
+                if canvas_undo_stack:
+                    canvas_redo_stack.append(copy.deepcopy(draft))
+                    st.session_state[canvas_draft_key] = canvas_undo_stack.pop()
+                    st.toast("Reverted the last canvas edit", icon=":material/undo:")
+                    st.rerun()
+                elif not has_canvas_draft and framework_undo_key in st.session_state:
+                    restore_fishbone_plan_snapshot(project_id, st.session_state.pop(framework_undo_key))
+                    st.toast("Restored Fishbone framework to previous saved state", icon=":material/undo:")
+                    st.rerun()
+            if top_redo_last:
+                if canvas_redo_stack:
+                    canvas_undo_stack.append(copy.deepcopy(draft))
+                    st.session_state[canvas_draft_key] = canvas_redo_stack.pop()
+                    st.toast("Reapplied the last undone canvas edit", icon=":material/redo:")
+                    st.rerun()
+            if top_discard_all or trigger_canvas_discard:
+                st.session_state.pop(canvas_undo_stack_key, None)
+                st.session_state.pop(canvas_redo_stack_key, None)
                 if has_canvas_draft:
                     st.session_state.pop(canvas_draft_key, None)
                     st.toast("Discarded canvas draft changes", icon=":material/undo:")
@@ -3085,8 +3203,13 @@ if fishbone_tab.open:
                     st.toast("Restored Fishbone framework to previous saved state", icon=":material/undo:")
                     st.rerun()
 
-            if canvas_actions.save_and_refresh:
+            top_save_and_refresh = bool(
+                st.session_state.pop(f"pending_interactive_save_fishbone_{project_id}", False)
+            )
+            if top_save_and_refresh or trigger_canvas_save:
                 try:
+                    st.session_state.pop(canvas_undo_stack_key, None)
+                    st.session_state.pop(canvas_redo_stack_key, None)
                     st.session_state[framework_undo_key] = current_plan_snapshot
                     save_fishbone_canvas_draft(
                         project_id=project_id,

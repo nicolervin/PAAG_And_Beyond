@@ -23,8 +23,9 @@ import utils.store as _store_mod
 import utils.yamazumi_store as _yamazumi_store_mod
 
 if (
-    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 11
+    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 14
     or "source_variant" not in _inspect.signature(_yamazumi_store_mod.delete_yamazumi_element).parameters
+    or "delete_elements" not in _inspect.signature(_yamazumi_store_mod.delete_yamazumi_pitch).parameters
     or not hasattr(_db_core_mod, "YAMAZUMI_CONVEYOR_TYPES")
     or "update_yamazumi_areas_table" not in _store_mod.__dict__
     or "split_variants" not in _inspect.signature(_yamazumi_store_mod.add_yamazumi_element).parameters
@@ -140,7 +141,7 @@ from utils.table_ui import (
 )
 import utils.yamazumi_board as _yamazumi_board_mod
 
-if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 20:
+if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 21:
     _importlib.reload(_yamazumi_board_mod)
 
 from utils.yamazumi_board import merge_yamazumi_pitch_variants, yamazumi_board
@@ -2905,7 +2906,9 @@ board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
 board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"
 add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
+add_pitch_gen_key = f"yamazumi_add_pitch_gen_{project_id}_{scenario_id}_{area_id}"
 add_element_dialog_key = f"yamazumi_add_element_target_{project_id}_{area_id}"
+add_element_gen_key = f"yamazumi_add_element_gen_{project_id}_{scenario_id}_{area_id}"
 edit_pitch_dialog_key = f"yamazumi_edit_pitch_target_{project_id}_{area_id}"
 edit_element_dialog_key = f"yamazumi_edit_element_target_{project_id}_{area_id}"
 gui_pitch_delete_key = f"yamazumi_gui_pitch_pending_delete_{project_id}_{scenario_id}_{area_id}"
@@ -2913,6 +2916,9 @@ gui_element_delete_key = f"yamazumi_gui_element_pending_delete_{project_id}_{sce
 pitch_edit_restore_key = f"yamazumi_gui_pitch_edit_restore_{project_id}_{scenario_id}_{area_id}"
 element_edit_restore_key = f"yamazumi_gui_element_edit_restore_{project_id}_{scenario_id}_{area_id}"
 delete_element_dialog_key = f"yamazumi_delete_element_target_{project_id}_{area_id}"
+delete_unassigned_dialog_key = (
+    f"yamazumi_delete_unassigned_{project_id}_{scenario_id}_{area_id}"
+)
 move_pitch_dialog_key = (
     f"yamazumi_move_pitches_{project_id}_{scenario_id}_{area_id}"
 )
@@ -2929,6 +2935,7 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
         edit_pitch_dialog_key,
         edit_element_dialog_key,
         delete_element_dialog_key,
+        delete_unassigned_dialog_key,
         move_pitch_dialog_key,
         copy_pitch_dialog_key,
     ):
@@ -2997,8 +3004,53 @@ def handle_yamazumi_move() -> None:
         st.session_state[board_draft_error_key] = str(exc)
 
 
+def _reset_add_pitch_dialog_widgets() -> None:
+    gen = int(st.session_state.get(add_pitch_gen_key, 0) or 0)
+    for aid in [*selected_area_ids, str(area_id)]:
+        st.session_state.pop(f"add_pitch_number_{project_id}_{scenario_id}_{aid}", None)
+        st.session_state.pop(f"add_pitch_number_{project_id}_{scenario_id}_{aid}_{gen}", None)
+        st.session_state.pop(f"add_pitch_feed_target_{project_id}_{aid}", None)
+        st.session_state.pop(f"add_pitch_feed_target_{project_id}_{aid}_{gen}", None)
+    for prefix in (
+        f"add_pitch_area_{project_id}_{scenario_id}_{area_id}",
+        f"add_pitch_name_{project_id}_{scenario_id}_{area_id}",
+        f"add_pitch_status_{project_id}_{scenario_id}_{area_id}",
+        f"add_pitch_type_{project_id}_{scenario_id}_{area_id}",
+        f"add_pitch_variants_{project_id}_{scenario_id}_{area_id}",
+    ):
+        st.session_state.pop(prefix, None)
+        st.session_state.pop(f"{prefix}_{gen}", None)
+    st.session_state[add_pitch_gen_key] = gen + 1
+
+
+def close_add_pitch_dialog() -> None:
+    st.session_state.pop(add_pitch_dialog_key, None)
+    _reset_add_pitch_dialog_widgets()
+
+
+def _reset_add_element_dialog_widgets() -> None:
+    gen = int(st.session_state.get(add_element_gen_key, 0) or 0)
+    for prefix in (
+        f"add_element_area_{project_id}_{scenario_id}_{area_id}",
+        f"add_element_description_{project_id}_{scenario_id}_{area_id}",
+        f"add_element_time_{project_id}_{scenario_id}_{area_id}",
+        f"add_element_variants_{project_id}_{scenario_id}_{area_id}",
+        f"add_element_work_type_{project_id}_{scenario_id}_{area_id}",
+        f"add_element_work_region_{project_id}_{scenario_id}_{area_id}",
+    ):
+        st.session_state.pop(prefix, None)
+        st.session_state.pop(f"{prefix}_{gen}", None)
+    st.session_state[add_element_gen_key] = gen + 1
+
+
+def close_add_element_dialog() -> None:
+    st.session_state.pop(add_element_dialog_key, None)
+    _reset_add_element_dialog_widgets()
+
+
 def handle_add_pitch_request() -> None:
     close_other_yamazumi_dialogs(add_pitch_dialog_key)
+    _reset_add_pitch_dialog_widgets()
     st.session_state[add_pitch_dialog_key] = True
 
 
@@ -3009,6 +3061,7 @@ def handle_add_element_request() -> None:
         request = state.get("add_element")
     if request:
         close_other_yamazumi_dialogs(add_element_dialog_key)
+        _reset_add_element_dialog_widgets()
         st.session_state[add_element_dialog_key] = dict(request)
 
 
@@ -3074,8 +3127,16 @@ def handle_scale_mode_change() -> None:
         ] = "Readable" if requested_mode == "readable" else "To Scale"
 
 
-@st.dialog("Add Pitch")
+def handle_delete_unassigned_request() -> None:
+    request = _board_trigger("delete_unassigned")
+    if request.get("requested"):
+        close_other_yamazumi_dialogs(delete_unassigned_dialog_key)
+        st.session_state[delete_unassigned_dialog_key] = True
+
+
+@st.dialog("Add Pitch", on_dismiss=close_add_pitch_dialog)
 def add_pitch_dialog() -> None:
+    add_pitch_gen = int(st.session_state.get(add_pitch_gen_key, 0) or 0)
     st.caption("The new address will appear on the north/top or south/bottom side based on its ending number.")
     target_pitch_area_id = str(area_id)
     if multi_area_selected:
@@ -3083,7 +3144,7 @@ def add_pitch_dialog() -> None:
             "Yamazumi Area",
             options=selected_area_ids,
             format_func=lambda value: area_labels.get(str(value), str(value)),
-            key=f"add_pitch_area_{project_id}_{scenario_id}_{area_id}",
+            key=f"add_pitch_area_{project_id}_{scenario_id}_{area_id}_{add_pitch_gen}",
         )
     target_suggestion = (
         pitch_address_suggestion
@@ -3095,18 +3156,32 @@ def add_pitch_dialog() -> None:
         value=target_suggestion["suggested_address"],
         placeholder="01-ML1-001",
         help="Must be unique across every Yamazumi area in this planning scenario. Capitalization and surrounding spaces do not create a different address.",
-        key=f"add_pitch_number_{project_id}_{scenario_id}_{target_pitch_area_id}",
+        key=f"add_pitch_number_{project_id}_{scenario_id}_{target_pitch_area_id}_{add_pitch_gen}",
     )
-    pitch_name = st.text_input("Pitch Name")
-    status = st.selectbox("Status", ["Active", "Open", "Blocked"], index=0)
-    pitch_type = st.selectbox("Pitch Type", PITCH_TYPES, index=0)
+    pitch_name = st.text_input(
+        "Pitch Name",
+        value="",
+        key=f"add_pitch_name_{project_id}_{scenario_id}_{area_id}_{add_pitch_gen}",
+    )
+    status = st.selectbox(
+        "Status",
+        ["Active", "Open", "Blocked"],
+        index=0,
+        key=f"add_pitch_status_{project_id}_{scenario_id}_{area_id}_{add_pitch_gen}",
+    )
+    pitch_type = st.selectbox(
+        "Pitch Type",
+        PITCH_TYPES,
+        index=0,
+        key=f"add_pitch_type_{project_id}_{scenario_id}_{area_id}_{add_pitch_gen}",
+    )
     feed_target_id = None
     if pitch_type in {"Subassembly", "Kitter"}:
         feed_target_id = feed_target_picker(
             "Feeds Into Pitch",
             source_pitch_id=None,
             current_target_id=None,
-            key=f"add_pitch_feed_target_{project_id}_{target_pitch_area_id}",
+            key=f"add_pitch_feed_target_{project_id}_{target_pitch_area_id}_{add_pitch_gen}",
             target_area_id=str(target_pitch_area_id),
         )
     selected_pitch_variants = st.multiselect(
@@ -3114,12 +3189,13 @@ def add_pitch_dialog() -> None:
         options=variant_options,
         default=["All models"],
         help="Only selected variants appear as stacks on this pitch.",
+        key=f"add_pitch_variants_{project_id}_{scenario_id}_{area_id}_{add_pitch_gen}",
     )
     actions = st.container(horizontal=True)
-    if actions.button("Cancel", key="cancel_interactive_pitch"):
-        st.session_state.pop(f"yamazumi_show_add_pitch_{project_id}_{area_id}", None)
+    if actions.button("Cancel", key=f"cancel_interactive_pitch_{add_pitch_gen}"):
+        close_add_pitch_dialog()
         st.rerun()
-    if actions.button("Add Pitch", type="primary", icon=":material/add:", key="save_interactive_pitch"):
+    if actions.button("Add Pitch", type="primary", icon=":material/add:", key=f"save_interactive_pitch_{add_pitch_gen}"):
         try:
             new_pitch_id = add_yamazumi_pitch(
                 project_id, str(target_pitch_area_id), pitch_number, pitch_name, status,
@@ -3141,7 +3217,7 @@ def add_pitch_dialog() -> None:
                     ),
                 },
             )
-            st.session_state.pop(f"yamazumi_show_add_pitch_{project_id}_{area_id}", None)
+            close_add_pitch_dialog()
             request_table_editor_reset(pitch_editor_key)
             st.toast(f"Added pitch {pitch_number}", icon=":material/check_circle:")
             st.rerun()
@@ -3149,9 +3225,10 @@ def add_pitch_dialog() -> None:
             st.error(str(exc))
 
 
-@st.dialog("Add Yamazumi Work Element")
+@st.dialog("Add Yamazumi Work Element", on_dismiss=close_add_element_dialog)
 def add_element_dialog() -> None:
-    target = st.session_state.get(f"yamazumi_add_element_target_{project_id}_{area_id}", {})
+    add_elem_gen = int(st.session_state.get(add_element_gen_key, 0) or 0)
+    target = st.session_state.get(add_element_dialog_key, {})
     target_pitch_id = target.get("pitch_id")
     st.caption(f"Destination: {target.get('pitch_number') or 'Unassigned'}")
     target_element_area_id = (
@@ -3164,24 +3241,41 @@ def add_element_dialog() -> None:
             "Yamazumi Area",
             options=selected_area_ids,
             format_func=lambda value: area_labels.get(str(value), str(value)),
-            key=f"add_element_area_{project_id}_{scenario_id}_{area_id}",
+            key=f"add_element_area_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
         )
-    description = st.text_area("Work Description", placeholder="Describe one measurable element of work")
+    description = st.text_area(
+        "Work Description",
+        value="",
+        placeholder="Describe one measurable element of work",
+        key=f"add_element_description_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
+    )
     time_value = st.number_input(
         f"Time to Complete ({time_config.label.title()})",
         min_value=0.0,
         value=0.0,
         step=time_config.step,
         format=f"%.{time_config.decimals}f",
+        key=f"add_element_time_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
     )
     model_variants = st.multiselect(
         "Model Variants",
         options=variant_options,
         default=["All models"],
         help=ADD_ELEMENT_VARIANT_HELP,
+        key=f"add_element_variants_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
     )
-    work_type = st.selectbox("Work Type", WORK_TYPES, index=0)
-    work_region = st.selectbox("Work Region", work_region_options, index=0)
+    work_type = st.selectbox(
+        "Work Type",
+        WORK_TYPES,
+        index=0,
+        key=f"add_element_work_type_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
+    )
+    work_region = st.selectbox(
+        "Work Region",
+        work_region_options,
+        index=0,
+        key=f"add_element_work_region_{project_id}_{scenario_id}_{area_id}_{add_elem_gen}",
+    )
     target_variants = pitch_variants_by_id.get(str(target_pitch_id), [])
     variants_added_to_pitch = [
         variant for variant in model_variants
@@ -3193,10 +3287,10 @@ def add_element_dialog() -> None:
             f"{target.get('pitch_number') or ''} as a new Yamazumi stack."
         )
     actions = st.container(horizontal=True)
-    if actions.button("Cancel", key="cancel_interactive_element"):
-        st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
+    if actions.button("Cancel", key=f"cancel_interactive_element_{add_elem_gen}"):
+        close_add_element_dialog()
         st.rerun()
-    if actions.button("Add Element", type="primary", icon=":material/add:", key="save_interactive_element"):
+    if actions.button("Add Element", type="primary", icon=":material/add:", key=f"save_interactive_element_{add_elem_gen}"):
         try:
             new_element_id = add_yamazumi_element(
                 project_id,
@@ -3227,7 +3321,7 @@ def add_element_dialog() -> None:
                     "variants_added_to_pitch": variants_added_to_pitch,
                 },
             )
-            st.session_state.pop(f"yamazumi_add_element_target_{project_id}_{area_id}", None)
+            close_add_element_dialog()
             if variants_added_to_pitch:
                 request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
@@ -3817,8 +3911,14 @@ def edit_element_dialog(
         for _, row in active_pitches.iterrows()
     }
     destinations = [None, *pitch_label_by_id]
+    draft_pitch_id = current.get("pitch_id")
+    if has_board_draft and isinstance(board_draft, dict):
+        for stack_key, stacked_ids in board_draft.items():
+            if str(element_id) in [str(eid) for eid in (stacked_ids or [])]:
+                draft_pitch_id = None if stack_key == UNASSIGNED_STACK_ID else stack_key
+                break
     current_pitch_id = (
-        str(restored_values.get("pitch_id", current.get("pitch_id")) or "") or None
+        str(restored_values.get("pitch_id", draft_pitch_id) or "") or None
     )
     with st.container():
         selected_pitch_id = st.selectbox(
@@ -3921,15 +4021,8 @@ def edit_element_dialog(
             "Delete Work Element…",
             icon=":material/delete:",
             key=f"destructive_request_edit_element_delete_{element_id}",
-            disabled=has_board_draft and "__unassigned__" in (board_draft or {}),
-            help=(
-                "Save or undo the unsaved board arrangement before deleting this work element."
-                if has_board_draft
-                else "Review the relationship impact before deleting this work element."
-            ),
+            help="Review the relationship impact before deleting this work element.",
         )
-        if has_board_draft:
-            st.info("Use the board's Save & Refresh or Undo before deleting a work element.")
     if save_edit:
         try:
             current_element_area_id = str(current.get("area_id") or area_id)
@@ -3985,22 +4078,6 @@ def edit_element_dialog(
             },
         }
         st.rerun(scope="app")
-    if delete_edit:
-        st.session_state.pop(state_key, None)
-        st.session_state.pop(gui_pitch_delete_key, None)
-        st.session_state[gui_element_delete_key] = {
-            "id": str(element_id),
-            "model_variant": target_variant,
-            "values": {
-                "pitch_id": selected_pitch_id,
-                "description": description,
-                "time_s": display_to_seconds(time_value, yamazumi_time_unit),
-                "model_variants": list(model_variants),
-                "work_type": work_type,
-                "work_region": work_region,
-            },
-        }
-        st.rerun(scope="app")
 
 
 @st.dialog("Delete Pitch?", dismissible=False)
@@ -4019,16 +4096,44 @@ def confirm_gui_pitch_delete() -> None:
     pitch_label = str(current.get("pitch_number") or "Unnamed pitch")
     if current.get("pitch_name"):
         pitch_label += f" — {current['pitch_name']}"
-    assigned_count = (
-        int(elements["pitch_id"].fillna("").astype(str).eq(pitch_id).sum())
+    assigned_elements_df = (
+        elements.loc[elements["pitch_id"].fillna("").astype(str).eq(pitch_id)]
         if not elements.empty
-        else 0
+        else pd.DataFrame()
+    )
+    assigned_count = len(assigned_elements_df)
+    has_linked_process_steps = (
+        not assigned_elements_df.empty
+        and "process_element_id" in assigned_elements_df.columns
+        and assigned_elements_df["process_element_id"].fillna("").astype(str).str.strip().ne("").any()
     )
     blockers = yamazumi_pitch_delete_blockers(project_id, current_pitch_area_id, [pitch_id])
-    st.warning(
-        f"Delete {pitch_label}? {assigned_count} assigned work element(s) will move "
-        "to Unassigned; the work elements themselves will not be deleted."
+    element_action = st.radio(
+        "What would you like to do with work elements assigned to this pitch?",
+        options=["move_to_unassigned", "delete_elements"],
+        index=0,
+        format_func=lambda opt: (
+            f"Move work elements to the Unassigned section ({assigned_count})"
+            if opt == "move_to_unassigned"
+            else f"Delete work elements ({assigned_count})"
+        ),
+        key=f"gui_pitch_delete_element_action_{pitch_id}",
     )
+    delete_assigned_elements = element_action == "delete_elements"
+    if delete_assigned_elements:
+        st.warning(
+            f"Delete {pitch_label}? {assigned_count} assigned work element(s) will also "
+            "be deleted from this planning scenario."
+        )
+        if has_linked_process_steps:
+            st.info(
+                "Linked Process at a Glance step(s) will not be deleted automatically."
+            )
+    else:
+        st.warning(
+            f"Delete {pitch_label}? {assigned_count} assigned work element(s) will move "
+            "to Unassigned; the work elements themselves will not be deleted."
+        )
     if blockers:
         relationships = ", ".join(
             f"{yamazumi_pitch_label(row['source_pitch_number'], row['source_pitch_name'])} → "
@@ -4060,11 +4165,12 @@ def confirm_gui_pitch_delete() -> None:
         disabled=bool(blockers) or has_board_draft or not editor_name,
     ):
         try:
-            moved_count = delete_yamazumi_pitch(
+            affected_count = delete_yamazumi_pitch(
                 project_id,
                 current_pitch_area_id,
                 pitch_id,
                 scenario_id=scenario_id,
+                delete_elements=delete_assigned_elements,
                 audit_editor_name=editor_name,
                 audit_details={"source": "interactive_board_gui"},
             )
@@ -4073,7 +4179,11 @@ def confirm_gui_pitch_delete() -> None:
             request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
             st.toast(
-                f"Deleted pitch; {moved_count} work element(s) moved to Unassigned",
+                (
+                    f"Deleted pitch and {affected_count} work element(s)"
+                    if delete_assigned_elements
+                    else f"Deleted pitch; {affected_count} work element(s) moved to Unassigned"
+                ),
                 icon=":material/delete:",
             )
             st.rerun()
@@ -4117,8 +4227,6 @@ def confirm_gui_element_delete() -> None:
     )
     if has_process_link:
         st.info("Its linked Process at a Glance step will not be deleted automatically.")
-    if has_board_draft:
-        st.error("Use the board's Save & Refresh or Undo before deleting this work element.")
     editor_name = str(st.session_state.get("current_editor") or "").strip()
     if not editor_name:
         st.error("Enter the Current editor before deleting this work element.")
@@ -4134,7 +4242,7 @@ def confirm_gui_element_delete() -> None:
         type="primary",
         icon=":material/delete:",
         key=f"destructive_gui_element_delete_{element_id}",
-        disabled=has_board_draft or not editor_name,
+        disabled=not editor_name,
     ):
         try:
             delete_yamazumi_element(
@@ -4149,6 +4257,17 @@ def confirm_gui_element_delete() -> None:
                     "linked_process_step_preserved": has_process_link,
                 },
             )
+            current_draft = st.session_state.get(board_draft_key)
+            if isinstance(current_draft, dict):
+                updated_draft = remove_element_from_stack_draft(current_draft, element_id)
+                remaining_elements = [
+                    row for row in elements.to_dict("records")
+                    if str(row.get("id")) != element_id
+                ]
+                if draft_differs(remaining_elements, updated_draft):
+                    st.session_state[board_draft_key] = updated_draft
+                else:
+                    st.session_state.pop(board_draft_key, None)
             st.session_state.pop(gui_element_delete_key, None)
             st.session_state.pop(element_edit_restore_key, None)
             request_table_editor_reset(element_editor_key)
@@ -4164,10 +4283,35 @@ def confirm_interactive_element_delete() -> None:
     pending = st.session_state.get(delete_element_dialog_key, {})
     element_id = str(pending.get("element_id") or "")
     target_element_area_id = element_area_by_id.get(element_id, str(area_id))
+    draft_values = pending.get("draft") if isinstance(pending.get("draft"), dict) else {}
+    in_unassigned_draft = (
+        isinstance(board_draft, dict)
+        and element_id in [str(eid) for eid in (board_draft.get(UNASSIGNED_STACK_ID) or [])]
+    ) or (
+        "pitch_id" in draft_values and not draft_values.get("pitch_id")
+    )
+    requested_variant = (
+        None
+        if in_unassigned_draft
+        else (str(pending.get("model_variant") or "").strip() or None)
+    )
     try:
         impact = yamazumi_element_delete_impact(
-            project_id, scenario_id, target_element_area_id, element_id, source_variant=str(pending.get("model_variant") or "").strip() or None
+            project_id,
+            scenario_id,
+            target_element_area_id,
+            element_id,
+            source_variant=requested_variant,
         )
+        if not impact.get("pitch_id") and requested_variant is not None:
+            requested_variant = None
+            impact = yamazumi_element_delete_impact(
+                project_id,
+                scenario_id,
+                target_element_area_id,
+                element_id,
+                source_variant=None,
+            )
     except ValueError as exc:
         st.warning(str(exc))
         if st.button(
@@ -4178,9 +4322,11 @@ def confirm_interactive_element_delete() -> None:
             st.rerun()
         return
 
-    pitch_label = yamazumi_pitch_label(
-        impact.get("pitch_number"), impact.get("pitch_name")
-    ) if impact.get("pitch_id") else "Unassigned"
+    pitch_label = (
+        "Unassigned"
+        if (in_unassigned_draft or not impact.get("pitch_id"))
+        else yamazumi_pitch_label(impact.get("pitch_number"), impact.get("pitch_name"))
+    )
     st.warning(
         (
             f"Delete **{impact['description']}** from model variant **{impact.get('target_model_variant')}** on **{pitch_label}** in this planning scenario? "
@@ -4232,7 +4378,11 @@ def confirm_interactive_element_delete() -> None:
     ):
         try:
             result = delete_yamazumi_element(
-                project_id, scenario_id, target_element_area_id, element_id, source_variant=str(pending.get("model_variant") or "").strip() or None
+                project_id,
+                scenario_id,
+                target_element_area_id,
+                element_id,
+                source_variant=requested_variant,
             )
             record_audit_event(
                 project_id,
@@ -4263,6 +4413,92 @@ def confirm_interactive_element_delete() -> None:
             st.session_state.pop(edit_element_dialog_key, None)
             request_table_editor_reset(element_editor_key)
             st.toast("Deleted Yamazumi work element", icon=":material/delete:")
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+@st.dialog("Delete Unassigned Work Elements?", dismissible=False)
+def confirm_unassigned_elements_delete() -> None:
+    unassigned_rows = [
+        row
+        for row in (board_elements if "board_elements" in globals() else elements.to_dict("records"))
+        if not str(row.get("pitch_id") or "").strip()
+    ]
+    if not unassigned_rows:
+        st.info("There are no work elements in the Unassigned section.")
+        if st.button("Close", key=f"close_empty_unassigned_delete_{scenario_id}_{area_id}"):
+            st.session_state.pop(delete_unassigned_dialog_key, None)
+            st.rerun()
+        return
+    unassigned_by_id = {
+        str(row["id"]): row for row in unassigned_rows if str(row.get("id") or "").strip()
+    }
+    option_ids = list(unassigned_by_id.keys())
+    selected_ids = st.multiselect(
+        "Work elements in Unassigned to delete",
+        options=option_ids,
+        default=option_ids,
+        format_func=lambda eid: (
+            f"{unassigned_by_id[eid].get('description') or 'Unnamed work element'} "
+            f"({format_seconds(float(unassigned_by_id[eid].get('time_s') or 0), yamazumi_time_unit)})"
+        ),
+        key=f"select_unassigned_elements_delete_{scenario_id}_{area_id}",
+    )
+    st.warning(
+        f"Delete {len(selected_ids)} unassigned work element(s) from this planning scenario?"
+    )
+    has_linked_process = any(
+        unassigned_by_id[eid].get("process_element_id") is not None
+        and not pd.isna(unassigned_by_id[eid].get("process_element_id"))
+        and bool(str(unassigned_by_id[eid].get("process_element_id")).strip())
+        for eid in selected_ids
+        if eid in unassigned_by_id
+    )
+    if has_linked_process:
+        st.info("Linked Process at a Glance step(s) will not be deleted automatically.")
+    editor_name = str(st.session_state.get("current_editor") or "").strip()
+    if not editor_name:
+        st.error("Enter the Current editor before deleting work elements.")
+    actions = st.container(horizontal=True)
+    if actions.button("Cancel", key=f"cancel_unassigned_elements_delete_{scenario_id}_{area_id}"):
+        st.session_state.pop(delete_unassigned_dialog_key, None)
+        st.rerun()
+    if actions.button(
+        "Delete Work Elements",
+        type="primary",
+        icon=":material/delete:",
+        key=f"destructive_confirm_unassigned_elements_delete_{scenario_id}_{area_id}",
+        disabled=not selected_ids or not editor_name,
+    ):
+        try:
+            result = delete_yamazumi_elements(
+                project_id,
+                scenario_id,
+                list(selected_ids),
+                audit_editor_name=editor_name,
+            )
+            current_draft = st.session_state.get(board_draft_key)
+            if isinstance(current_draft, dict):
+                updated_draft = current_draft
+                for eid in selected_ids:
+                    updated_draft = remove_element_from_stack_draft(updated_draft, str(eid))
+                deleted_set = {str(eid) for eid in selected_ids}
+                remaining_elements = [
+                    row for row in elements.to_dict("records")
+                    if str(row.get("id")) not in deleted_set
+                ]
+                if draft_differs(remaining_elements, updated_draft):
+                    st.session_state[board_draft_key] = updated_draft
+                else:
+                    st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(delete_unassigned_dialog_key, None)
+            request_table_editor_reset(element_editor_key)
+            request_table_editor_reset(pitch_editor_key)
+            st.toast(
+                f"Deleted {result['deleted_count']} unassigned work element(s)",
+                icon=":material/delete:",
+            )
             st.rerun()
         except ValueError as exc:
             st.error(str(exc))
@@ -4387,6 +4623,7 @@ with interactive_yamazumi_tab:
         on_edit_pitch=handle_edit_pitch_request,
         on_edit_element=handle_edit_element_request,
         on_scale_mode=handle_scale_mode_change,
+        on_delete_unassigned=handle_delete_unassigned_request,
     )
     if draft_error := st.session_state.pop(board_draft_error_key, None):
         st.error(str(draft_error))
@@ -4477,6 +4714,8 @@ elif st.session_state.get(edit_pitch_dialog_key):
     edit_pitch_dialog()
 elif st.session_state.get(delete_element_dialog_key):
     confirm_interactive_element_delete()
+elif st.session_state.get(delete_unassigned_dialog_key):
+    confirm_unassigned_elements_delete()
 elif st.session_state.get(move_pitch_dialog_key):
     move_pitch_dialog()
 elif st.session_state.get(copy_pitch_dialog_key):
@@ -5483,7 +5722,7 @@ with yamazumi_tables_tab:
     element_has_unsaved_edits = table_has_unsaved_changes(
         element_editor_key, native_row_selection=True
     )
-    delete_element_disabled = has_board_draft
+    delete_element_disabled = False
     copy_element_disabled = (
         element_has_unsaved_edits
         or not selected_elements.empty
@@ -5654,13 +5893,45 @@ with yamazumi_tables_tab:
             if errors:
                 raise ValueError(" ".join(errors))
             pitch_id_by_label = {label: pitch_id for pitch_id, label in pitch_label_by_id.items()}
+            pitch_id_by_label_ci = {
+                str(label).strip().casefold(): pitch_id
+                for pitch_id, label in pitch_label_by_id.items()
+                if str(label).strip()
+            }
+            for _pid, _full_lbl in table_pitch_label_by_id.items():
+                if _pid in pitch_label_by_id and str(_full_lbl).strip():
+                    pitch_id_by_label_ci[str(_full_lbl).strip().casefold()] = _pid
+            def _map_pitch_label(val: object, fallback_pid: object = None) -> str | None:
+                if val is None or pd.isna(val):
+                    return None
+                txt = str(val).strip()
+                if not txt or txt.casefold() in {"unassigned", "nan", "none", "<na>"}:
+                    return None
+                mapped = (
+                    pitch_id_by_label.get(txt)
+                    or pitch_id_by_label_ci.get(txt.casefold())
+                    or (txt if txt in pitch_label_by_id else None)
+                )
+                if mapped:
+                    return mapped
+                fb = "" if fallback_pid is None or pd.isna(fallback_pid) else str(fallback_pid).strip()
+                if fb in pitch_label_by_id:
+                    return fb
+                return txt
             to_save = merge_filtered_edits(element_rows, visible_elements, edited_elements)
             to_save["area_id"] = (
                 to_save["area_name"].map(area_id_by_name)
                 .fillna(to_save.get("area_id"))
                 .fillna(str(area_id))
             )
-            to_save["pitch_id"] = to_save["pitch"].map(pitch_id_by_label)
+            to_save["pitch_id"] = pd.Series(
+                [
+                    _map_pitch_label(val, fb_pid)
+                    for val, fb_pid in zip(to_save["pitch"], to_save.get("pitch_id", pd.Series([None] * len(to_save))))
+                ],
+                index=to_save.index,
+                dtype="object",
+            )
             to_save = to_save.drop(columns=["selected", "pitch"], errors="ignore")
             to_save = element_times_to_seconds(to_save)
             count = replace_yamazumi_elements(project_id, element_save_scope, to_save)
@@ -5710,9 +5981,9 @@ with yamazumi_tables_tab:
 def prepared_pitch_rows(
     draft_records: list[dict], excluded_ids: set[str]
 ) -> pd.DataFrame:
-    draft = pd.DataFrame(draft_records, columns=pitch_editor_rows.columns)
-    draft = draft.loc[
-        ~draft["id"].fillna("").astype(str).isin(excluded_ids)
+    full_draft = pd.DataFrame(draft_records, columns=pitch_editor_rows.columns)
+    draft = full_draft.loc[
+        ~full_draft["id"].fillna("").astype(str).isin(excluded_ids)
     ].copy()
     draft = drop_untouched_new_rows(draft, identifying_columns=["pitch_number"])
     errors = required_field_errors(
@@ -5720,7 +5991,14 @@ def prepared_pitch_rows(
     )
     if errors:
         raise ValueError(" ".join(errors))
-    to_save = merge_filtered_edits(pitch_rows, visible_pitches, draft)
+    to_save = merge_filtered_edits(
+        pitch_rows,
+        full_draft if not full_draft.empty else visible_pitches,
+        draft,
+    )
+    to_save = to_save.loc[
+        ~to_save["id"].fillna("").astype(str).isin(excluded_ids)
+    ].copy()
     to_save = to_save.drop(columns=["selected"], errors="ignore")
     to_save["area_id"] = (
         to_save["area_name"].map(area_id_by_name)
@@ -5739,9 +6017,9 @@ def prepared_pitch_rows(
 def prepared_element_rows(
     draft_records: list[dict], excluded_ids: set[str]
 ) -> pd.DataFrame:
-    draft = pd.DataFrame(draft_records, columns=element_editor_rows.columns)
-    draft = draft.loc[
-        ~draft["id"].fillna("").astype(str).isin(excluded_ids)
+    full_draft = pd.DataFrame(draft_records, columns=element_editor_rows.columns)
+    draft = full_draft.loc[
+        ~full_draft["id"].fillna("").astype(str).isin(excluded_ids)
     ].copy()
     draft = drop_untouched_new_rows(draft, identifying_columns=["description"])
     errors = required_field_errors(
@@ -5757,13 +6035,52 @@ def prepared_element_rows(
     pitch_id_by_label = {
         label: pitch_id for pitch_id, label in pitch_label_by_id.items()
     }
-    to_save = merge_filtered_edits(element_rows, visible_elements, draft)
+    pitch_id_by_label_ci = {
+        str(label).strip().casefold(): pitch_id
+        for pitch_id, label in pitch_label_by_id.items()
+        if str(label).strip()
+    }
+    for _pid, _full_lbl in table_pitch_label_by_id.items():
+        if _pid in pitch_label_by_id and str(_full_lbl).strip():
+            pitch_id_by_label_ci[str(_full_lbl).strip().casefold()] = _pid
+    def _map_draft_pitch_label(val: object, fallback_pid: object = None) -> str | None:
+        if val is None or pd.isna(val):
+            return None
+        txt = str(val).strip()
+        if not txt or txt.casefold() in {"unassigned", "nan", "none", "<na>"}:
+            return None
+        mapped = (
+            pitch_id_by_label.get(txt)
+            or pitch_id_by_label_ci.get(txt.casefold())
+            or (txt if txt in pitch_label_by_id else None)
+        )
+        if mapped:
+            return mapped
+        fb = "" if fallback_pid is None or pd.isna(fallback_pid) else str(fallback_pid).strip()
+        if fb in pitch_label_by_id:
+            return fb
+        return txt
+    to_save = merge_filtered_edits(
+        element_rows,
+        full_draft if not full_draft.empty else visible_elements,
+        draft,
+    )
+    to_save = to_save.loc[
+        ~to_save["id"].fillna("").astype(str).isin(excluded_ids)
+    ].copy()
     to_save["area_id"] = (
         to_save["area_name"].map(area_id_by_name)
         .fillna(to_save.get("area_id"))
         .fillna(str(area_id))
     )
-    to_save["pitch_id"] = to_save["pitch"].map(pitch_id_by_label)
+    to_save["pitch_id"] = pd.Series(
+        [
+            _map_draft_pitch_label(val, fb_pid)
+            for val, fb_pid in zip(to_save["pitch"], to_save.get("pitch_id", pd.Series([None] * len(to_save))))
+        ],
+        index=to_save.index,
+        dtype="object",
+    )
     to_save = to_save.drop(columns=["selected", "pitch"], errors="ignore")
     return element_times_to_seconds(to_save)
 
@@ -5795,18 +6112,45 @@ if pending_pitch_delete and "element_draft" not in pending_pitch_delete:
 def confirm_pitch_bulk_delete() -> None:
     pending = st.session_state.get(pitch_delete_key, {})
     selected_rows = pending.get("pitches", [])
-    st.warning(
-        f"Delete {len(selected_rows)} selected pitch(es)? Work elements assigned to "
-        "these pitches will be moved to Unassigned; the work elements themselves will "
-        "not be deleted."
+    total_assigned = sum(
+        int(row.get("assigned_element_count") or 0)
+        for row in selected_rows
     )
+    element_action = st.radio(
+        "What would you like to do with work elements assigned to the selected pitch(es)?",
+        options=["move_to_unassigned", "delete_elements"],
+        index=0,
+        format_func=lambda opt: (
+            f"Move work elements to the Unassigned section ({total_assigned})"
+            if opt == "move_to_unassigned"
+            else f"Delete work elements ({total_assigned})"
+        ),
+        key=f"bulk_pitch_delete_element_action_{scenario_id}_{area_id}",
+    )
+    delete_assigned_elements = element_action == "delete_elements"
+    if delete_assigned_elements:
+        st.warning(
+            f"Delete {len(selected_rows)} selected pitch(es)? Work elements assigned to "
+            "these pitches will also be deleted from this planning scenario."
+        )
+    else:
+        st.warning(
+            f"Delete {len(selected_rows)} selected pitch(es)? Work elements assigned to "
+            "these pitches will be moved to Unassigned; the work elements themselves will "
+            "not be deleted."
+        )
     for pitch in selected_rows:
         label = pitch.get("pitch_number") or "Unnamed pitch"
         if pitch.get("pitch_name"):
             label += f" — {pitch['pitch_name']}"
+        action_note = (
+            "will be deleted"
+            if delete_assigned_elements
+            else "will move to Unassigned"
+        )
         st.write(
             f"- {label}: {pitch.get('assigned_element_count', 0)} assigned work "
-            "element(s) will move to Unassigned"
+            f"element(s) {action_note}"
         )
     blockers = pending.get("feed_reference_blockers", [])
     if blockers:
@@ -5860,7 +6204,12 @@ def confirm_pitch_bulk_delete() -> None:
             pitch_save_rows = prepared_pitch_rows(
                 pending.get("pitch_draft", []), selected_ids
             )
-            replace_yamazumi_pitches(project_id, pitch_save_scope, pitch_save_rows)
+            replace_yamazumi_pitches(
+                project_id,
+                pitch_save_scope,
+                pitch_save_rows,
+                delete_removed_pitch_elements=delete_assigned_elements,
+            )
             if pending.get("other_pitch_edits"):
                 record_audit_event(
                     project_id,
@@ -5888,15 +6237,19 @@ def confirm_pitch_bulk_delete() -> None:
                 {
                     "area_id": pitch_save_scope,
                     "pitches": selected_rows,
-                    "elements_unassigned": moved_count,
+                    "elements_unassigned": 0 if delete_assigned_elements else moved_count,
+                    "elements_deleted": moved_count if delete_assigned_elements else 0,
                 },
             )
             st.session_state.pop(pitch_delete_key, None)
             request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
             st.toast(
-                f"Deleted {len(selected_ids)} pitch(es); {moved_count} work element(s) "
-                "moved to Unassigned",
+                (
+                    f"Deleted {len(selected_ids)} pitch(es) and {moved_count} work element(s)"
+                    if delete_assigned_elements
+                    else f"Deleted {len(selected_ids)} pitch(es); {moved_count} work element(s) moved to Unassigned"
+                ),
                 icon=":material/delete:",
             )
             st.rerun()
@@ -5957,7 +6310,25 @@ def confirm_element_bulk_delete() -> None:
         try:
             editor_name = st.session_state.get("current_editor", "")
             selected_ids = {str(row["id"]) for row in selected_rows}
-            if pending.get("combined_view"):
+            if pending.get("combined_view") or not pending.get("other_element_edits"):
+                if pending.get("other_pitch_edits"):
+                    pitch_save_rows = prepared_pitch_rows(
+                        pending.get("pitch_draft", []), set()
+                    )
+                    replace_yamazumi_pitches(project_id, pitch_save_scope, pitch_save_rows)
+                    record_audit_event(
+                        project_id,
+                        "Yamazumi pitches",
+                        "Save & Refresh",
+                        int(pending.get("pitch_edit_count") or 0),
+                        editor_name,
+                        {
+                            "area_id": pitch_save_scope,
+                            "saved_with_element_delete": True,
+                            "created_count": 0,
+                            "updated_count": int(pending.get("pitch_edit_count") or 0),
+                        },
+                    )
                 result = delete_yamazumi_elements(
                     project_id,
                     scenario_id,
@@ -5967,11 +6338,16 @@ def confirm_element_bulk_delete() -> None:
                 st.session_state.pop(element_delete_key, None)
                 active_board_draft = st.session_state.get(board_draft_key)
                 if isinstance(active_board_draft, dict):
+                    remaining_records = [
+                        row for row in elements.to_dict("records")
+                        if str(row.get("id")) not in selected_ids
+                    ]
                     st.session_state[board_draft_key] = reconcile_stack_draft(
-                        active_board_draft, elements.to_dict("records")
+                        active_board_draft, remaining_records
                     )
                 request_table_editor_reset(combined_element_editor_key)
                 request_table_editor_reset(element_editor_key)
+                request_table_editor_reset(pitch_editor_key)
                 st.toast(
                     f"Deleted {result['deleted_count']} Yamazumi work element(s)",
                     icon=":material/delete:",
