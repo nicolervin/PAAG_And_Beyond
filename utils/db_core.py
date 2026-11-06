@@ -2138,6 +2138,8 @@ def init_db() -> None:
                 work_element_id TEXT NOT NULL REFERENCES work_elements(id) ON DELETE CASCADE,
                 requirement_description TEXT NOT NULL,
                 ppe TEXT NOT NULL DEFAULT '',
+                potential_hazards TEXT NOT NULL DEFAULT '',
+                proposed_actions TEXT NOT NULL DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
                 source_snapshot_json TEXT NOT NULL DEFAULT '',
                 source_acknowledged_at TEXT NOT NULL DEFAULT '',
@@ -2369,6 +2371,13 @@ def init_db() -> None:
                 sequence INTEGER NOT NULL DEFAULT 10, model_variants TEXT NOT NULL DEFAULT '["Base"]',
                 pitch_type TEXT NOT NULL DEFAULT 'Pitch',
                 feeds_into_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE RESTRICT,
+                ppe_poster_job_override TEXT NOT NULL DEFAULT '',
+                ppe_poster_workstation_override TEXT NOT NULL DEFAULT '',
+                ppe_poster_section_override TEXT NOT NULL DEFAULT '',
+                jsa_job_title_override TEXT NOT NULL DEFAULT '',
+                jsa_plant_code TEXT NOT NULL DEFAULT 'AP1',
+                jsa_important_notice TEXT NOT NULL DEFAULT '',
+                jsa_include_pitch_photos INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, area_id, pitch_number)
             );
@@ -3208,6 +3217,25 @@ def init_db() -> None:
                 "ALTER TABLE yamazumi_pitches ADD COLUMN feeds_into_pitch_id "
                 "TEXT REFERENCES yamazumi_pitches(id) ON DELETE RESTRICT"
             )
+        for ppe_override_col in (
+            "ppe_poster_job_override",
+            "ppe_poster_workstation_override",
+            "ppe_poster_section_override",
+            "jsa_job_title_override",
+            "jsa_important_notice",
+        ):
+            if ppe_override_col not in pitch_columns:
+                conn.execute(
+                    f"ALTER TABLE yamazumi_pitches ADD COLUMN {ppe_override_col} TEXT NOT NULL DEFAULT ''"
+                )
+        if "jsa_plant_code" not in pitch_columns:
+            conn.execute(
+                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_plant_code TEXT NOT NULL DEFAULT 'AP1'"
+            )
+        if "jsa_include_pitch_photos" not in pitch_columns:
+            conn.execute(
+                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_include_pitch_photos INTEGER NOT NULL DEFAULT 1"
+            )
         element_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(yamazumi_elements)").fetchall()
         }
@@ -3385,6 +3413,14 @@ def init_db() -> None:
         }
         if "ppe" not in safety_req_columns:
             conn.execute("ALTER TABLE safety_requirements ADD COLUMN ppe TEXT NOT NULL DEFAULT ''")
+        if "potential_hazards" not in safety_req_columns:
+            conn.execute(
+                "ALTER TABLE safety_requirements ADD COLUMN potential_hazards TEXT NOT NULL DEFAULT ''"
+            )
+        if "proposed_actions" not in safety_req_columns:
+            conn.execute(
+                "ALTER TABLE safety_requirements ADD COLUMN proposed_actions TEXT NOT NULL DEFAULT ''"
+            )
         if "source_snapshot_json" not in safety_req_columns:
             conn.execute(
                 "ALTER TABLE safety_requirements ADD COLUMN source_snapshot_json TEXT NOT NULL DEFAULT ''"
