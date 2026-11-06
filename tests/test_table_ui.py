@@ -732,6 +732,134 @@ class UnifiedEditorSelectionTests(unittest.TestCase):
         self.assertNotIn("stale_key", session_state)
         self.assertNotIn("_pending_unsaved_nav", session_state)
 
+    def test_cross_tab_external_db_updates_merge_into_result_df_without_overwriting_active_edits(self) -> None:
+        session_state: dict[str, object] = {}
+        initial_df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2"],
+                "name": ["Old 1", "Old 2"],
+                "selected": [False, False],
+            }
+        )
+        # Tab A saves an update to row-2 in SQLite while Tab B is editing row-1
+        db_updated_df = pd.DataFrame(
+            {
+                "id": ["row-1", "row-2"],
+                "name": ["Old 1", "Updated in Tab A"],
+                "selected": [False, False],
+            }
+        )
+
+        def fake_orig_editor(df: pd.DataFrame, *_args, **kwargs):
+            k = kwargs.get("key")
+            out = df.copy()
+            state = session_state.get(k) or {}
+            for pos, changes in (state.get("edited_rows") or {}).items():
+                for col, val in changes.items():
+                    out.at[out.index[int(pos)], col] = val
+            return out
+
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters, "_ORIG_DATA_EDITOR", side_effect=fake_orig_editor),
+        ):
+            key0 = table_filters.apply_pending_table_editor_reset("shared_editor")
+            table_filters._wrap_data_editor(initial_df, key=key0)
+
+            # Tab B edits row-1 while DB now has Tab A's change on row-2
+            session_state[key0] = {
+                "edited_rows": {0: {"name": "Updated in Tab B"}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            merged_result = table_filters._wrap_data_editor(db_updated_df, key=key0)
+
+        self.assertEqual(
+            merged_result["name"].tolist(),
+            ["Updated in Tab B", "Updated in Tab A"],
+        )
+
+    def test_subtab_draft_persists_when_switching_between_guarded_tabs(self) -> None:
+        session_state: dict[str, object] = {}
+        df = pd.DataFrame({"id": ["r1", "r2"], "name": ["One", "Two"]})
+
+        def fake_orig_editor(d: pd.DataFrame, *_args, **kwargs):
+            k = kwargs.get("key")
+            if k and k not in session_state:
+                session_state[k] = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+            return d.copy()
+
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_ui.st, "session_state", session_state),
+            patch.object(table_filters, "_ORIG_DATA_EDITOR", side_effect=fake_orig_editor),
+        ):
+            key0 = table_filters.apply_pending_table_editor_reset("plan_editor")
+            session_state[key0] = {
+                "edited_rows": {0: {"name": "One Draft"}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+            table_filters._wrap_data_editor(df, key=key0)
+
+            # Simulate switching sub-tab where Streamlit unmounts widget key0
+            session_state.pop(key0, None)
+            restored_df = table_filters._wrap_data_editor(df, key=key0)
+            restored_effective = table_filters.get_effective_table_editor_state(key0)
+
+        self.assertEqual(restored_df["name"].tolist(), ["One Draft", "Two"])
+        self.assertEqual(
+            restored_effective["edited_rows"],
+            {0: {"name": "One Draft"}},
+        )
+
+    def test_filter_table_remaps_selected_and_edited_rows_by_id_when_visible_rows_change(self) -> None:
+        df = pd.DataFrame(
+            {
+                "id": ["id-1", "id-2", "id-3"],
+                "part_number": ["P-100", "P-200", "P-300"],
+                "description": ["Alpha", "Beta", "Gamma"],
+            }
+        )
+        controls = Mock()
+        controls.text_input.return_value = "Beta"
+        session_state: dict[str, object] = {}
+        with (
+            patch.object(table_filters.st, "session_state", session_state),
+            patch.object(table_filters.st, "container", return_value=controls),
+            patch.object(table_filters.st, "caption"),
+        ):
+            key0 = table_filters.apply_pending_table_editor_reset("parts_editor")
+            # Filter to only Beta (id-2 is at position 0 in filtered view)
+            table_filters.filter_table(
+                df,
+                key="parts_filter",
+                search_columns=["part_number", "description"],
+                reset_widget_keys=[key0],
+            )
+            # User checks Select and edits description on id-2 (position 0 while filtered)
+            session_state[key0] = {
+                "edited_rows": {0: {"selected": True, "description": "Beta Edited"}},
+                "added_rows": [],
+                "deleted_rows": [],
+            }
+
+            # User clears filter so all 3 rows are visible (id-2 moves from pos 0 to pos 1)
+            controls.text_input.return_value = ""
+            table_filters.filter_table(
+                df,
+                key="parts_filter",
+                search_columns=["part_number", "description"],
+                reset_widget_keys=[key0],
+            )
+            key1 = table_filters.apply_pending_table_editor_reset(key0)
+            remapped = table_filters.get_effective_table_editor_state(key1)
+
+        self.assertEqual(
+            remapped["edited_rows"],
+            {1: {"selected": True, "description": "Beta Edited"}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

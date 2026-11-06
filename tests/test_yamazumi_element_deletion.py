@@ -199,6 +199,104 @@ class YamazumiElementDeletionTests(unittest.TestCase):
                 self.project_id, self.scenario_id, self.area_id, self.element_id
             )
 
+    def test_delete_pitch_moves_or_deletes_work_elements_per_user_choice(self) -> None:
+        affected = store.delete_yamazumi_pitch(
+            self.project_id,
+            self.area_id,
+            self.pitch_id,
+            scenario_id=self.scenario_id,
+            delete_elements=True,
+            audit_editor_name="Pat",
+        )
+        self.assertEqual(affected, 2)
+        self.assertEqual(self.count("yamazumi_pitches", self.pitch_id), 0)
+        self.assertEqual(self.count("yamazumi_elements", self.element_id), 0)
+        self.assertEqual(self.count("yamazumi_elements", self.other_element_id), 0)
+        self.assertEqual(self.count("work_elements", self.process_id), 1)
+
+    def test_replace_pitches_moves_or_deletes_removed_pitch_elements(self) -> None:
+        import pandas as pd
+
+        empty_pitches = pd.DataFrame(
+            columns=[
+                "id",
+                "pitch_number",
+                "pitch_name",
+                "status",
+                "sequence",
+                "model_variants",
+                "pitch_type",
+            ]
+        )
+        store.replace_yamazumi_pitches(
+            self.project_id,
+            self.area_id,
+            empty_pitches,
+            delete_removed_pitch_elements=True,
+        )
+        self.assertEqual(self.count("yamazumi_pitches", self.pitch_id), 0)
+        self.assertEqual(self.count("yamazumi_elements", self.element_id), 0)
+        self.assertEqual(self.count("yamazumi_elements", self.other_element_id), 0)
+        self.assertEqual(self.count("work_elements", self.process_id), 1)
+
+    def test_replace_elements_allows_assigning_pitch_while_other_rows_are_unassigned_nan(self) -> None:
+        import numpy as np
+        import pandas as pd
+
+        edited_df = pd.DataFrame(
+            [
+                {
+                    "id": self.element_id,
+                    "area_id": self.area_id,
+                    "pitch_id": self.pitch_id,
+                    "model_variants": ["All models"],
+                    "work_type": "Cycle",
+                    "description": "Assigned from Unassigned",
+                    "time_s": 12.0,
+                    "work_region": "None",
+                    "sequence": 10,
+                    "process_element_id": np.nan,
+                },
+                {
+                    "id": self.other_element_id,
+                    "area_id": self.area_id,
+                    "pitch_id": np.nan,
+                    "model_variants": ["All models"],
+                    "work_type": "Cycle",
+                    "description": "Still unassigned",
+                    "time_s": 8.0,
+                    "work_region": "None",
+                    "sequence": 20,
+                    "process_element_id": np.nan,
+                },
+            ]
+        )
+        saved_count = store.replace_yamazumi_elements(
+            self.project_id, self.area_id, edited_df
+        )
+        self.assertEqual(saved_count, 2)
+        rows = {
+            str(r["id"]): dict(r)
+            for r in self.conn.execute(
+                "SELECT id, pitch_id FROM yamazumi_elements WHERE area_id=?",
+                (self.area_id,),
+            ).fetchall()
+        }
+        self.assertEqual(rows[self.element_id]["pitch_id"], self.pitch_id)
+        self.assertIsNone(rows[self.other_element_id]["pitch_id"])
+
+    def test_bulk_delete_yamazumi_elements_preserves_remaining_and_unassigned_rows(self) -> None:
+        result = store.delete_yamazumi_elements(
+            self.project_id,
+            self.scenario_id,
+            [self.element_id],
+            audit_editor_name="",
+        )
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertEqual(self.count("yamazumi_elements", self.element_id), 0)
+        self.assertEqual(self.count("yamazumi_elements", self.other_element_id), 1)
+        self.assertEqual(self.count("work_elements", self.process_id), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

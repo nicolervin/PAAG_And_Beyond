@@ -3,6 +3,7 @@ from __future__ import annotations
 import colorsys
 import hashlib
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Iterable, NoReturn, Sequence
@@ -24,6 +25,7 @@ from utils.table_filters import (
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
+_TABLE_UI_REV_20261102 = 4
 DECIMAL_COMPARISON_PLACES = 9
 
 _UNSAVED_SOURCES_KEY = "_active_unsaved_sources"
@@ -99,9 +101,54 @@ def selectable_dataframe(data, *, key: str, **kwargs):
     skip_history_wrapper = bool(kwargs.pop("_from_audit_history_table", False))
     if not skip_history_wrapper and _is_audit_history_dataframe(data, key):
         return render_audit_history_table(data, key=key, **kwargs)
+    active_sel_keys = list(st.session_state.get("_active_selectable_df_keys") or [])
+    if key and key not in active_sel_keys:
+        active_sel_keys.append(str(key))
+        st.session_state["_active_selectable_df_keys"] = active_sel_keys
+    saved_sel_key = f"_saved_selectable_df_{key}" if key else ""
+    if key and key not in st.session_state and saved_sel_key in st.session_state:
+        saved_sel = st.session_state.get(saved_sel_key)
+        if isinstance(saved_sel, dict) and isinstance(saved_sel.get("selection"), dict):
+            st.session_state[key] = deepcopy(saved_sel)
     kwargs.setdefault("on_select", "rerun")
     kwargs.setdefault("selection_mode", "multi-row")
-    return st.dataframe(data, key=key, **kwargs)
+    event = st.dataframe(data, key=key, **kwargs)
+    if key:
+        try:
+            sel_obj = getattr(event, "selection", None) or (
+                event.get("selection") if isinstance(event, dict) else None
+            )
+            if sel_obj is not None:
+                raw_rows = getattr(sel_obj, "rows", None)
+                if raw_rows is None and isinstance(sel_obj, dict):
+                    raw_rows = sel_obj.get("rows")
+                raw_cols = getattr(sel_obj, "columns", None)
+                if raw_cols is None and isinstance(sel_obj, dict):
+                    raw_cols = sel_obj.get("columns")
+                raw_cells = getattr(sel_obj, "cells", None)
+                if raw_cells is None and isinstance(sel_obj, dict):
+                    raw_cells = sel_obj.get("cells")
+                st.session_state[saved_sel_key] = {
+                    "selection": {
+                        "rows": list(raw_rows or []),
+                        "columns": list(raw_cols or []),
+                        "cells": list(raw_cells or []),
+                    }
+                }
+        except Exception:
+            pass
+    if key and st.config.get_option("global.appTest"):
+        try:
+            from streamlit.runtime.scriptrunner_utils.script_run_context import (
+                get_script_run_ctx,
+            )
+
+            ctx = get_script_run_ctx(suppress_warning=True)
+            if ctx is not None:
+                ctx.session_state._state._old_state[str(key)] = dict(event)
+        except Exception:
+            pass
+    return event
 
 
 def _audit_cell_values_equal(left: object, right: object) -> bool:
@@ -405,7 +452,14 @@ def direct_entry_editor_rows(
 
     sort_scope = logical_table_editor_key(editor_key)
     sort_key = f"{sort_scope}_external_sort_column"
+    sort_key = f"{sort_scope}_external_sort_column"
     direction_key = f"{sort_scope}_external_sort_direction"
+    saved_sort_key = f"_saved_sort_col_{sort_scope}"
+    saved_dir_key = f"_saved_sort_dir_{sort_scope}"
+    if sort_key not in st.session_state and saved_sort_key in st.session_state:
+        st.session_state[sort_key] = st.session_state.get(saved_sort_key)
+    if direction_key not in st.session_state and saved_dir_key in st.session_state:
+        st.session_state[direction_key] = bool(st.session_state.get(saved_dir_key))
     valid_options = ["", *candidates]
     if st.session_state.get(sort_key) not in valid_options:
         st.session_state[sort_key] = (
@@ -441,6 +495,8 @@ def direct_entry_editor_rows(
         disabled=controls_locked or not sort_column,
         help="Turn on to reverse the selected sort order.",
     )
+    st.session_state[saved_sort_key] = sort_column
+    st.session_state[saved_dir_key] = bool(descending)
     if True:
         controls.caption(
             "Save, undo, or clear selected rows before changing the sort."
@@ -830,7 +886,7 @@ def standard_details_column_config(
     )
 
 
-_TABLE_UI_REV_20261102 = 2
+_TABLE_UI_REV_20261102 = 3
 
 
 def selected_rows_action_bar(
@@ -898,6 +954,36 @@ def has_active_unsaved_changes() -> bool:
     return any(_source_item_has_unsaved(item) for item in sources)
 
 
+def has_active_table_selections_or_edits() -> bool:
+    """Return True if the user has unsaved edits or active row selections in any table on the page."""
+    if has_active_unsaved_changes():
+        return True
+    sources = st.session_state.get(_UNSAVED_SOURCES_KEY) or []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        editor_key = str(item.get("editor_key") or "")
+        if not editor_key:
+            continue
+        logical_key = logical_table_editor_key(editor_key)
+        if st.session_state.get(f"_select_all_{logical_key}", False):
+            return True
+        state = get_effective_table_editor_state(editor_key)
+        if state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"):
+            return True
+    for sel_key in list(st.session_state.get("_active_selectable_df_keys") or []):
+        sel_state = st.session_state.get(sel_key)
+        selection = getattr(sel_state, "selection", None)
+        if selection is None and isinstance(sel_state, dict):
+            selection = sel_state.get("selection")
+        rows = getattr(selection, "rows", None)
+        if rows is None and isinstance(selection, dict):
+            rows = selection.get("rows")
+        if rows:
+            return True
+    return False
+
+
 def _has_untried_unsaved_sources() -> bool:
     triggered = set(st.session_state.get(_UNSAVED_NAV_TRIGGERED_KEY) or [])
     sources = st.session_state.get(_UNSAVED_SOURCES_KEY) or []
@@ -919,6 +1005,9 @@ def clear_unsaved_tracking_state() -> None:
     st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+    for k in list(st.session_state.keys()):
+        if str(k).startswith("_table_subtab_draft_"):
+            st.session_state.pop(k, None)
 
 
 def request_unsaved_page_navigation(target_url_path: str, *, label: str = "") -> None:
@@ -1138,7 +1227,14 @@ def paginate_table_rows(
     total_rows = len(dataframe)
     options = tuple(sorted({int(opt) for opt in (*page_size_options, default_page_size) if int(opt) > 0}))
     size_key = f"{key}_page_size"
+    size_key = f"{key}_page_size"
     page_key = f"{key}_page_number"
+    saved_size_key = f"_saved_page_size_{key}"
+    saved_page_key = f"_saved_page_num_{key}"
+    if size_key not in st.session_state and saved_size_key in st.session_state:
+        st.session_state[size_key] = st.session_state.get(saved_size_key)
+    if page_key not in st.session_state and saved_page_key in st.session_state:
+        st.session_state[page_key] = st.session_state.get(saved_page_key)
     current_size = int(st.session_state.get(size_key, default_page_size) or default_page_size)
     if current_size not in options:
         current_size = int(default_page_size)
@@ -1180,11 +1276,23 @@ def paginate_table_rows(
         current_size = selected_size
         current_page = selected_page
 
+    st.session_state[saved_size_key] = int(current_size)
+    st.session_state[saved_page_key] = int(current_page)
     start = (current_page - 1) * current_size
     end = min(total_rows, start + current_size)
     if render_controls:
         st.caption(f"Showing rows {start + 1:,}–{end:,} of {total_rows:,} (page {current_page} of {total_pages})")
     return dataframe.iloc[start:end].reset_index(drop=True)
+
+
+def _has_non_table_unsaved_changes() -> bool:
+    """Return True if any non-table source on the current view has unsaved changes."""
+    return any(
+        isinstance(item, dict)
+        and bool(item.get("additional_unsaved"))
+        and not str(item.get("editor_key") or "").strip()
+        for item in (st.session_state.get(_UNSAVED_SOURCES_KEY) or [])
+    )
 
 
 def _on_guarded_tab_change(tab_key: str) -> None:
@@ -1196,7 +1304,7 @@ def _on_guarded_tab_change(tab_key: str) -> None:
     prev_tab = str(st.session_state.get(committed_key) or "")
     if not new_val or new_val == prev_tab:
         return
-    if has_active_unsaved_changes():
+    if _has_non_table_unsaved_changes():
         st.session_state[committed_key] = prev_tab
         st.session_state[tab_key] = prev_tab
         st.session_state[gen_key] = gen + 1
@@ -1292,6 +1400,9 @@ def _complete_pending_unsaved_nav(
     st.session_state.pop(_UNSAVED_NAV_EXECUTING_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
+    for k in list(st.session_state.keys()):
+        if str(k).startswith("_table_subtab_draft_"):
+            st.session_state.pop(k, None)
     if not isinstance(pending, dict):
         return
     kind = str(pending.get("kind") or "")
@@ -1353,6 +1464,7 @@ def begin_unsaved_tracking(
                     split_secondary_key=split_secondary_key,
                 )
     st.session_state[_UNSAVED_SOURCES_KEY] = []
+    st.session_state["_active_selectable_df_keys"] = []
 
 
 @st.dialog("Unsaved Changes", dismissible=False)
@@ -1425,7 +1537,9 @@ def finalize_unsaved_tracking(
         else:
             st.session_state.pop(_PENDING_UNSAVED_NAV_KEY, None)
         return
-    if has_active_unsaved_changes():
+    if _has_non_table_unsaved_changes():
+        _unsaved_changes_navigation_dialog(pending)
+    elif pending.get("kind") != "subtab" and has_active_unsaved_changes():
         _unsaved_changes_navigation_dialog(pending)
     else:
         _complete_pending_unsaved_nav(

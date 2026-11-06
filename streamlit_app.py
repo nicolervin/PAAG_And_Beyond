@@ -4,7 +4,8 @@ import importlib as _importlib
 import sys as _sys
 
 if (
-    ("utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "request_unsaved_state_change"))
+    ("utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "has_active_table_selections_or_edits"))
+    or ("utils.split_workspace" in _sys.modules and not hasattr(_sys.modules["utils.split_workspace"], "workspace_cross_tab_sync"))
     or ("utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"))
     or ("utils.fishbone_store" in _sys.modules and getattr(_sys.modules["utils.fishbone_store"], "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2)
     or ("utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 10)
@@ -44,12 +45,14 @@ from utils.split_workspace import (
     component_event,
     split_divider,
     split_navigation,
+    workspace_cross_tab_sync,
 )
 from utils.table_ui import (
     begin_unsaved_tracking,
     clear_unsaved_tracking_state,
     finalize_unsaved_tracking,
     has_active_unsaved_changes,
+    has_active_table_selections_or_edits,
     request_unsaved_page_navigation,
     request_unsaved_state_change,
 )
@@ -997,6 +1000,17 @@ else:
             _run_workspace_page(secondary_page, enable=True)
 
 finalize_unsaved_tracking(page_by_url_path, split_secondary_key=split_secondary_key)
+
+from utils.cache_store import get_workspace_sync_state
+
+_sync_state = get_workspace_sync_state()
+workspace_cross_tab_sync(
+    write_epoch=_sync_state["write_epoch"],
+    db_mtime_ns=_sync_state["db_mtime_ns"],
+    is_busy=has_active_table_selections_or_edits(),
+    project_id=str(st.session_state.get("project_id") or ""),
+    scenario_id=str(st.session_state.get("scenario_id") or ""),
+)
 
 render_floating_help_button(
     active_page_key=active_page_key,

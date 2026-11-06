@@ -163,7 +163,33 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
             1,
         )
 
-    def test_gui_delete_requests_are_disabled_for_unsaved_board_moves(self) -> None:
+    def test_pitch_gui_confirm_deletes_work_elements_when_selected(self) -> None:
+        app = self.run_page(pitch=True)
+        app = self.rerun(self.button(app, "Delete Pitch…").click())
+        action_radio = next(
+            r
+            for r in app.radio
+            if r.key == f"gui_pitch_delete_element_action_{self.pitch_id}"
+        )
+        action_radio.set_value("delete_elements")
+        app = self.rerun(app)
+        self.rerun(self.button(app, "Delete Pitch").click())
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM yamazumi_pitches WHERE id=?",
+                (self.pitch_id,),
+            )[0]["count"],
+            0,
+        )
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM yamazumi_elements WHERE id=?",
+                (self.element_id,),
+            )[0]["count"],
+            0,
+        )
+
+    def test_unassigned_work_elements_can_be_deleted(self) -> None:
         app = AppTest.from_file(
             str(store.ROOT / "app_pages/yamazumi.py"), default_timeout=30
         )
@@ -180,9 +206,16 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
         with patch("utils.yamazumi_board.yamazumi_board", return_value=None):
             app.run(timeout=30)
         self.assertEqual(list(app.exception), [])
-        self.assertTrue(self.button(app, "Delete Work Element…").disabled)
-        self.assertTrue(
-            any("Save & Refresh or Undo" in info.value for info in app.info)
+        delete_btn = self.button(app, "Delete Work Element…")
+        self.assertFalse(delete_btn.disabled)
+        app = self.rerun(delete_btn.click())
+        self.rerun(self.button(app, "Delete Element").click())
+        self.assertEqual(
+            store.query(
+                "SELECT COUNT(*) AS count FROM yamazumi_elements WHERE id=?",
+                (self.element_id,),
+            )[0]["count"],
+            0,
         )
 
     def test_pitch_type_links_between_pitch_addresses_table_and_edit_pitch_dialog(self) -> None:
@@ -218,6 +251,40 @@ class YamazumiGuiDeletionTests(unittest.TestCase):
             (self.pitch_id,),
         )[0]
         self.assertEqual(saved_pitch["pitch_type"], "Repacker")
+
+    def test_add_element_dialog_resets_fields_on_next_open(self) -> None:
+        add_target_key = f"yamazumi_add_element_target_{self.project_id}_{self.area_id}"
+        app = self.run_page()
+        app.session_state[add_target_key] = {
+            "pitch_id": self.pitch_id,
+            "pitch_number": "P-GUI",
+        }
+        app = self.rerun(app)
+        desc_field = next(
+            field for field in app.text_area if field.label == "Work Description"
+        )
+        time_field = next(
+            field for field in app.number_input if "Time to Complete" in field.label
+        )
+        desc_field.set_value("Shoot 2 screws")
+        time_field.set_value(6.0)
+        app = self.rerun(app)
+        app = self.rerun(self.button(app, "Add Element").click())
+
+        # Re-open Add Yamazumi Work Element dialog for another element
+        app.session_state[add_target_key] = {
+            "pitch_id": self.pitch_id,
+            "pitch_number": "P-GUI",
+        }
+        app = self.rerun(app)
+        next_desc_field = next(
+            field for field in app.text_area if field.label == "Work Description"
+        )
+        next_time_field = next(
+            field for field in app.number_input if "Time to Complete" in field.label
+        )
+        self.assertEqual(next_desc_field.value, "")
+        self.assertEqual(float(next_time_field.value), 0.0)
 
 
 if __name__ == "__main__":

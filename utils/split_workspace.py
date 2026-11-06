@@ -545,6 +545,230 @@ def split_navigation(
     )
 
 
+_SYNC_HTML = """<div class="paag-cross-tab-sync-root"></div>"""
+
+_SYNC_CSS = """
+.paag-cross-tab-sync-root {
+  font-family: var(--font);
+}
+.paag-cross-tab-banner {
+  align-items: center;
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--secondary-background-color));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 45%, transparent);
+  border-radius: 999px;
+  color: var(--text-color);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: .82rem;
+  font-weight: 600;
+  gap: .45rem;
+  margin: .25rem 0;
+  padding: .35rem .85rem;
+  user-select: none;
+}
+.paag-cross-tab-banner:hover {
+  background: color-mix(in srgb, var(--primary-color) 24%, var(--secondary-background-color));
+}
+"""
+
+_SYNC_JS = """
+export default function(component) {
+  const { parentElement, data, setTriggerValue } = component
+  const root = parentElement.querySelector('.paag-cross-tab-sync-root')
+  if (!root) return
+
+  const localEpoch = Number(data.write_epoch || 0)
+  const localMtime = Number(data.db_mtime_ns || 0)
+  const isBusy = Boolean(data.is_busy)
+  const STORAGE_KEY = 'paag_workspace_sync_v1'
+
+  if (!window.__paagTabId) {
+    window.__paagTabId = 'tab_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+  }
+
+  const isRemoteNewer = (remote) => {
+    if (!remote || typeof remote !== 'object') return false
+    const rEpoch = Number(remote.write_epoch || 0)
+    const rMtime = Number(remote.db_mtime_ns || 0)
+    return rEpoch > localEpoch || rMtime > localMtime
+  }
+
+  // Broadcast when this tab has rendered a newer database state
+  const prevBroadcastEpoch = Number(window.__paagBroadcastEpoch || 0)
+  const prevBroadcastMtime = Number(window.__paagBroadcastMtime || 0)
+  if (localEpoch > prevBroadcastEpoch || localMtime > prevBroadcastMtime) {
+    window.__paagBroadcastEpoch = Math.max(prevBroadcastEpoch, localEpoch)
+    window.__paagBroadcastMtime = Math.max(prevBroadcastMtime, localMtime)
+    const payload = {
+      tab_id: window.__paagTabId,
+      write_epoch: window.__paagBroadcastEpoch,
+      db_mtime_ns: window.__paagBroadcastMtime,
+      project_id: data.project_id || '',
+      scenario_id: data.scenario_id || '',
+      ts: Date.now(),
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+    } catch (e) {}
+    try {
+      if (!window.__paagSyncChannel && typeof BroadcastChannel !== 'undefined') {
+        window.__paagSyncChannel = new BroadcastChannel(STORAGE_KEY)
+      }
+      if (window.__paagSyncChannel) {
+        window.__paagSyncChannel.postMessage(payload)
+      }
+    } catch (e) {}
+  }
+
+  // Clear pending remote state if this tab has caught up
+  if (window.__paagPendingRemote && !isRemoteNewer(window.__paagPendingRemote)) {
+    window.__paagPendingRemote = null
+  }
+
+  const renderStaleBanner = () => {
+    root.innerHTML = ''
+    if (!window.__paagPendingRemote || !isRemoteNewer(window.__paagPendingRemote)) return
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'paag-cross-tab-banner'
+    btn.textContent = '🔄 Changes saved in another tab — Click to refresh view'
+    btn.onclick = () => {
+      const target = window.__paagPendingRemote
+      window.__paagPendingRemote = null
+      root.innerHTML = ''
+      setTriggerValue('sync_refresh', {
+        write_epoch: target ? target.write_epoch : localEpoch,
+        db_mtime_ns: target ? target.db_mtime_ns : localMtime,
+        nonce: Date.now(),
+      })
+    }
+    root.appendChild(btn)
+  }
+
+  const handleRemotePayload = (remote) => {
+    if (!remote || remote.tab_id === window.__paagTabId) return
+    if (!isRemoteNewer(remote)) return
+    window.__paagPendingRemote = remote
+    if (!window.__paagLatestState || !window.__paagLatestState.isBusy) {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        const lastTrig = Number(window.__paagLastSyncTriggerTs || 0)
+        if (Date.now() - lastTrig > 450) {
+          window.__paagLastSyncTriggerTs = Date.now()
+          window.__paagPendingRemote = null
+          setTriggerValue('sync_refresh', {
+            write_epoch: remote.write_epoch || 0,
+            db_mtime_ns: remote.db_mtime_ns || 0,
+            nonce: Date.now(),
+          })
+          return
+        }
+      }
+    }
+    renderStaleBanner()
+  }
+
+  window.__paagLatestState = {
+    localEpoch,
+    localMtime,
+    isBusy,
+    handleRemotePayload,
+    renderStaleBanner,
+  }
+
+  // Check localStorage in case another tab saved while this tab was loading or in background
+  try {
+    const rawStored = localStorage.getItem(STORAGE_KEY)
+    if (rawStored) {
+      const parsed = JSON.parse(rawStored)
+      if (isRemoteNewer(parsed)) {
+        window.__paagPendingRemote = parsed
+      }
+    }
+  } catch (e) {}
+
+  if (!window.__paagSyncListenersBound) {
+    window.__paagSyncListenersBound = true
+    try {
+      if (!window.__paagSyncChannel && typeof BroadcastChannel !== 'undefined') {
+        window.__paagSyncChannel = new BroadcastChannel(STORAGE_KEY)
+      }
+      if (window.__paagSyncChannel) {
+        window.__paagSyncChannel.onmessage = (ev) => {
+          if (window.__paagLatestState && ev && ev.data) {
+            window.__paagLatestState.handleRemotePayload(ev.data)
+          }
+        }
+      }
+    } catch (e) {}
+
+    window.addEventListener('storage', (ev) => {
+      if (ev.key === STORAGE_KEY && ev.newValue && window.__paagLatestState) {
+        try {
+          window.__paagLatestState.handleRemotePayload(JSON.parse(ev.newValue))
+        } catch (e) {}
+      }
+    })
+
+    const onTabFocusOrVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      try {
+        const rawStored = localStorage.getItem(STORAGE_KEY)
+        if (rawStored && window.__paagLatestState) {
+          window.__paagLatestState.handleRemotePayload(JSON.parse(rawStored))
+          return
+        }
+      } catch (e) {}
+      if (window.__paagPendingRemote && window.__paagLatestState) {
+        window.__paagLatestState.handleRemotePayload(window.__paagPendingRemote)
+      }
+    }
+    document.addEventListener('visibilitychange', onTabFocusOrVisible)
+    window.addEventListener('focus', onTabFocusOrVisible)
+  }
+
+  if (window.__paagPendingRemote && isRemoteNewer(window.__paagPendingRemote)) {
+    handleRemotePayload(window.__paagPendingRemote)
+  } else {
+    root.innerHTML = ''
+  }
+}
+"""
+
+_WORKSPACE_CROSS_TAB_SYNC = st.components.v2.component(
+    "paag_workspace_cross_tab_sync_v1",
+    html=_SYNC_HTML,
+    css=_SYNC_CSS,
+    js=_SYNC_JS,
+)
+
+
+def workspace_cross_tab_sync(
+    *,
+    write_epoch: int,
+    db_mtime_ns: int,
+    is_busy: bool,
+    project_id: str = "",
+    scenario_id: str = "",
+    key: str = "workspace_cross_tab_sync",
+) -> None:
+    """Synchronize database updates across multiple open browser tabs without losing user state."""
+    if _is_app_test():
+        return
+    _WORKSPACE_CROSS_TAB_SYNC(
+        key=key,
+        data={
+            "write_epoch": int(write_epoch),
+            "db_mtime_ns": int(db_mtime_ns),
+            "is_busy": bool(is_busy),
+            "project_id": str(project_id or ""),
+            "scenario_id": str(scenario_id or ""),
+        },
+        on_sync_refresh_change=lambda: None,
+        width="stretch",
+        height="content",
+    )
+
+
 def split_divider(
     ratio: float,
     *,

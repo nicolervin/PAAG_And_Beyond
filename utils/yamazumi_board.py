@@ -256,7 +256,7 @@ _CSS = """
 .fullscreen-zoom-controls { display:none; align-items:center; gap:6px; margin-left:2px; }
 .board.fullscreen-board .fullscreen-zoom-controls { display:inline-flex; }
 .fullscreen-zoom-controls button { min-width:34px; text-align:center; }
-.board-actions button:not(.scale-mode-btn), .add-element, .edit-pitch, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
+.board-actions button:not(.scale-mode-btn), .add-element, .edit-pitch, .delete-unassigned, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
 .board.fullscreen-board .board-actions button:not(.scale-mode-btn) { min-height:32px; padding:4px 10px; border-color:var(--st-border-color); color:var(--st-text-color); font-size:.84rem; }
 .board.fullscreen-board .board-actions button#add-pitch { background:var(--st-primary-color); border-color:var(--st-primary-color); color:#fff; }
 .board.fullscreen-board .board-actions button:not(.scale-mode-btn):hover { border-color:var(--st-primary-color); color:var(--st-primary-color); }
@@ -557,6 +557,16 @@ export default function(component) {
         setTriggerValue('edit_pitch', { pitch_id: pitch.id })
       }
       pitchActions.appendChild(editButton)
+    } else {
+      const deleteUnassignedButton = document.createElement('button')
+      deleteUnassignedButton.type = 'button'
+      deleteUnassignedButton.className = 'delete-unassigned'
+      deleteUnassignedButton.textContent = 'Delete Elements…'
+      deleteUnassignedButton.onclick = event => {
+        event.preventDefault(); event.stopPropagation()
+        setTriggerValue('delete_unassigned', { requested: true })
+      }
+      pitchActions.appendChild(deleteUnassignedButton)
     }
     if (acceptsWork) {
       const addButton = document.createElement('button')
@@ -1554,6 +1564,7 @@ export default function(component) {
 
 _YAMAZUMI_BOARD_HOT_RELOAD_REV = 21
 
+# Supersedes paag_yamazumi_drag_board_v34 through v47
 _YAMAZUMI_BOARD = st.components.v2.component(
     "paag_yamazumi_drag_board_v48",
     html=_HTML,
@@ -1579,6 +1590,7 @@ def yamazumi_board(
     on_edit_pitch: Callable[[], None],
     on_edit_element: Callable[[], None],
     on_scale_mode: Callable[[], None] | None = None,
+    on_delete_unassigned: Callable[[], None] | None = None,
 ):
     safe_takt = float(takt)
     if not math.isfinite(safe_takt):
@@ -1622,6 +1634,7 @@ def yamazumi_board(
         on_edit_pitch_change=on_edit_pitch,
         on_edit_element_change=on_edit_element,
         on_scale_mode_change=on_scale_mode or (lambda: None),
+        on_delete_unassigned_change=on_delete_unassigned or (lambda: None),
         width="stretch",
         height="content",
     )
