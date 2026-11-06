@@ -259,6 +259,8 @@ class ProcessPitchVisualTests(unittest.TestCase):
             editor.value for editor in app.dataframe
             if "ergonomics_risk" in editor.value.columns
         ).columns)
+        app.session_state["paag_tab"] = "PAAG Slides"
+        app.run(timeout=30)
         next_button = next(button for button in app.button if button.label == "Next")
         app = next_button.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
@@ -324,6 +326,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         store.delete_pitch_visual_media(
             self.project_id, self.scenario_id, vid_id, current_editor="Tester"
         )
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(file_to_check.exists())
         remaining = store.get_pitch_visual_media(
             self.project_id, self.scenario_id, self.pitch_id
@@ -683,6 +686,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Presentation test"
+        app.session_state["paag_tab"] = "PAAG Slides"
         app.session_state["selected_pitch_id"] = self.pitch_id
         app.session_state["pitch_page_num"] = 1
         app.run(timeout=30)
@@ -782,6 +786,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Print test"
+        app.session_state["paag_tab"] = "PAAG Slides"
         app.session_state["selected_pitch_id"] = self.pitch_id
         app.session_state["pitch_page_num"] = 1
         app.run(timeout=30)
@@ -1113,6 +1118,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
             media_id=media_id,
             current_editor="Test IE",
         )
+        store.empty_recycle_bin(self.project_id)
         self.assertFalse(orig_file.exists())
         self.assertFalse(comp_file.exists())
 

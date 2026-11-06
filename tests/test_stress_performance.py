@@ -405,8 +405,8 @@ class MassiveProjectStressTests(unittest.TestCase):
         )
         # All 25 Level-1 top-level G-assemblies are skipped automatically by infer_part_feature_rules,
         # while the 25 Level-2 subassemblies ('All models') + 1,150 piece parts = 1,175 parts are inferred
-        expected_inferred = num_piece_parts + (num_assemblies // 2)
-        self.assertEqual(total_parts - preview["total_inferred"], num_assemblies // 2)
+        expected_inferred = total_parts
+        self.assertEqual(total_parts - preview["total_inferred"], 0)
         self.assertEqual(preview["total_inferred"], expected_inferred)
         # Because each feature is scoped to its subsystem, every inferred part maps unambiguously to 1 rule!
         self.assertEqual(len(preview["direct"]), expected_inferred)

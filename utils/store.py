@@ -144,14 +144,12 @@ globals().update(_EXPORTED)
 
 
 def __getattr__(name: str) -> object:
+    if name.startswith("__") and name.endswith("__"):
+        raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
     _ensure_fresh_domain_modules()
     if name in _EXPORTED:
         return _EXPORTED[name]
     _refresh_domain_modules()
-    refreshed_exports = _facade_exports()
-    _EXPORTED.update(refreshed_exports)
-    _FACADE_BASELINE.update(refreshed_exports)
-    globals().update(refreshed_exports)
     if name in _EXPORTED:
         return _EXPORTED[name]
     for module in _DOMAIN_MODULES:
@@ -159,13 +157,13 @@ def __getattr__(name: str) -> object:
             val = getattr(module, name)
             globals()[name] = val
             _EXPORTED[name] = val
-            _FACADE_BASELINE[name] = val
+            _FACADE_BASELINE.setdefault(name, val)
             return val
     if hasattr(_db_core, name):
         val = getattr(_db_core, name)
         globals()[name] = val
         _EXPORTED[name] = val
-        _FACADE_BASELINE[name] = val
+        _FACADE_BASELINE.setdefault(name, val)
         return val
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
@@ -183,14 +181,12 @@ class _StoreFacade(_types.ModuleType):
         return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str) -> object:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
         _ensure_fresh_domain_modules()
         if name in globals().get("_EXPORTED", {}):
             return globals()["_EXPORTED"][name]
         _refresh_domain_modules()
-        refreshed_exports = _facade_exports()
-        globals().setdefault("_EXPORTED", {}).update(refreshed_exports)
-        globals().setdefault("_FACADE_BASELINE", {}).update(refreshed_exports)
-        self.__dict__.update(refreshed_exports)
         if name in globals().get("_EXPORTED", {}):
             return globals()["_EXPORTED"][name]
         for module in _DOMAIN_MODULES:
@@ -198,13 +194,13 @@ class _StoreFacade(_types.ModuleType):
                 val = getattr(module, name)
                 self.__dict__[name] = val
                 globals().setdefault("_EXPORTED", {})[name] = val
-                globals().setdefault("_FACADE_BASELINE", {})[name] = val
+                globals().setdefault("_FACADE_BASELINE", {}).setdefault(name, val)
                 return val
         if hasattr(_db_core, name):
             val = getattr(_db_core, name)
             self.__dict__[name] = val
             globals().setdefault("_EXPORTED", {})[name] = val
-            globals().setdefault("_FACADE_BASELINE", {})[name] = val
+            globals().setdefault("_FACADE_BASELINE", {}).setdefault(name, val)
             return val
         raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
@@ -217,6 +213,10 @@ class _StoreFacade(_types.ModuleType):
             setattr(_db_core, name, value)
         for module in _DOMAIN_MODULES:
             module.__dict__[name] = value
+        if name in ("DB_PATH", "connection", "query", "execute"):
+            clear_fn = getattr(_db_core, "clear_all_caches", None)
+            if callable(clear_fn):
+                clear_fn()
         rev = _db_core.bump_runtime_revision()
         _db_core._SYNCED_REVISION = rev
 

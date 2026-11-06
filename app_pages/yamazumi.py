@@ -3875,6 +3875,11 @@ def confirm_interactive_element_delete() -> None:
             "Close",
             key=f"close_missing_interactive_element_{project_id}_{area_id}",
         ):
+            current_baseline = st.session_state.get(board_clean_baseline_key)
+            if isinstance(current_baseline, list):
+                st.session_state[board_clean_baseline_key] = [
+                    row for row in current_baseline if str(row.get("id")) != element_id
+                ]
             st.session_state.pop(delete_element_dialog_key, None)
             st.rerun()
         return
@@ -3955,6 +3960,11 @@ def confirm_interactive_element_delete() -> None:
                     st.session_state[board_draft_key] = updated_draft
                 else:
                     st.session_state.pop(board_draft_key, None)
+            current_baseline = st.session_state.get(board_clean_baseline_key)
+            if isinstance(current_baseline, list):
+                st.session_state[board_clean_baseline_key] = [
+                    row for row in current_baseline if str(row.get("id")) != element_id
+                ]
             st.session_state.pop(delete_element_dialog_key, None)
             st.session_state.pop(edit_element_dialog_key, None)
             request_table_editor_reset(element_editor_key)

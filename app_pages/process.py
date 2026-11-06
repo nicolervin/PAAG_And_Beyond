@@ -3336,6 +3336,8 @@ if tab_plan.open:
                                 len(placement_ids) == 1
                                 and placement_ids[0] not in disabled_placement_ids
                             ):
+                                if st.session_state.get(placement_key) != placement_ids[0]:
+                                    st.session_state[placement_key] = placement_ids[0]
                                 selected_assignment_id = st.selectbox(
                                     "Use / installation location",
                                     placement_ids,

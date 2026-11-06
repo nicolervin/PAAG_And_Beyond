@@ -604,6 +604,8 @@ class ModelTreeTests(unittest.TestCase):
             at.session_state["project_id"] = self.project_id
             at.session_state["scenario_id"] = self.scenario_id
             at.run(timeout=30)
+        at.session_state[f"fishbone_main_tabs_{self.project_id}"] = "Parts Placement Table"
+        at.run(timeout=30)
         self.assertEqual(list(at.exception), [])
 
         pool_tables = [

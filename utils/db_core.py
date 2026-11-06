@@ -4299,7 +4299,11 @@ def register_domain_module(module: _types.ModuleType, exports: list[str]) -> Non
             and export_name in baseline
             and facade.__dict__[export_name] is not baseline[export_name]
         )
-        if callable(val) and not is_monkeypatched:
+        if (
+            callable(val)
+            and not is_monkeypatched
+            and getattr(val, "__module__", None) == module.__name__
+        ):
             _REGISTERED_ENTRYPOINT_FUNCTIONS[(module.__name__, export_name)] = val
     setattr(module, "_DOMAIN_REGISTERED_V2", True)
     bump_runtime_revision()

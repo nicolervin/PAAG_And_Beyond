@@ -104,7 +104,7 @@ class ErgonomicsPageTests(unittest.TestCase):
         self.assertIn("Unlinked", captions)
         self.assertIn("non-production-intent part", captions)
         page_source = PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn('st.column_config.SelectboxColumn(\n            "Risk classification"', page_source)
+        self.assertIn('"risk_classification": st.column_config.SelectboxColumn(', page_source)
         self.assertIn("options=list(ERGONOMICS_RISK_CLASSIFICATIONS)", page_source)
 
     def test_page_displays_active_scenario_takt_time_with_frequency_help(self) -> None:
@@ -119,11 +119,11 @@ class ErgonomicsPageTests(unittest.TestCase):
         takt_metric = next(
             metric
             for metric in app.metric
-            if metric.label == "Current scenario takt time"
+            if metric.label == "Scenario takt & geometry"
         )
-        self.assertEqual(takt_metric.value, "47.5 s")
+        self.assertIn("47.5 s", takt_metric.value)
         page_source = PAGE_PATH.read_text(encoding="utf-8")
-        self.assertIn("frequency-driven ergonomic risk", page_source)
+        self.assertIn("frequency-driven", page_source)
 
     def test_manual_unlinked_row_saves_with_current_editor_audit(self) -> None:
         app = self.run_page(

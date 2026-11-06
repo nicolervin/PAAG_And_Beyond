@@ -27,33 +27,29 @@ class QualityHelpContentTests(unittest.TestCase):
                 self.assertIn(f"| {code} | {meaning} |", rendered_pfmea_help)
 
     def test_pfmea_help_uses_quick_start_and_focused_sections(self) -> None:
-        self.assertIn("Only Process Function is required to save", PFMEA_QUICK_START)
+        self.assertIn("PAAG Validation Gate", PFMEA_QUICK_START)
         self.assertEqual(
             [title for title, _ in PFMEA_HELP_SECTIONS],
             [
-                "Process Function and table entry",
-                "Ratings, RPN, and Classification",
-                "Current Process Controls",
-                "PFMEA pattern overview",
-                "Create or edit a pattern",
-                "Create a pattern from a saved PFMEA line",
-                "Apply a pattern to PFMEA lines",
-                "How pattern controls are handled",
-                "Duplicate PFMEA lines",
-                "Review tools",
-                "Saving, deletion, export, and History",
-                "Manage reusable options",
+                "PAAG Validation Gate & Staging New PFMEA Lines (Pattern Quick-Apply vs. Blank Lines)",
+                "PFMEA Worksheet Columns, Shared-Record Sync & Inline Editing",
+                "Ratings, RPN Calculation, and Classification (CL) Codes",
+                "Current Process Controls (Prevention & Detection) & Control Plan Coverage Flag",
+                "Recommended Actions, Assignees (👥 Manage Assignees) & Target Dates",
+                "Manual Control Catalog Overview & Editor (📊 Control Catalog)",
+                "Creating, Capturing & Managing Reusable PFMEA Patterns",
+                "Duplicating Lines, Completion Assistant, RPN Charts & Exports",
             ],
         )
         combined_sections = " ".join(
             " ".join(content.split()) for _, content in PFMEA_HELP_SECTIONS
         )
         for label in (
-            "Add PFMEA lines",
+            "Stage Blank Line(s)",
             "PFMEA completion assistant",
             "Duplicate selected PFMEA line",
             "Manage PFMEA patterns",
-            "Manage PFMEA control options",
+            "Manual Prevention & Detection Control Catalog Overview",
             "High-risk PFMEA lines",
             "Process source review",
         ):
@@ -68,41 +64,25 @@ class QualityHelpContentTests(unittest.TestCase):
         self.assertEqual(
             set(pattern_sections),
             {
-                "PFMEA pattern overview",
-                "Create or edit a pattern",
-                "Create a pattern from a saved PFMEA line",
-                "Apply a pattern to PFMEA lines",
-                "How pattern controls are handled",
+                "PAAG Validation Gate & Staging New PFMEA Lines (Pattern Quick-Apply vs. Blank Lines)",
+                "Creating, Capturing & Managing Reusable PFMEA Patterns",
             },
         )
         combined = " ".join(pattern_sections.values()).replace("**", "")
         for expected in (
-            "project-wide starting point",
-            "Label is required",
-            "Potential Failure Mode is required",
-            "Effects and Causes, with one entry per line",
-            "Recommended Actions, with one entry per line",
+            "project-wide template",
+            "Label",
+            "Potential Failure Mode",
+            "Effects",
+            "Causes",
+            "Recommended Actions",
             "Save selected PFMEA line as pattern",
-            "Stage PFMEA lines performs no database write",
-            "published to the selected Process Function",
-            "inactive control",
-            "same pattern may copy different controls",
-            "Generated PFMEA entries keep no stored pattern lineage",
-            "PFMEA lines previously created from it are not deleted or changed",
+            "Pattern Quick-Apply",
+            "independent copy",
+            "Prevention suggestions",
+            "Detection suggestions",
         ):
             self.assertIn(expected, combined)
-
-        simplified_controls = pattern_sections["How pattern controls are handled"]
-        for implementation_term in (
-            "published assignment",
-            "clones",
-            "remaps",
-            "stale records",
-            "template children",
-            "session-only",
-            "audit event",
-        ):
-            self.assertNotIn(implementation_term, simplified_controls)
 
     def test_help_uses_current_quality_and_control_plan_labels(self) -> None:
         requirements_help = " ".join(REQUIREMENTS_REPOSITORY_HELP.split())
@@ -110,7 +90,7 @@ class QualityHelpContentTests(unittest.TestCase):
         for label in (
             "Linked Process steps",
             "Pending linked updates",
-            "Bulk edit Pass/fail",
+            "Assign Steps...",
             "Push saved updates to linked Process steps",
         ):
             self.assertIn(label, requirements_help)
@@ -119,9 +99,9 @@ class QualityHelpContentTests(unittest.TestCase):
             "Pr. Nº",
             "Station / Pitch",
             "Machine / fixture",
-            "Characteristic suffix",
             "Characteristic type",
-            "Source review required",
+            "Control method",
+            "Process flow map",
         ):
             self.assertIn(label, control_plan_help)
 
@@ -138,24 +118,24 @@ class QualityHelpContentTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(
             [tab.label for tab in app.tabs],
-            ["Requirements repository", "PFMEA", "Control Plan", "Equipment"],
+            [
+                "📊 Traceability & PAAG Sync",
+                "Requirements repository",
+                "PFMEA",
+                "Control Plan",
+                "Equipment",
+            ],
         )
         expander_labels = {expander.label for expander in app.expander}
         self.assertTrue(
-            {
-                "PFMEA pattern overview",
-                "Create or edit a pattern",
-                "Create a pattern from a saved PFMEA line",
-                "Apply a pattern to PFMEA lines",
-                "How pattern controls are handled",
-            }.issubset(expander_labels)
+            {title for title, _ in PFMEA_HELP_SECTIONS}.issubset(expander_labels)
         )
         rendered_help = " ".join(
             "\n".join(str(block.value) for block in app.markdown).split()
         )
         self.assertIn("Save & Refresh", rendered_help)
         self.assertIn("Recalculate RPN", rendered_help)
-        self.assertIn("Manufacturing Control Plan working draft", rendered_help)
+        self.assertIn("Manufacturing Control Plan (MCP) working draft", rendered_help)
         self.assertFalse(any(button.label == "Save & Refresh" for button in app.button))
 
         close_button = next(button for button in app.button if button.label == "Close")

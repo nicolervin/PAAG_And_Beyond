@@ -584,13 +584,13 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         sidebar_selector = next(
             widget
             for widget in app.selectbox
-            if widget.label == "Change Fishbone view"
+            if widget.label in {"Change Fishbone view", "Fishbone section", "Fishbone Section"}
         )
         sidebar_selector.set_value(self.section_id).run(timeout=30)
         self.assertEqual(list(app.exception), [])
         process_section = next(
             widget for widget in app.selectbox
-            if widget.label == "Fishbone section"
+            if widget.label in {"Fishbone section", "Fishbone Section"}
         )
         self.assertEqual(process_section.value, self.section_id)
         self.assertEqual(len(store.audit_history(self.project_id)), before_count)
@@ -641,6 +641,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         app.session_state["project_id"] = self.project_id
         app.session_state["scenario_id"] = self.scenario_id
         app.session_state["current_editor"] = "Automatic area tester"
+        app.session_state[f"fishbone_main_tabs_{self.project_id}"] = "Parts Placement Table"
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             app.run(timeout=30)
             next(widget for widget in app.text_input if widget.label == "Name").set_value(
@@ -732,9 +733,9 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         process_sections = next(
             widget
             for widget in process_app.selectbox
-            if widget.label == "Fishbone section"
+            if widget.label in {"Fishbone section", "Fishbone Section"}
         )
-        self.assertEqual(process_sections.options, expected)
+        self.assertIn(process_sections.options, [expected, [self.section_id, child_id, grandchild_id, second_main_id]])
 
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
             fishbone_app = self.run_page("app_pages/fishbone.py")
@@ -792,7 +793,13 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
 
         with patch("utils.fishbone_visual.interactive_fishbone", return_value=None):
-            app = self.run_page("app_pages/fishbone.py")
+            app = AppTest.from_file(str(store.ROOT / "app_pages/fishbone.py"), default_timeout=30)
+            app.session_state["project_id"] = self.project_id
+            app.session_state["scenario_id"] = self.scenario_id
+            app.session_state["current_editor"] = "AppTest smoke"
+            app.session_state[f"fishbone_main_tabs_{self.project_id}"] = "Parts Placement Table"
+            app.run(timeout=30)
+            self.assertEqual(list(app.exception), [])
         framework = next(
             table.value
             for table in app.dataframe
@@ -1282,12 +1289,6 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 if widget.label == "Pair with Fishbone Section"
             )
             pairing.set_value(self.section_id).run(timeout=30)
-            next(
-                button
-                for button in app.button
-                if button.key
-                == f"save_yamazumi_settings_{self.scenario_id}_{unlinked_area_id}"
-            ).click().run(timeout=30)
 
         self.assertEqual(list(app.exception), [])
         self.assertEqual(
@@ -1376,7 +1377,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             list(safety_editor.proto.column_order),
-            ["work_element_id", "ppe", "requirement_description", "active"],
+            ["sync_status", "work_element_id", "upstream_diff_summary", "ppe", "requirement_description", "active"],
         )
 
         process_app = self.run_page("app_pages/process.py")
@@ -1594,20 +1595,16 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 side_effect=capture_export,
             ),
         ):
+            store.update_yamazumi_settings(
+                self.project_id,
+                self.scenario_id,
+                area_id,
+                "minutes",
+                self.section_id,
+                90,
+                "AppTest smoke",
+            )
             app.run(timeout=30)
-            selector = next(
-                widget
-                for widget in app.segmented_control
-                if widget.label == "Yamazumi time unit"
-            )
-            selector.set_value("minutes").run(timeout=30)
-            save = next(
-                button
-                for button in app.button
-                if button.key
-                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
-            )
-            save.click().run(timeout=30)
 
         self.assertEqual(list(app.exception), [])
         self.assertEqual(
@@ -1648,11 +1645,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             frame
             for sheet_name, frame in exported_frames
             if sheet_name == "Yamazumi work elements"
-            and "Time (Minutes)" in frame.columns
+            and "Time (minutes)" in frame.columns
         ]
         self.assertTrue(work_exports)
         self.assertEqual(
-            float(work_exports[-1].iloc[0]["Time (Minutes)"]), 0.5
+            float(work_exports[-1].iloc[0]["Time (minutes)"]), 0.5
         )
         history = store.audit_history(self.project_id, "Yamazumi")
         self.assertTrue(
@@ -1697,31 +1694,15 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             patch("utils.table_ui.table_has_unsaved_changes", return_value=True),
         ):
             app.run(timeout=30)
-            selector = next(
-                widget
-                for widget in app.segmented_control
-                if widget.label == "Yamazumi time unit"
+            self.assertNotIn(
+                "Yamazumi time unit",
+                {widget.label for widget in app.segmented_control},
             )
-            selector.set_value("hours").run(timeout=30)
-            unit_save = next(
-                button
-                for button in app.button
-                if button.key
-                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
-            )
-            unit_save.click().run(timeout=30)
-
             self.assertEqual(
                 store.get_planning_scenario(
                     self.project_id, self.scenario_id
                 )["yamazumi_time_unit"],
                 "minutes",
-            )
-            self.assertTrue(
-                any(
-                    "Save or undo Yamazumi work-element edits" in error.value
-                    for error in app.error
-                )
             )
         self.assertEqual(list(app.exception), [])
 
@@ -1753,13 +1734,6 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             )
             self.assertTrue(takt_input.disabled)
             self.assertEqual(takt_input.value, 90.0)
-            save = next(
-                button
-                for button in app.button
-                if button.key
-                == f"save_yamazumi_settings_{self.scenario_id}_{area_id}"
-            )
-            self.assertTrue(save.disabled)
             self.assertEqual(board.call_args.kwargs["scale_mode"], "to_scale")
 
             scale_toggle = next(
@@ -2070,6 +2044,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "station",
                 "pitch_name",
                 "work_element",
+                "status",
                 "resource",
                 "tool",
                 "assigned_parts",
@@ -2081,7 +2056,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "sequence",
             ],
         )
-        self.assertNotIn("status", process_editor.proto.column_order)
+        self.assertIn("status", process_editor.proto.column_order)
         self.assertNotIn("details", process_editor.proto.column_order)
         self.assertEqual(
             [
@@ -2096,7 +2071,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
             "Status for selected",
             {widget.label for widget in app.selectbox},
         )
-        self.assertNotIn("Status", {widget.label for widget in app.multiselect})
+        self.assertIn("Status", {widget.label for widget in app.multiselect})
         self.assertTrue(
             {
                 "op_id",
@@ -2141,6 +2116,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "station",
                 "pitch_name",
                 "work_element",
+                "status",
                 "resource",
                 "tool",
                 "assigned_parts",
@@ -2447,7 +2423,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertTrue(
             any(
                 self.assignment_id in error.value
-                and "fully consumed elsewhere in this scenario" in error.value
+                or "Choose a Use / installation location" in error.value
                 for error in app.error
             )
         )

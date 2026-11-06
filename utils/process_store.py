@@ -2325,7 +2325,7 @@ def catalog_part_photos_for_pitch(
             return False
         if cleaned.startswith(("http://", "https://")):
             return True
-        path_obj = Path(cleaned)
+        path_obj = Path(rebase_upload_path_str(cleaned, UPLOAD_DIR))
         return (
             path_obj.suffix.lower() in valid_img_exts
             and path_obj.exists()
@@ -2510,13 +2510,13 @@ def copy_part_photo_to_pitch_visual_media(
             current_editor=current_editor,
         )
 
-    img_path = Path(img_path_str)
+    img_path = Path(rebase_upload_path_str(img_path_str, UPLOAD_DIR))
     if not img_path.exists() or not img_path.is_file():
         raise ValueError("The selected Parts Catalog photo file could not be found on disk.")
     file_bytes = img_path.read_bytes()
     orig_bytes: bytes | None = None
     if orig_path_str and not orig_path_str.startswith(("http://", "https://")):
-        orig_path = Path(orig_path_str)
+        orig_path = Path(rebase_upload_path_str(orig_path_str, UPLOAD_DIR))
         if orig_path.exists() and orig_path.is_file():
             orig_bytes = orig_path.read_bytes()
 
@@ -2618,7 +2618,7 @@ def copy_pitch_visual_media(
         file_bytes = src_path.read_bytes()
         orig_bytes: bytes | None = None
         if orig_path_str and not orig_path_str.startswith(("http://", "https://")):
-            orig_path = Path(orig_path_str)
+            orig_path = Path(rebase_upload_path_str(orig_path_str, UPLOAD_DIR))
             if orig_path.exists() and orig_path.is_file():
                 orig_bytes = orig_path.read_bytes()
         copied = save_pitch_visual_media(

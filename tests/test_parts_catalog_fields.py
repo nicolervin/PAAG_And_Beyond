@@ -636,7 +636,7 @@ class PartsCatalogFieldTests(unittest.TestCase):
         self.assertFalse(app.exception)
 
         # 1. Filter by keyword so only one existing part (or zero) is shown
-        app.text_input(key="part_catalog_filters_keyword").set_value(first_part_num)
+        app.text_input(key=f"part_catalog_filters_{self.project_id}_keyword").set_value(first_part_num)
         app.run()
         self.assertFalse(app.exception)
 
@@ -671,7 +671,7 @@ class PartsCatalogFieldTests(unittest.TestCase):
         self.assertAlmostEqual(float(saved_row_1.iloc[0]["weight_lb"]), 4.5)
 
         # 2. Add another part while filtered by a non-matching keyword, then clear the filter before saving
-        app.text_input(key="part_catalog_filters_keyword").set_value("NO-MATCH-KEYWORD-XYZ")
+        app.text_input(key=f"part_catalog_filters_{self.project_id}_keyword").set_value("NO-MATCH-KEYWORD-XYZ")
         app.run()
         self.assertFalse(app.exception)
 
