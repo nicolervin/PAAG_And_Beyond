@@ -811,7 +811,7 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
                 "id", "project_id", "name", "section_type", "parent_id",
                 "sequence", "description", "active", "grid_x", "grid_y",
                 "created_at", "updated_at", "hierarchy", "parent_assembly",
-                "order_actions", "assemblies_action",
+                "order_actions",
             ],
         )
         visible_bytes = framework[["name", "hierarchy"]].to_csv(

@@ -2743,8 +2743,10 @@ if fishbone_tab.open:
                     st.markdown(f"- ⏱️ **{impact['yamazumi_area_count']}** Yamazumi area(s)")
                 with m2:
                     st.markdown(f"- 📋 **{impact['process_link_count']}** Process at a Glance requirement(s)")
-                    st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
-                    st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
+                    if impact.get("assembly_reference_count"):
+                        st.markdown(f"- ⚙️ **{impact['assembly_reference_count']}** Assembly reference(s)")
+                    if impact.get("category_reference_count"):
+                        st.markdown(f"- 🗂️ **{impact['category_reference_count']}** Assembly category reference(s)")
 
                 if impact["pits_bom_approved_occurrence_count"]:
                     st.error(
@@ -2949,7 +2951,8 @@ if fishbone_tab.open:
                     asm_cnt = int(overall_impact.get("assembly_reference_count", 0)) if overall_impact else 0
                     st.markdown(f"- 📊 **{yam_cnt}** linked Yamazumi area(s)")
                     st.markdown(f"- 📋 **{proc_cnt}** Process at a Glance part requirement(s)")
-                    st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
+                    if asm_cnt:
+                        st.markdown(f"- ⚙️ **{asm_cnt}** Assembly reference(s)")
 
                 st.divider()
                 clear_options = ["clear_parts", "delete_sections", "both"]
@@ -3489,7 +3492,7 @@ def _render_framework_maintenance():
             ":material/arrow_downward: Move later",
             ":material/last_page: Move to end",
         ]] * len(framework)
-        framework["assemblies_action"] = ":material/grid_on: Assembly grid"
+
         full_framework = framework.copy()
         framework = filter_table(
             full_framework,
@@ -3560,8 +3563,8 @@ def _render_framework_maintenance():
             hide_index=True,
             num_rows="delete",
             height=300,
-            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at", "assemblies_action"],
-            column_order=["hierarchy", "active", "sequence", "order_actions", "assemblies_action", "name", "section_type", "parent_assembly", "description"],
+            disabled=["id", "hierarchy", "sequence", "created_at", "updated_at"],
+            column_order=["hierarchy", "active", "sequence", "order_actions", "name", "section_type", "parent_assembly", "description"],
             column_config={
                 "id": None,
                 "project_id": None,
@@ -3658,16 +3661,16 @@ def _render_framework_maintenance():
                 f"{impact['descendant_section_count']} child section(s)?"
             )
             st.markdown(
-                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections; "
-                "mini-BOM uses tied to a re-pointed Built section move to the target, and all "
-                "other uses return to Not placed.\n"
+                f"- **{impact['fishbone_use_count']}** Fishbone use(s) are currently in these sections and will return to Not placed.\n"
+
+
                 f"- **{impact['yamazumi_area_count']}** Yamazumi area(s) will move or merge into the target area, keeping their pitches and work.\n"
                 f"- **{impact['process_link_count']}** Process at a Glance part requirement(s) will be re-pointed.\n"
-                f"- **{impact['assembly_reference_count']}** assembly Built/Installed reference(s) will be re-pointed.\n"
-                f"- **{impact['category_built_reference_count']}** assembly-grid category Built reference(s) will be re-pointed.\n"
-                f"- **{impact['category_installed_reference_count']}** assembly-grid category Installed reference(s) will be re-pointed.\n"
-                f"- **{impact['feature_visibility_preference_count']}** section-specific grid feature visibility preference(s) will be removed.\n"
-                f"- **{impact['assembly_component_count']}** mini-BOM row(s) reference uses in these sections.\n"
+
+
+
+
+
                 f"- **{impact['pits_bom_approved_occurrence_count']}** approved PITS BOM occurrence(s) must be detached before deletion."
             )
             if impact["pits_bom_approved_occurrence_count"]:
@@ -3690,14 +3693,14 @@ def _render_framework_maintenance():
             target_is_valid = not impact["requires_repointing"]
             if impact["requires_repointing"] and not replacement_ids:
                 st.error(
-                    "Create another Fishbone section before deleting these sections. Yamazumi, "
-                    "Process at a Glance, assembly, and assembly-grid category references require "
+                    "Create another Fishbone section before deleting these sections. Yamazumi and "
+                    "Process at a Glance references require "
                     "a continuity target."
                 )
             if impact["requires_repointing"] and replacement_ids:
                 st.info(
-                    "Choose one existing Fishbone section to continue all affected Yamazumi, "
-                    "Process at a Glance, assembly, and assembly-grid category references under "
+                    "Choose one existing Fishbone section to continue all affected Yamazumi and "
+                    "Process at a Glance references under "
                     "before deleting."
                 )
                 target_section_id = st.selectbox(
@@ -3708,10 +3711,11 @@ def _render_framework_maintenance():
                     format_func=lambda value: replacement_labels.get(value, value),
                     key=f"fishbone_delete_target_{project_id}",
                     help=(
-                        "This one target receives every affected Yamazumi, Process at a Glance, "
-                        "assembly Built or Installed, and assembly-grid category Built or "
-                        "Installed section reference. Section-specific grid feature visibility "
-                        "preferences are removed instead of re-pointed."
+                        "This one target receives every affected Yamazumi and Process at a Glance "
+                        "section reference."
+
+
+
                     ),
                 )
                 if target_section_id:
@@ -3780,7 +3784,7 @@ def _render_framework_maintenance():
             confirm_framework_delete()
 
         assembly_section_key = f"fishbone_assembly_section_{project_id}"
-        if st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
+        if False and st.session_state.get(assembly_section_key) in set(sections["id"].astype(str)):
             selected_section_id = str(st.session_state[assembly_section_key])
             section_assemblies = assemblies_for_section(project_id, selected_section_id)
             with st.container(border=True):
