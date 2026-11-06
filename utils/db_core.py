@@ -96,6 +96,17 @@ ERGONOMICS_RISK_CLASSIFICATIONS = (
     "Green",
 )
 
+ERGONOMIC_ASSESSMENT_TOOLS = (
+    "Delmia",
+    "Work(s)",
+    "Handpak",
+    "Shoulder Tool",
+    "NIOSH Single/Multi Task",
+    "Humantech",
+    "ErgoNOVA",
+    "Force Test",
+)
+
 EASTERN_TIMEZONE_NAME = "America/New_York"
 EASTERN_TIMEZONE = ZoneInfo(EASTERN_TIMEZONE_NAME)
 
@@ -1453,6 +1464,15 @@ def _clone_ergonomics_reviews(
     ).fetchall():
         media_by_review.setdefault(str(media["review_id"]), []).append(media)
 
+    tool_assessments_by_review: dict[str, list[sqlite3.Row]] = {}
+    for ta in conn.execute(
+        """SELECT * FROM ergonomics_review_tool_assessments
+           WHERE project_id=? AND scenario_id=?
+           ORDER BY sequence, id""",
+        (project_id, source_scenario_id),
+    ).fetchall():
+        tool_assessments_by_review.setdefault(str(ta["review_id"]), []).append(ta)
+
     for source_review in source_reviews:
         source_review_id = str(source_review["id"])
         source_work_element_id = source_review["work_element_id"]
@@ -1511,6 +1531,24 @@ def _clone_ergonomics_reviews(
                     timestamp,
                 ),
             )
+        for ta in tool_assessments_by_review.get(source_review_id, []):
+            conn.execute(
+                """INSERT INTO ergonomics_review_tool_assessments
+                   (id, project_id, scenario_id, review_id,
+                    tool_name, notes, sequence, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid4()),
+                    project_id,
+                    new_scenario_id,
+                    cloned_review_id,
+                    ta["tool_name"],
+                    ta["notes"],
+                    ta["sequence"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
         for media in media_by_review.get(source_review_id, []):
             cloned_file_path = duplicate_scenario_upload_file(
                 media["file_path"], prefix="ergo_media"
@@ -1524,19 +1562,23 @@ def _clone_ergonomics_reviews(
                 cloned_orig_path = duplicate_scenario_upload_file(
                     raw_orig_path, prefix="ergo_media_orig"
                 )
+            media_keys = set(media.keys())
             conn.execute(
                 """INSERT INTO ergonomics_visual_media
                    (id, project_id, scenario_id, review_id,
-                    media_type, file_path, original_file_path,
+                    media_type, tool_name, original_filename,
+                    file_path, original_file_path,
                     annotations_json, caption, sequence,
                     created_at, created_by, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(uuid4()),
                     project_id,
                     new_scenario_id,
                     cloned_review_id,
                     media["media_type"],
+                    media["tool_name"] if "tool_name" in media_keys else "",
+                    media["original_filename"] if "original_filename" in media_keys else "",
                     cloned_file_path,
                     cloned_orig_path,
                     media["annotations_json"],
@@ -1640,7 +1682,60 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
 
 
 def init_ergonomics_visual_media_schema(conn: sqlite3.Connection) -> None:
-    """Initialize database tables for scenario-owned ergonomics visual aids."""
+    """Initialize database tables for scenario-owned ergonomics visual aids and per-tool assessments."""
+    cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='ergonomics_visual_media'")
+    row = cur.fetchone()
+    if row and row[0] and "'document'" not in row[0]:
+        old_cols = {r[1] for r in conn.execute("PRAGMA table_info(ergonomics_visual_media)").fetchall()}
+        tool_expr = "COALESCE(tool_name, '')" if "tool_name" in old_cols else "''"
+        orig_fn_expr = "COALESCE(original_filename, '')" if "original_filename" in old_cols else "''"
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            conn.executescript(
+                f"""
+                ALTER TABLE ergonomics_visual_media RENAME TO ergonomics_visual_media_legacy;
+
+                CREATE TABLE ergonomics_visual_media (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+                    review_id TEXT NOT NULL REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
+                    media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'document')),
+                    tool_name TEXT NOT NULL DEFAULT '',
+                    original_filename TEXT NOT NULL DEFAULT '',
+                    file_path TEXT NOT NULL,
+                    original_file_path TEXT NOT NULL DEFAULT '',
+                    annotations_json TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    sequence INTEGER NOT NULL DEFAULT 10,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+
+                INSERT INTO ergonomics_visual_media (
+                    id, project_id, scenario_id, review_id, media_type,
+                    tool_name, original_filename,
+                    file_path, original_file_path, annotations_json,
+                    caption, sequence, created_at, created_by, updated_at
+                )
+                SELECT
+                    id, project_id, scenario_id, review_id, media_type,
+                    {tool_expr}, {orig_fn_expr},
+                    file_path,
+                    COALESCE(original_file_path, ''),
+                    COALESCE(annotations_json, ''),
+                    caption, sequence, created_at, created_by, updated_at
+                FROM ergonomics_visual_media_legacy;
+
+                DROP TABLE ergonomics_visual_media_legacy;
+                """
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table = OFF")
+            conn.execute("PRAGMA foreign_keys = ON")
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS ergonomics_visual_media (
@@ -1648,7 +1743,9 @@ def init_ergonomics_visual_media_schema(conn: sqlite3.Connection) -> None:
             project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
             review_id TEXT NOT NULL REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
-            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video')),
+            media_type TEXT NOT NULL CHECK(media_type IN ('image', 'video', 'document')),
+            tool_name TEXT NOT NULL DEFAULT '',
+            original_filename TEXT NOT NULL DEFAULT '',
             file_path TEXT NOT NULL,
             original_file_path TEXT NOT NULL DEFAULT '',
             annotations_json TEXT NOT NULL DEFAULT '',
@@ -1660,8 +1757,28 @@ def init_ergonomics_visual_media_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_ergonomics_visual_media_review
             ON ergonomics_visual_media(project_id, scenario_id, review_id);
+
+        CREATE TABLE IF NOT EXISTS ergonomics_review_tool_assessments (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
+            review_id TEXT NOT NULL REFERENCES ergonomics_reviews(id) ON DELETE CASCADE,
+            tool_name TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '',
+            sequence INTEGER NOT NULL DEFAULT 10,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(review_id, tool_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ergonomics_review_tool_assessments_review
+            ON ergonomics_review_tool_assessments(project_id, scenario_id, review_id);
         """
     )
+    ergo_media_cols = {row[1] for row in conn.execute("PRAGMA table_info(ergonomics_visual_media)").fetchall()}
+    if "tool_name" not in ergo_media_cols:
+        conn.execute("ALTER TABLE ergonomics_visual_media ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''")
+    if "original_filename" not in ergo_media_cols:
+        conn.execute("ALTER TABLE ergonomics_visual_media ADD COLUMN original_filename TEXT NOT NULL DEFAULT ''")
 
 
 def clone_process_visual_media_scenario(

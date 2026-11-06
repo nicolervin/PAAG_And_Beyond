@@ -315,7 +315,10 @@ def ergonomics_reviews(
                      AND work.project_id=review.project_id
                      AND work.scenario_id=review.scenario_id
                     WHERE review.project_id=? AND review.scenario_id=?{work_clause}
-                    ORDER BY review.requested_due_date, review.created_at, review.id""",
+                    ORDER BY CASE WHEN work.sequence IS NULL THEN 1 ELSE 0 END,
+                             work.sequence,
+                             review.created_at,
+                             review.id""",
                 params,
             ).fetchall()
         ]
@@ -1071,6 +1074,68 @@ def save_ergonomics_review(
                     timestamp,
                 ),
             )
+        if "tool_assessments" in values and values["tool_assessments"] is not None:
+            raw_tools = list(values["tool_assessments"])
+            existing_tools = {
+                str(r["tool_name"]): str(r["id"])
+                for r in conn.execute(
+                    """SELECT id, tool_name
+                       FROM ergonomics_review_tool_assessments
+                       WHERE review_id=?""",
+                    (review_id,),
+                ).fetchall()
+            }
+            normalized_tools: list[tuple[str, str]] = []
+            seen_tools: set[str] = set()
+            for item in raw_tools:
+                if isinstance(item, dict):
+                    t_name = str(item.get("tool_name") or "").strip()
+                    t_notes = str(item.get("notes") or "").strip()
+                else:
+                    t_name = str(item or "").strip()
+                    t_notes = ""
+                if not t_name or t_name in seen_tools:
+                    continue
+                if t_name not in ERGONOMIC_ASSESSMENT_TOOLS:
+                    raise ValueError(f"Unsupported Ergonomic Assessment Tool: '{t_name}'.")
+                seen_tools.add(t_name)
+                normalized_tools.append((t_name, t_notes))
+            if normalized_tools:
+                t_placeholders = ",".join("?" for _ in normalized_tools)
+                conn.execute(
+                    f"""DELETE FROM ergonomics_review_tool_assessments
+                        WHERE review_id=?
+                          AND tool_name NOT IN ({t_placeholders})""",
+                    (review_id, *[t[0] for t in normalized_tools]),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM ergonomics_review_tool_assessments WHERE review_id=?",
+                    (review_id,),
+                )
+            for t_idx, (t_name, t_notes) in enumerate(normalized_tools, start=1):
+                ta_id = existing_tools.get(t_name, str(uuid4()))
+                conn.execute(
+                    """INSERT INTO ergonomics_review_tool_assessments
+                       (id, project_id, scenario_id, review_id,
+                        tool_name, notes, sequence, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(review_id, tool_name) DO UPDATE SET
+                         notes=excluded.notes,
+                         sequence=excluded.sequence,
+                         updated_at=excluded.updated_at""",
+                    (
+                        ta_id,
+                        project_id,
+                        scenario_id,
+                        review_id,
+                        t_name,
+                        t_notes,
+                        t_idx * 10,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
     return {"id": review_id, "row_count": 1, "timestamp": timestamp}
 
 def delete_ergonomics_reviews(
@@ -1369,6 +1434,38 @@ def link_legacy_concern_to_work_element(
                 (surviving_id, timestamp, legacy_review_id),
             )
 
+            # Merge per-tool assessments from legacy review into surviving review
+            surviving_tools = {
+                str(r["tool_name"]): dict(r)
+                for r in conn.execute(
+                    "SELECT id, tool_name, notes FROM ergonomics_review_tool_assessments WHERE review_id=?",
+                    (surviving_id,),
+                ).fetchall()
+            }
+            legacy_tools = conn.execute(
+                "SELECT id, tool_name, notes, sequence FROM ergonomics_review_tool_assessments WHERE review_id=? ORDER BY sequence, id",
+                (legacy_review_id,),
+            ).fetchall()
+            for lt in legacy_tools:
+                t_name = str(lt["tool_name"])
+                l_notes = str(lt["notes"] or "").strip()
+                if t_name in surviving_tools:
+                    s_notes = str(surviving_tools[t_name].get("notes") or "").strip()
+                    combined_t_notes = "\n\n".join(n for n in [s_notes, l_notes] if n)
+                    conn.execute(
+                        "UPDATE ergonomics_review_tool_assessments SET notes=?, updated_at=? WHERE id=?",
+                        (combined_t_notes, timestamp, surviving_tools[t_name]["id"]),
+                    )
+                    conn.execute(
+                        "DELETE FROM ergonomics_review_tool_assessments WHERE id=?",
+                        (lt["id"],),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE ergonomics_review_tool_assessments SET review_id=?, updated_at=? WHERE id=?",
+                        (surviving_id, timestamp, lt["id"]),
+                    )
+
             # Delete legacy review and its hazard selections
             conn.execute(
                 "DELETE FROM ergonomics_review_hazard_selections WHERE ergonomics_review_id=?",
@@ -1423,6 +1520,131 @@ def link_legacy_concern_to_work_element(
 
 MAX_VISUAL_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_VISUAL_VIDEO_BYTES = 25 * 1024 * 1024
+MAX_VISUAL_DOC_BYTES = 25 * 1024 * 1024
+
+
+@cached_store_read
+def get_ergonomics_review_tool_assessments(
+    project_id: str,
+    scenario_id: str,
+    review_id: str,
+) -> list[dict]:
+    """Return ordered Ergonomic Assessment Tool entries for a review."""
+    normalized_review_id = str(review_id or "").strip()
+    if not normalized_review_id:
+        return []
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT id, project_id, scenario_id, review_id,
+                      tool_name, notes, sequence, created_at, updated_at
+               FROM ergonomics_review_tool_assessments
+               WHERE project_id=? AND scenario_id=? AND review_id=?
+               ORDER BY sequence, tool_name, id""",
+            (project_id, scenario_id, normalized_review_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_ergonomics_review_tool_assessments(
+    project_id: str,
+    scenario_id: str,
+    review_id: str,
+    tool_assessments: list[dict],
+    current_editor: str = "Collaborator",
+) -> list[dict]:
+    """Save the list of selected Ergonomic Assessment Tools and their notes for a review."""
+    normalized_review_id = str(review_id or "").strip()
+    if not normalized_review_id:
+        raise ValueError("Choose an Ergonomics review.")
+    timestamp = now_iso()
+    with connection() as conn:
+        if not conn.execute(
+            "SELECT 1 FROM ergonomics_reviews WHERE id=? AND project_id=? AND scenario_id=?",
+            (normalized_review_id, project_id, scenario_id),
+        ).fetchone():
+            raise ValueError("The selected Ergonomics review no longer exists.")
+        existing_tools = {
+            str(r["tool_name"]): str(r["id"])
+            for r in conn.execute(
+                "SELECT id, tool_name FROM ergonomics_review_tool_assessments WHERE review_id=?",
+                (normalized_review_id,),
+            ).fetchall()
+        }
+        normalized_tools: list[tuple[str, str]] = []
+        seen_tools: set[str] = set()
+        for item in tool_assessments or []:
+            if isinstance(item, dict):
+                t_name = str(item.get("tool_name") or "").strip()
+                t_notes = str(item.get("notes") or "").strip()
+            else:
+                t_name = str(item or "").strip()
+                t_notes = ""
+            if not t_name or t_name in seen_tools:
+                continue
+            if t_name not in ERGONOMIC_ASSESSMENT_TOOLS:
+                raise ValueError(f"Unsupported Ergonomic Assessment Tool: '{t_name}'.")
+            seen_tools.add(t_name)
+            normalized_tools.append((t_name, t_notes))
+        if normalized_tools:
+            t_placeholders = ",".join("?" for _ in normalized_tools)
+            conn.execute(
+                f"""DELETE FROM ergonomics_review_tool_assessments
+                    WHERE review_id=?
+                      AND tool_name NOT IN ({t_placeholders})""",
+                (normalized_review_id, *[t[0] for t in normalized_tools]),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM ergonomics_review_tool_assessments WHERE review_id=?",
+                (normalized_review_id,),
+            )
+        saved_list: list[dict] = []
+        for t_idx, (t_name, t_notes) in enumerate(normalized_tools, start=1):
+            ta_id = existing_tools.get(t_name, str(uuid4()))
+            seq = t_idx * 10
+            conn.execute(
+                """INSERT INTO ergonomics_review_tool_assessments
+                   (id, project_id, scenario_id, review_id,
+                    tool_name, notes, sequence, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(review_id, tool_name) DO UPDATE SET
+                     notes=excluded.notes,
+                     sequence=excluded.sequence,
+                     updated_at=excluded.updated_at""",
+                (
+                    ta_id,
+                    project_id,
+                    scenario_id,
+                    normalized_review_id,
+                    t_name,
+                    t_notes,
+                    seq,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            saved_list.append(
+                {
+                    "id": ta_id,
+                    "review_id": normalized_review_id,
+                    "tool_name": t_name,
+                    "notes": t_notes,
+                    "sequence": seq,
+                }
+            )
+    record_audit_event(
+        project_id,
+        "Ergonomics reviews",
+        "Update tool assessments",
+        len(saved_list),
+        str(current_editor or "").strip() or "Collaborator",
+        {
+            "scenario_id": scenario_id,
+            "review_id": normalized_review_id,
+            "tools": [item["tool_name"] for item in saved_list],
+        },
+    )
+    return saved_list
 
 
 @cached_store_read
@@ -1434,6 +1656,7 @@ def get_ergonomics_visual_media(
     """Return ergonomics visual media records for the given project, scenario, and optional review."""
     query_str = """
         SELECT m.id, m.project_id, m.scenario_id, m.review_id, m.media_type,
+               m.tool_name, m.original_filename,
                m.file_path, m.original_file_path, m.annotations_json, m.caption,
                m.sequence, m.created_at, m.created_by, m.updated_at
         FROM ergonomics_visual_media m
@@ -1451,6 +1674,8 @@ def get_ergonomics_visual_media(
         for r in rows:
             item = dict(r)
             fpath = Path(item["file_path"])
+            item["tool_name"] = str(item.get("tool_name") or "").strip()
+            item["original_filename"] = str(item.get("original_filename") or "").strip() or fpath.name
             item["exists_on_disk"] = fpath.exists() and fpath.is_file()
             if item["exists_on_disk"] and item["media_type"] == "image":
                 try:
@@ -1482,17 +1707,24 @@ def save_ergonomics_visual_media(
     current_editor: str = "Collaborator",
     annotations_json: str = "",
     original_file_bytes: bytes | None = None,
+    tool_name: str = "",
 ) -> dict:
-    """Save an uploaded image or video visual aid for an Ergonomics review and record audit."""
+    """Save an uploaded image, video, or supporting document for an Ergonomics review and record audit."""
     normalized_review_id = str(review_id or "").strip()
     if not normalized_review_id:
         raise ValueError("Choose an Ergonomics review.")
     if not file_bytes:
         raise ValueError("No file content provided.")
 
-    suffix = Path(str(filename or "")).suffix.lower()
+    clean_tool_name = str(tool_name or "").strip()
+    if clean_tool_name and clean_tool_name not in ERGONOMIC_ASSESSMENT_TOOLS:
+        raise ValueError(f"Unsupported Ergonomic Assessment Tool: '{clean_tool_name}'.")
+
+    clean_filename = Path(str(filename or "attachment")).name
+    suffix = Path(clean_filename).suffix.lower()
     image_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
     video_suffixes = {".mp4", ".mov", ".webm"}
+    doc_suffixes = {".pdf", ".xlsx", ".xls", ".docx", ".doc", ".csv", ".txt", ".pptx", ".ppt"}
     if suffix in image_suffixes:
         detected_type = "image"
         if len(file_bytes) > MAX_VISUAL_IMAGE_BYTES:
@@ -1507,14 +1739,21 @@ def save_ergonomics_visual_media(
             raise ValueError(
                 f"Video is {size_mb:.1f} MB. For fast slide loading and smooth presentation playback, please trim or compress clips under 25 MB."
             )
+    elif suffix in doc_suffixes:
+        detected_type = "document"
+        if len(file_bytes) > MAX_VISUAL_DOC_BYTES:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            raise ValueError(
+                f"Document is {size_mb:.1f} MB. Supporting documents must be under 25 MB."
+            )
     else:
         raise ValueError(
-            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB)."
+            f"Unsupported file format '{suffix}'. Supported formats: PNG, JPG, JPEG, WEBP (max 10 MB), MP4, MOV, WEBM (max 25 MB), or PDF, XLSX, DOCX, CSV, PPTX, TXT (max 25 MB)."
         )
 
     resolved_media_type = media_type or detected_type
-    if resolved_media_type not in {"image", "video"}:
-        raise ValueError("Media type must be 'image' or 'video'.")
+    if resolved_media_type not in {"image", "video", "document"}:
+        raise ValueError("Media type must be 'image', 'video', or 'document'.")
 
     timestamp = now_iso()
     media_id = str(uuid4())
@@ -1546,15 +1785,19 @@ def save_ergonomics_visual_media(
 
         conn.execute(
             """INSERT INTO ergonomics_visual_media
-               (id, project_id, scenario_id, review_id, media_type, file_path, original_file_path,
+               (id, project_id, scenario_id, review_id, media_type,
+                tool_name, original_filename,
+                file_path, original_file_path,
                 annotations_json, caption, sequence, created_at, created_by, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 media_id,
                 project_id,
                 scenario_id,
                 normalized_review_id,
                 resolved_media_type,
+                clean_tool_name,
+                clean_filename,
                 str(target_path),
                 orig_path_str,
                 str(annotations_json or "").strip(),
@@ -1574,7 +1817,9 @@ def save_ergonomics_visual_media(
         str(current_editor or "").strip(),
         {
             "review_id": normalized_review_id,
-            "filename": filename,
+            "filename": clean_filename,
+            "tool_name": clean_tool_name,
+            "media_type": resolved_media_type,
             "caption": caption,
             "annotated": bool(annotations_json),
         },
@@ -1588,6 +1833,8 @@ def save_ergonomics_visual_media(
         "file_path": str(target_path),
         "original_file_path": orig_path_str,
         "media_type": resolved_media_type,
+        "tool_name": clean_tool_name,
+        "original_filename": clean_filename,
         "caption": caption,
         "sequence": sequence,
     }
@@ -1600,8 +1847,9 @@ def update_ergonomics_visual_media(
     caption: str | None = None,
     sequence: int | None = None,
     current_editor: str = "Collaborator",
-) -> None:
-    """Update caption and/or sequence order for an ergonomics visual aid."""
+    tool_name: str | None = None,
+) -> dict:
+    """Update caption, sequence order, and/or assessment tool assignment for an ergonomics visual aid."""
     normalized_media_id = str(media_id or "").strip()
     if not normalized_media_id:
         raise ValueError("Choose a visual aid to update.")
@@ -1609,7 +1857,7 @@ def update_ergonomics_visual_media(
     timestamp = now_iso()
     with connection() as conn:
         row = conn.execute(
-            """SELECT id, review_id, caption, sequence FROM ergonomics_visual_media
+            """SELECT id, review_id, caption, sequence, tool_name FROM ergonomics_visual_media
                WHERE id=? AND project_id=? AND scenario_id=?""",
             (normalized_media_id, project_id, scenario_id),
         ).fetchone()
@@ -1618,12 +1866,19 @@ def update_ergonomics_visual_media(
 
         new_caption = str(caption if caption is not None else row["caption"]).strip()
         new_seq = int(sequence if sequence is not None else row["sequence"])
+        new_tool = (
+            str(tool_name).strip()
+            if tool_name is not None
+            else str(row["tool_name"] or "").strip()
+        )
+        if new_tool and new_tool not in ERGONOMIC_ASSESSMENT_TOOLS:
+            raise ValueError(f"Unsupported Ergonomic Assessment Tool: '{new_tool}'.")
 
         conn.execute(
             """UPDATE ergonomics_visual_media
-               SET caption=?, sequence=?, updated_at=?
+               SET caption=?, sequence=?, tool_name=?, updated_at=?
                WHERE id=? AND project_id=? AND scenario_id=?""",
-            (new_caption, new_seq, timestamp, normalized_media_id, project_id, scenario_id),
+            (new_caption, new_seq, new_tool, timestamp, normalized_media_id, project_id, scenario_id),
         )
 
     record_audit_event(
@@ -1632,12 +1887,18 @@ def update_ergonomics_visual_media(
         "Update visual aid",
         1,
         str(current_editor or "").strip(),
-        {"media_id": normalized_media_id, "caption": new_caption, "sequence": new_seq},
+        {
+            "media_id": normalized_media_id,
+            "caption": new_caption,
+            "sequence": new_seq,
+            "tool_name": new_tool,
+        },
     )
     return {
         "id": normalized_media_id,
         "caption": new_caption,
         "sequence": new_seq,
+        "tool_name": new_tool,
     }
 
 
@@ -1817,6 +2078,15 @@ def ergonomics_slide_summary(
         ).fetchall()
         hazards = [str(hr["label"]) for hr in hazard_rows]
 
+        tool_rows = conn.execute(
+            """SELECT id, tool_name, notes, sequence
+               FROM ergonomics_review_tool_assessments
+               WHERE review_id=? AND project_id=? AND scenario_id=?
+               ORDER BY sequence, tool_name, id""",
+            (normalized_review_id, project_id, scenario_id),
+        ).fetchall()
+        tool_assessments = [dict(tr) for tr in tool_rows]
+
         work_element_id = review.get("work_element_id")
         work_info: dict[str, Any] = {}
         parts_info: list[dict[str, Any]] = []
@@ -1889,6 +2159,7 @@ def ergonomics_slide_summary(
             "takt_time_unit": takt_time_unit,
             "review": review,
             "hazards": hazards,
+            "tool_assessments": tool_assessments,
             "work_info": work_info,
             "parts": parts_info,
             "equipment": equipment_info,
@@ -1966,6 +2237,7 @@ def acknowledge_ergonomics_upstream_changes(
 
 
 __domain_exports__ = [
+    'ERGONOMIC_ASSESSMENT_TOOLS',
     'ergonomic_hazard_options',
     'save_ergonomic_hazard_option_rows',
     'ergonomic_hazard_option_delete_impact',
@@ -1986,6 +2258,8 @@ __domain_exports__ = [
     'link_legacy_concern_to_work_element',
     'ensure_default_ergonomic_hazard_options',
     'create_or_get_ergonomic_hazard_option',
+    'get_ergonomics_review_tool_assessments',
+    'save_ergonomics_review_tool_assessments',
     'get_ergonomics_visual_media',
     'save_ergonomics_visual_media',
     'update_ergonomics_visual_media',

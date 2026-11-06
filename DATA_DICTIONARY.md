@@ -370,12 +370,19 @@ This amendment does not change the approved status list, the controlled `risk_cl
 - **Key relationships:** Belongs to one `ergonomics_reviews` row and references one `ergonomic_hazard_options` row. `UNIQUE(ergonomics_review_id, hazard_option_id)` prevents the same hazard from being selected twice for one review. Store validation enforces matching project and scenario boundaries.
 - **Scope:** Scenario-specific through the parent Ergonomics review. New selections require an active project-wide hazard option; an inactive option may remain on an existing review until deliberately removed.
 
+### `ergonomics_review_tool_assessments`
+
+- **Purpose:** Stores scenario-specific Ergonomic Assessment Tool selections (`"Delmia"`, `"Work(s)"`, `"Handpak"`, `"Shoulder Tool"`, `"NIOSH Single/Multi Task"`, `"Humantech"`, `"ErgoNOVA"`, `"Force Test"`) and tool-specific assessment notes/findings for an Ergonomics review slide.
+- **Key relationships:** Belongs to `projects` and `planning_scenarios`; references an owning `ergonomics_reviews` row through `review_id` (`ON DELETE CASCADE`). `UNIQUE(review_id, tool_name)` ensures one structured assessment record per selected tool on a review.
+- **Scope:** Scenario-specific. Cloned scenarios copy tool assessment records and remap `review_id` to the cloned review.
+- **Storage:** Persisted in `ergonomics_review_tool_assessments` table (`id`, `project_id`, `scenario_id`, `review_id`, `tool_name`, `notes`, `sequence`, `created_at`, `updated_at`).
+
 ### `ergonomics_visual_media`
 
-- **Purpose:** Stores scenario-specific visual aids (photos, screenshots, annotated markups, and demonstration videos) for an Ergonomics review, with custom callout captions, non-destructive vector annotations, sequence order, and contributor attribution.
+- **Purpose:** Stores scenario-specific visual aids (photos, screenshots, annotated markups, demonstration videos, and supporting assessment documents such as `.pdf`, `.xlsx`, `.docx`, `.csv`) for an Ergonomics review, optionally tagged to a specific Ergonomic Assessment Tool (`tool_name`), with original filename (`original_filename`), custom callout captions, non-destructive vector annotations, sequence order, and contributor attribution.
 - **Key relationships:** Belongs to `projects` and `planning_scenarios`; references an owning `ergonomics_reviews` row through `review_id`. Deleting a review cascades and removes its attached visual media and associated media files from `data/uploads/`.
 - **Scope:** Scenario-specific. Cloned scenarios duplicate review visual media associations mapped to the cloned reviews.
-- **Storage:** Persisted in `ergonomics_visual_media` table (`id`, `project_id`, `scenario_id`, `review_id`, `media_type`, `file_path`, `original_file_path`, `annotations_json`, `caption`, `sequence`, `created_at`, `created_by`, `updated_at`).
+- **Storage:** Persisted in `ergonomics_visual_media` table (`id`, `project_id`, `scenario_id`, `review_id`, `media_type`, `tool_name`, `original_filename`, `file_path`, `original_file_path`, `annotations_json`, `caption`, `sequence`, `created_at`, `created_by`, `updated_at`).
 
 ## Module proposals and decision records
 
@@ -1846,3 +1853,37 @@ Future issued-document generation and approval (not implemented)
      - **Universal Save Action Standard:** Editing and clicking **Save & Refresh** (or **Update** on Materials cards) atomically saves the review and refreshes `source_snapshot_json` and `source_acknowledged_at`.
      - **Universal Audit Trail & History Standard:** Direct acknowledgments log a `record_audit_event()` entry (`"Acknowledge upstream change"`) with Current editor attribution and diff details, visible in each page's bottom `audit_history()` expander.
      - **Scope Badges & Help Text:** Preserves `page_title_with_scope(..., scope="scenario")` and updates `utils/help_hub.py` manuals and FAQs.
+
+
+### Ergonomics Review Slides: Per-Tool Assessments, Notes, and Tool-Specific Media/Documents (`ergonomics_review_tool_assessments`, `ergonomics_visual_media`)
+
+- **Proposed by:** Kayla Funk & Antigravity
+- **Date recorded:** November 6, 2026
+- **Approval status:** Approved for implementation on branch `ErgoSlideUpdates`.
+- **Purpose:** Expand the Ergonomics Review Slides so collaborators can select one or more **Ergonomic Assessment Tools** used to establish a review's Status and Risk Classification (`"Delmia"`, `"Work(s)"`, `"Handpak"`, `"Shoulder Tool"`, `"NIOSH Single/Multi Task"`, `"Humantech"`, `"ErgoNOVA"`, `"Force Test"`), and for each selected tool enter dedicated assessment notes/findings and attach tool-specific images, screenshots, videos, or supporting documents (`.pdf`, `.xlsx`, `.docx`, `.csv`, etc.). Keeps the **Ergonomics reviews** table focused on high-level highlights while the 16:9 slide presents the detailed per-tool engineering evidence.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `ergonomics_reviews` and `ergonomics_visual_media` (which belong to `planning_scenarios` and `projects`, and link via `work_element_id` to `work_elements` in Process at a Glance).
+  2. *Critical thread relationship:* Extends the scenario-specific Ergonomics Functional Review stage downstream of *Product Architecture -> Parts Catalog -> Fishbone -> Yamazumi -> Process at a Glance (`work_elements`) -> Ergonomics Review (`ergonomics_reviews` -> `ergonomics_review_tool_assessments` & `ergonomics_visual_media`)*.
+  3. *Scope:* Scenario-specific (owned by `ergonomics_reviews` in the active planning scenario, and copied forward when a planning scenario is cloned or when a legacy concern is linked/merged).
+  4. *Table & field requirement:*
+     - New scenario-owned table `ergonomics_review_tool_assessments`:
+       - `id TEXT PRIMARY KEY` (UUID)
+       - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+       - `scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE`
+       - `review_id TEXT NOT NULL REFERENCES ergonomics_reviews(id) ON DELETE CASCADE`
+       - `tool_name TEXT NOT NULL` (from `"Delmia"`, `"Work(s)"`, `"Handpak"`, `"Shoulder Tool"`, `"NIOSH Single/Multi Task"`, `"Humantech"`, `"ErgoNOVA"`, `"Force Test"`)
+       - `notes TEXT NOT NULL DEFAULT ''`
+       - `sequence INTEGER NOT NULL DEFAULT 10`
+       - `created_at TEXT NOT NULL`
+       - `updated_at TEXT NOT NULL`
+       - `UNIQUE(review_id, tool_name)`
+     - Extended `ergonomics_visual_media`:
+       - `tool_name TEXT NOT NULL DEFAULT ''`: Optional Ergonomic Assessment Tool name that this visual aid or document belongs to.
+       - `original_filename TEXT NOT NULL DEFAULT ''`: Original uploaded filename for display and document download.
+       - `media_type`: Extended to accept `'document'` in addition to `'image'` and `'video'`.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Universal Save Action Standard:** Saved atomically via **Save & Refresh** in the **Edit Slide** dialog (and per-tool media/document upload controls).
+     - **Universal Deletion Standard:** Non-dismissible confirmation dialog (`destructive_` button key) before deleting attached visual aids or documents, with 30-day Recycle Bin protection and file cleanup in `data/uploads/`.
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` with Current editor attribution and displayed in the bottom **History** expander on the Ergonomics page.
+     - **Scope Badges & Help Text:** Retains `page_title_with_scope("Ergonomics", scope="scenario")` and updates the in-app Ergonomics help guide in `utils/help_hub.py`.
+

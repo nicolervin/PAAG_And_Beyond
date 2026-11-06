@@ -138,6 +138,7 @@ def render_ergonomics_slide(
     equipment = summary.get("equipment") or []
     media_list = summary.get("media") or []
     hazards = summary.get("hazards") or []
+    tool_assessments = summary.get("tool_assessments") or []
 
     project_name = _text(summary.get("project_name") or "PAAG Project")
     scenario_name = _text(summary.get("scenario_name") or "Scenario")
@@ -265,9 +266,125 @@ def render_ergonomics_slide(
     </div>
     """
 
+    # Separate visual media (image/video) from document attachments
+    visual_media = [
+        m for m in media_list if str(m.get("media_type") or "image").lower() in {"image", "video"}
+    ]
+    doc_media = [
+        m for m in media_list if str(m.get("media_type") or "").lower() == "document"
+    ]
+
+    # Build Ergonomic Assessment Tools & Findings HTML
+    tool_notes_map: dict[str, str] = {}
+    ordered_tools: list[str] = []
+    for ta in tool_assessments:
+        t_name = str(ta.get("tool_name") or "").strip()
+        if t_name and t_name not in tool_notes_map:
+            ordered_tools.append(t_name)
+            tool_notes_map[t_name] = str(ta.get("notes") or "").strip()
+    for m in media_list:
+        t_name = str(m.get("tool_name") or "").strip()
+        if t_name and t_name not in tool_notes_map:
+            ordered_tools.append(t_name)
+            tool_notes_map[t_name] = ""
+
+    tool_rows_html = []
+    for t_name in ordered_tools:
+        t_notes_esc = _text(tool_notes_map.get(t_name) or "")
+        t_docs = [
+            d for d in doc_media if str(d.get("tool_name") or "").strip() == t_name
+        ]
+        t_visuals = [
+            v for v in visual_media if str(v.get("tool_name") or "").strip() == t_name
+        ]
+        attachment_chips = []
+        for v_idx, v in enumerate(t_visuals):
+            v_seq = v.get("sequence", (v_idx + 1) * 10)
+            attachment_chips.append(
+                f'<span class="ergo-tool-att-chip visual" title="{_text(v.get("caption") or "Visual aid")}">📷 #{v_seq}</span>'
+            )
+        for d in t_docs:
+            raw_fname = str(d.get("original_filename") or "").strip()
+            if not raw_fname and d.get("file_path"):
+                raw_fname = Path(str(d.get("file_path"))).name
+            fname_esc = _text(raw_fname or "Document")
+            d_cap_esc = _text(d.get("caption") or raw_fname or "Document")
+            attachment_chips.append(
+                f'<span class="ergo-tool-att-chip doc" title="{d_cap_esc}">📄 {fname_esc}</span>'
+            )
+        att_html = (
+            f'<div class="ergo-tool-attachments">{"".join(attachment_chips)}</div>'
+            if attachment_chips
+            else ""
+        )
+        notes_body_html = (
+            f'<div class="ergo-tool-notes">{t_notes_esc}</div>'
+            if t_notes_esc
+            else '<div class="ergo-tool-notes text-muted">Selected — no tool-specific notes recorded.</div>'
+        )
+        tool_rows_html.append(
+            f"""
+            <div class="ergo-tool-row">
+              <div class="ergo-tool-header">
+                <span class="ergo-tool-badge">🔧 {_text(t_name)}</span>
+                {att_html}
+              </div>
+              {notes_body_html}
+            </div>
+            """
+        )
+
+    general_docs = [
+        d for d in doc_media if not str(d.get("tool_name") or "").strip()
+    ]
+    general_doc_chips = []
+    for d in general_docs:
+        raw_fname = str(d.get("original_filename") or "").strip()
+        if not raw_fname and d.get("file_path"):
+            raw_fname = Path(str(d.get("file_path"))).name
+        fname_esc = _text(raw_fname or "Document")
+        d_cap_esc = _text(d.get("caption") or raw_fname or "Document")
+        general_doc_chips.append(
+            f'<span class="ergo-tool-att-chip doc" title="{d_cap_esc}">📄 {fname_esc}</span>'
+        )
+
+    general_notes_block = ""
+    if notes or general_doc_chips:
+        gen_docs_html = (
+            f'<div class="ergo-tool-attachments" style="margin-top:3px;">{"".join(general_doc_chips)}</div>'
+            if general_doc_chips
+            else ""
+        )
+        gen_label = (
+            '<div class="ergo-general-notes-label">General Notes &amp; Action Items</div>'
+            if tool_rows_html
+            else ""
+        )
+        general_notes_block = f"""
+        <div class="ergo-general-notes-box">
+          {gen_label}
+          {f'<div class="ergo-notes-text">{notes}</div>' if notes else ''}
+          {gen_docs_html}
+        </div>
+        """
+
+    if tool_rows_html or general_notes_block:
+        assessments_section_html = f"""
+        <div class="ergo-tools-container">
+          {''.join(tool_rows_html)}
+          {general_notes_block}
+        </div>
+        """
+    else:
+        assessments_section_html = (
+            '<div class="ergo-notes-text"><span class="text-muted">'
+            "No ergonomic assessment tools or notes recorded yet."
+            "</span></div>"
+        )
+
     # Visual Media Cards HTML
     media_cards_html = []
-    media_count = len(media_list)
+    media_count = len(visual_media)
     if media_count == 1:
         grid_class = "media-grid-1"
     elif media_count == 2:
@@ -277,9 +394,10 @@ def render_ergonomics_slide(
     else:
         grid_class = "media-grid-4"
 
-    for idx, item in enumerate(media_list[:4]):
+    for idx, item in enumerate(visual_media[:4]):
         m_type = str(item.get("media_type") or "image").lower()
         caption = _text(item.get("caption") or "")
+        item_tool = _text(item.get("tool_name") or "")
         seq = item.get("sequence", (idx + 1) * 10)
         data_url = item.get("data_url") or _media_data_url(item.get("file_path"))
 
@@ -292,17 +410,23 @@ def render_ergonomics_slide(
             """
         else:
             media_content = f"""
-            <img class="ergo-media-item image" src="{data_url}" alt="{caption or 'Ergonomics Visual Aid'}" />
+            <img class="ergo-media-item image" src="{data_url}" alt="{caption or item_tool or 'Ergonomics Visual Aid'}" />
             """
 
+        tool_badge_html = (
+            f'<span class="callout-tool-badge">🔧 {item_tool}</span>'
+            if item_tool
+            else ""
+        )
         caption_block = (
             f"""
             <div class="ergo-callout-box">
               <span class="callout-seq">#{seq}</span>
+              {tool_badge_html}
               <span class="callout-text">{caption}</span>
             </div>
             """
-            if caption
+            if (caption or item_tool)
             else ""
         )
 
@@ -318,13 +442,35 @@ def render_ergonomics_slide(
         )
 
     if not media_cards_html:
-        visual_grid_html = """
-        <div class="ergo-empty-visual">
-          <div class="empty-icon">📷</div>
-          <div class="empty-title">No Visual Aids Attached</div>
-          <div class="empty-desc">Upload photos, annotated screenshots, or video clips in the Visual Aids manager below to display them on this Ergonomics slide.</div>
-        </div>
-        """
+        if doc_media:
+            doc_items_html = []
+            for d in doc_media:
+                raw_fname = str(d.get("original_filename") or "").strip()
+                if not raw_fname and d.get("file_path"):
+                    raw_fname = Path(str(d.get("file_path"))).name
+                d_tool = _text(d.get("tool_name") or "General")
+                d_cap = _text(d.get("caption") or "")
+                doc_items_html.append(
+                    f'<div class="empty-doc-item"><strong>📄 {_text(raw_fname or "Document")}</strong> '
+                    f'<span class="ergo-tool-badge">🔧 {d_tool}</span>'
+                    f'{f" — <span>{d_cap}</span>" if d_cap else ""}</div>'
+                )
+            visual_grid_html = f"""
+            <div class="ergo-empty-visual">
+              <div class="empty-icon">📑</div>
+              <div class="empty-title">Assessment Documents Attached ({len(doc_media)})</div>
+              <div class="empty-desc">Download attached tool reports below the slide, or upload photos/videos in Edit Slide to display visual aids here.</div>
+              <div class="empty-doc-list">{''.join(doc_items_html)}</div>
+            </div>
+            """
+        else:
+            visual_grid_html = """
+            <div class="ergo-empty-visual">
+              <div class="empty-icon">📷</div>
+              <div class="empty-title">No Visual Aids Attached</div>
+              <div class="empty-desc">Upload tool screenshots, photos, videos, or supporting documents in Edit Slide or the Visual Aids manager below.</div>
+            </div>
+            """
     else:
         visual_grid_html = f"""
         <div class="ergo-visual-grid {grid_class}">
@@ -411,13 +557,16 @@ def render_ergonomics_slide(
             {equipment_section_html}
           </div>
 
-          <!-- Assessment Notes & Corrective Actions -->
+          <!-- Ergonomic Assessment Tools & Findings -->
           <div class="ergo-section-card">
             <div class="card-title">
-              <span>Assessment Notes & Action Items</span>
-              {f'<span class="card-badge due">Due: {due_date}</span>' if due_date else ''}
+              <span>Ergonomic Assessment Tools &amp; Findings</span>
+              <span style="display:flex; gap:6px; align-items:center;">
+                {f'<span class="card-badge">{len(ordered_tools)} Tool{"s" if len(ordered_tools) != 1 else ""}</span>' if ordered_tools else ''}
+                {f'<span class="card-badge due">Due: {due_date}</span>' if due_date else ''}
+              </span>
             </div>
-            <div class="ergo-notes-text">{notes or '<span class="text-muted">No notes or corrective actions recorded yet.</span>'}</div>
+            {assessments_section_html}
           </div>
         </div>
 
@@ -756,13 +905,100 @@ def render_ergonomics_slide(
         border-radius: 6px;
       }}
 
-      /* Notes text */
+      /* Notes text & Tool Assessments */
       .ergo-notes-text {{
-        font-size: 0.8rem;
+        font-size: 0.78rem;
         line-height: 1.4;
         color: #334155;
-        max-height: 64px;
+      }}
+
+      .ergo-tools-container {{
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 150px;
         overflow-y: auto;
+        padding-right: 2px;
+      }}
+
+      .ergo-tool-row {{
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-left: 3px solid #2563eb;
+        border-radius: 6px;
+        padding: 5px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }}
+
+      .ergo-tool-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+      }}
+
+      .ergo-tool-badge {{
+        display: inline-block;
+        background: #eff6ff;
+        color: #1d4ed8;
+        border: 1px solid #bfdbfe;
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 1px 7px;
+        border-radius: 4px;
+      }}
+
+      .ergo-tool-attachments {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }}
+
+      .ergo-tool-att-chip {{
+        display: inline-block;
+        font-size: 0.68rem;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        max-width: 165px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }}
+
+      .ergo-tool-att-chip.doc {{
+        background: #f1f5f9;
+        color: #334155;
+        border: 1px solid #cbd5e1;
+      }}
+
+      .ergo-tool-att-chip.visual {{
+        background: #fef9c3;
+        color: #854d0e;
+        border: 1px solid #fde047;
+      }}
+
+      .ergo-tool-notes {{
+        font-size: 0.76rem;
+        line-height: 1.35;
+        color: #1e293b;
+      }}
+
+      .ergo-general-notes-box {{
+        border-top: 1px dashed #cbd5e1;
+        padding-top: 4px;
+        margin-top: 2px;
+      }}
+
+      .ergo-general-notes-label {{
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        color: #64748b;
+        margin-bottom: 2px;
       }}
 
       .subtle-empty {{
@@ -870,6 +1106,17 @@ def render_ergonomics_slide(
         border-radius: 4px;
       }}
 
+      .callout-tool-badge {{
+        font-weight: 700;
+        background: #eff6ff;
+        color: #1d4ed8;
+        border: 1px solid #bfdbfe;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        white-space: nowrap;
+      }}
+
       .callout-text {{
         font-weight: 600;
         white-space: nowrap;
@@ -908,6 +1155,28 @@ def render_ergonomics_slide(
         max-width: 320px;
         margin-top: 4px;
         line-height: 1.4;
+      }}
+
+      .empty-doc-list {{
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        text-align: left;
+        max-width: 90%;
+      }}
+
+      .empty-doc-item {{
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        padding: 5px 10px;
+        font-size: 0.76rem;
+        color: #1e293b;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
       }}
 
       /* Footer */

@@ -21,6 +21,7 @@ from utils.ergonomics_slide_visual import (
 from utils.time_units import format_seconds
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
+    ERGONOMIC_ASSESSMENT_TOOLS,
     ERGONOMICS_RISK_CLASSIFICATIONS,
     ERGONOMICS_REVIEW_STATUSES,
     acknowledge_ergonomics_upstream_changes,
@@ -37,11 +38,13 @@ from utils.store import (
     ergonomics_slide_summary,
     ergonomics_work_elements,
     format_eastern_timestamp,
+    get_ergonomics_review_tool_assessments,
     get_ergonomics_visual_media,
     get_planning_scenario,
     link_legacy_concern_to_work_element,
     record_audit_event,
     save_ergonomic_hazard_option_rows,
+    save_ergonomics_review,
     save_ergonomics_review_rows,
     save_ergonomics_visual_media,
     update_ergonomics_visual_annotations,
@@ -71,6 +74,7 @@ from utils.table_ui import (
     render_audit_history_table,
     selectable_dataframe,
     selected_dataframe_rows,
+    stable_id_from_button_click,
     stage_native_delete_confirmation,
 )
 
@@ -683,34 +687,60 @@ elif review_tab.open:
             ].copy()
 
 
-        def open_ergo_slide() -> None:
-            click = st.session_state.get(f"ergo_reviews_view_slide_{scenario_id}")
-            if click and 0 <= click.get("row", -1) < len(reviews_for_editing):
-                row_id = str(reviews_for_editing.iloc[click["row"]]["id"]).strip()
-                st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = row_id
-                st.session_state["ergo_scroll_to_slides"] = True
-
-
         reviews_for_editing = direct_entry_editor_rows(
             visible_reviews,
             editor_key=editor_key,
             sort_columns=[
-                "link_filter",
                 "work_element_label",
-                "legacy_description",
+                "sync_status",
                 "status",
                 "risk_classification",
+                "pitch",
+                "legacy_description",
                 "reviewer",
+                "link_filter",
                 "requested_due_date",
                 "updated_at",
             ],
             labels={
                 "link_filter": "Link status",
+                "sync_status": "Sync status",
                 "work_element_label": "Process step description",
+                "pitch": "Pitch",
                 "legacy_description": "Legacy concern / title",
                 "requested_due_date": "Requested due date",
             },
         )
+
+        view_slide_click_key = f"ergo_reviews_view_slide_{scenario_id}"
+
+        def _activate_ergo_slide(row_id: str) -> None:
+            clean_rid = _clean_text(row_id)
+            if not clean_rid or clean_rid.startswith("__draft_new__"):
+                return
+            st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = clean_rid
+            st.session_state[f"ergo_slide_select_{scenario_id}"] = clean_rid
+            st.session_state["ergo_scroll_nonce"] = (
+                int(st.session_state.get("ergo_scroll_nonce", 0)) + 1
+            )
+            st.session_state["ergo_scroll_to_slides"] = True
+
+        def open_ergo_slide() -> None:
+            click_state = st.session_state.pop(view_slide_click_key, None)
+            row_id = stable_id_from_button_click(
+                reviews_for_editing,
+                click_state,
+            )
+            if row_id:
+                _activate_ergo_slide(row_id)
+
+        if view_slide_click_key in st.session_state:
+            clicked_slide_row_id = stable_id_from_button_click(
+                reviews_for_editing,
+                st.session_state.pop(view_slide_click_key, None),
+            )
+            if clicked_slide_row_id:
+                _activate_ergo_slide(clicked_slide_row_id)
 
         edited = st.data_editor(
             reviews_for_editing,
@@ -719,18 +749,17 @@ elif review_tab.open:
             hide_index=True,
             height=470,
             column_order=[
-                "link_status",
-                "sync_status",
                 "view_slide",
                 "work_element_id",
-                "upstream_diff_summary",
-                "legacy_description",
+                "sync_status",
                 "status",
                 "risk_classification",
-                "reviewer",
+                "pitch",
                 "hazard_option_ids",
-                "notes",
-                "requested_due_date",
+                "upstream_diff_summary",
+                "legacy_description",
+                "reviewer",
+                "link_status",
             ],
             disabled=[
                 "id",
@@ -763,7 +792,11 @@ elif review_tab.open:
                 "updated_at": None,
                 "hazard_labels": None,
                 "work_element_label": None,
-                "pitch": None,
+                "pitch": st.column_config.TextColumn(
+                    "Pitch",
+                    width="small",
+                    help="Pitch address of the linked Process at a Glance step.",
+                ),
                 "link_status": st.column_config.MultiselectColumn(
                     "Link",
                     options=["Linked", "Unlinked"],
@@ -778,9 +811,9 @@ elif review_tab.open:
                     help="Shows whether the linked Process at a Glance step changed upstream since this review was last saved or acknowledged.",
                 ),
                 "upstream_diff_summary": st.column_config.TextColumn(
-                    "Upstream changes",
+                    "Recent process edits",
                     width="large",
-                    help="Summary of upstream Process at a Glance step changes since this review was last saved or acknowledged.",
+                    help="Summary of Process at a Glance step edits since this review was last saved or acknowledged.",
                 ),
                 "view_slide": st.column_config.ButtonColumn(
                     "Slide",
@@ -1100,8 +1133,7 @@ elif review_tab.open:
                         requested_due_date=init_due_date.isoformat() if init_due_date else None,
                         editor_name=_clean_text(st.session_state.get("current_editor")),
                     )
-                    st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = res["id"]
-                    st.session_state["ergo_scroll_to_slides"] = True
+                    _activate_ergo_slide(res["id"])
                     st.session_state.pop(f"show_add_legacy_dialog_{scenario_id}", None)
                     request_table_editor_reset(editor_key)
                     st.toast("Legacy Ergonomics concern created", icon=":material/check_circle:")
@@ -1388,8 +1420,7 @@ elif review_tab.open:
                         editor_name=_clean_text(st.session_state.get("current_editor")),
                     )
                     surviving_id = res["surviving_id"]
-                    st.session_state[f"ergo_slide_selected_review_{scenario_id}"] = surviving_id
-                    st.session_state["ergo_scroll_to_slides"] = True
+                    _activate_ergo_slide(surviving_id)
                     st.session_state.pop(f"show_link_legacy_dialog_{scenario_id}", None)
                     st.session_state.pop(f"ergo_link_target_legacy_id_{scenario_id}", None)
                     request_table_editor_reset(editor_key)
@@ -1768,16 +1799,20 @@ elif review_tab.open:
                 st.rerun()
 
 
-        @st.dialog("Delete Visual Aid", width="medium", dismissible=False)
+        def _tool_slug(tool_name: str) -> str:
+            return "".join(ch if ch.isalnum() else "_" for ch in str(tool_name).lower()).strip("_")
+
+
+        @st.dialog("Delete Visual Aid or Attachment", width="medium", dismissible=False)
         def confirm_delete_ergo_media_dialog(
             project_id: str,
             scenario_id: str,
             media_id: str,
             caption: str,
         ) -> None:
-            st.warning(f"Are you sure you want to permanently delete this visual aid ({caption or 'Untitled'})?")
+            st.warning(f"Are you sure you want to permanently delete this attachment ({caption or 'Untitled'})?")
             st.caption(
-                "Downstream effects: This permanently deletes the visual aid file from this Ergonomics review and removes it from Ergonomics slide presentation and print views. "
+                "Downstream effects: This permanently deletes the attached visual aid or document file from this Ergonomics review and removes it from Ergonomics slide presentation and print views. "
                 "The Ergonomics review record itself and its linked Process step / Pitch remain intact."
             )
             d_c1, d_c2 = st.columns(2)
@@ -1794,11 +1829,857 @@ elif review_tab.open:
                             media_id=media_id,
                             current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
                         )
-                        st.toast("Visual aid deleted.", icon=":material/delete:")
+                        st.toast("Attachment deleted.", icon=":material/delete:")
                         st.session_state.pop(f"ergo_del_media_target_{scenario_id}", None)
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))
+
+
+        def _clear_ergo_slide_dialog_state(rid: str) -> None:
+            st.session_state.pop(f"ergo_slide_edit_draft_{rid}", None)
+            for prefix in (
+                "dlg_ergo_status_",
+                "dlg_ergo_risk_",
+                "dlg_ergo_reviewer_",
+                "dlg_ergo_due_",
+                "dlg_ergo_hazards_",
+                "dlg_ergo_new_hazards_",
+                "dlg_ergo_legacy_",
+                "dlg_ergo_link_we_",
+                "dlg_ergo_notes_",
+                "dlg_ergo_tools_",
+            ):
+                st.session_state.pop(f"{prefix}{rid}", None)
+            for t_name in ERGONOMIC_ASSESSMENT_TOOLS:
+                t_slug = _tool_slug(t_name)
+                st.session_state.pop(f"dlg_ergo_tool_notes_{rid}_{t_slug}", None)
+
+
+        def _render_ergo_media_card(media_item: dict, *, key_prefix: str) -> None:
+            m_id = media_item["id"]
+            m_type = str(media_item.get("media_type") or "image").lower()
+            cur_m_tool = _clean_text(media_item.get("tool_name"))
+            raw_fname = _clean_text(media_item.get("original_filename")) or Path(
+                str(media_item.get("file_path") or "")
+            ).name
+            with st.container(border=True):
+                m_c1, m_c2 = st.columns([1.2, 2.5])
+                with m_c1:
+                    d_url = media_item.get("data_url") or media_item.get("file_path", "")
+                    if m_type == "video":
+                        st.video(d_url)
+                    elif m_type == "document":
+                        st.markdown(f"**📄 {raw_fname or 'Document'}**")
+                        if cur_m_tool:
+                            st.caption(f"Tool: **{cur_m_tool}**")
+                        doc_path = Path(str(media_item.get("file_path") or ""))
+                        if doc_path.exists() and doc_path.is_file():
+                            st.download_button(
+                                "Download File",
+                                data=doc_path.read_bytes(),
+                                file_name=raw_fname or doc_path.name,
+                                key=f"{key_prefix}_dl_doc_{m_id}",
+                                icon=":material/download:",
+                                width="stretch",
+                            )
+                    else:
+                        st.image(d_url, width="stretch")
+                with m_c2:
+                    mc_top1, mc_top2, mc_top3 = st.columns([1.6, 1.1, 0.8])
+                    card_cap = mc_top1.text_input(
+                        "Caption / Callout Note",
+                        value=media_item.get("caption", ""),
+                        key=f"{key_prefix}_cap_edit_{m_id}",
+                    )
+                    tool_select_opts = [""] + list(ERGONOMIC_ASSESSMENT_TOOLS)
+                    if cur_m_tool and cur_m_tool not in tool_select_opts:
+                        tool_select_opts.append(cur_m_tool)
+                    card_tool = mc_top2.selectbox(
+                        "Assessment Tool",
+                        options=tool_select_opts,
+                        index=(
+                            tool_select_opts.index(cur_m_tool)
+                            if cur_m_tool in tool_select_opts
+                            else 0
+                        ),
+                        format_func=lambda t: t if t else "General / Overall",
+                        key=f"{key_prefix}_tool_edit_{m_id}",
+                    )
+                    card_seq = mc_top3.number_input(
+                        "Sequence",
+                        value=int(media_item.get("sequence", 10)),
+                        step=5,
+                        key=f"{key_prefix}_seq_edit_{m_id}",
+                    )
+                    if m_type == "image":
+                        raw_item_ann = str(media_item.get("annotations_json") or "").strip()
+                        if raw_item_ann and raw_item_ann != "[]":
+                            st.caption(
+                                "Markup: :material/draw: **Annotated** (editable shapes, crop & rotation)"
+                            )
+                    ergo_card_btns = st.container(horizontal=True)
+                    if ergo_card_btns.button("Save", key=f"{key_prefix}_btn_save_media_{m_id}"):
+                        try:
+                            update_ergonomics_visual_media(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                media_id=m_id,
+                                caption=card_cap,
+                                sequence=int(card_seq),
+                                tool_name=card_tool,
+                                current_editor=_clean_text(st.session_state.get("current_editor"))
+                                or "Collaborator",
+                            )
+                            st.toast("Attachment updated.", icon=":material/check_circle:")
+                            st.rerun()
+                        except Exception as ue:
+                            st.error(str(ue))
+                    if m_type == "image":
+                        if ergo_card_btns.button(
+                            "Annotate",
+                            icon=":material/draw:",
+                            key=f"{key_prefix}_btn_annot_media_{m_id}",
+                            help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges",
+                        ):
+                            st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
+                            st.rerun()
+                    if ergo_card_btns.button(
+                        "Delete",
+                        icon=":material/delete:",
+                        key=f"destructive_{key_prefix}_btn_del_media_{m_id}",
+                    ):
+                        st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
+                        st.rerun()
+
+
+        def _render_ergo_attachment_uploader(
+            *,
+            scope_id: str,
+            target_review_id: str,
+            fixed_tool_name: str | None,
+            next_seq_default: int,
+            key_prefix: str,
+            button_type: str = "secondary",
+        ) -> dict:
+            up_nonce_key = f"ergo_up_nonce_{scope_id}"
+            up_nonce = int(st.session_state.get(up_nonce_key, 0))
+            u_c1, u_c2 = st.columns([1.5, 1])
+            with u_c1:
+                upload_label = (
+                    f"Upload image, video, or document for {fixed_tool_name}"
+                    if fixed_tool_name
+                    else "Upload image, video, or supporting document (PNG, JPG, WEBP, MP4, MOV, WEBM, PDF, XLSX, DOCX, CSV, PPTX, TXT)"
+                )
+                uploaded_file = st.file_uploader(
+                    upload_label,
+                    type=[
+                        "png",
+                        "jpg",
+                        "jpeg",
+                        "webp",
+                        "mp4",
+                        "mov",
+                        "webm",
+                        "pdf",
+                        "xlsx",
+                        "xls",
+                        "docx",
+                        "doc",
+                        "csv",
+                        "txt",
+                        "pptx",
+                        "ppt",
+                    ],
+                    key=f"{key_prefix}_ergo_file_upload_{scope_id}_{up_nonce}",
+                )
+                st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
+                pasted = clipboard_image(key=f"{key_prefix}_ergo_paste_{scope_id}_{up_nonce}")
+            with u_c2:
+                if fixed_tool_name is None:
+                    chosen_tool = st.selectbox(
+                        "Assessment Tool (optional)",
+                        options=[""] + list(ERGONOMIC_ASSESSMENT_TOOLS),
+                        format_func=lambda t: t if t else "General / Overall",
+                        key=f"{key_prefix}_ergo_new_tool_{scope_id}_{up_nonce}",
+                    )
+                else:
+                    chosen_tool = fixed_tool_name
+                new_caption = st.text_input(
+                    "Caption / Callout Note",
+                    key=f"{key_prefix}_ergo_new_caption_{scope_id}_{up_nonce}",
+                    placeholder=(
+                        f"e.g. {fixed_tool_name} summary / key takeaway"
+                        if fixed_tool_name
+                        else "e.g. Ensure 2-hand palm button clear of pinch hazard"
+                    ),
+                )
+                new_seq = st.number_input(
+                    "Sequence Order",
+                    min_value=1,
+                    value=max(1, int(next_seq_default)),
+                    step=5,
+                    key=f"{key_prefix}_ergo_new_seq_{scope_id}_{up_nonce}",
+                )
+
+            staged_ergo_key = f"ergo_staged_media_{scope_id}"
+            last_ergo_paste_hash_key = f"last_ergo_paste_hash_{scope_id}"
+            last_ergo_upload_hash_key = f"last_ergo_upload_hash_{scope_id}"
+            discarded_ergo_up_key = f"_discarded_ergo_up_{scope_id}"
+            current_staged = st.session_state.get(staged_ergo_key)
+
+            pasted_payload = getattr(pasted, "image", None)
+            if pasted_payload:
+                try:
+                    decoded = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
+                    clip_bytes = decoded["bytes"]
+                    clip_hash = hashlib.sha256(clip_bytes).hexdigest()
+                    if st.session_state.get(last_ergo_paste_hash_key) != clip_hash:
+                        st.session_state[last_ergo_paste_hash_key] = clip_hash
+                        st.session_state[staged_ergo_key] = {
+                            "source": "clipboard",
+                            "hash": clip_hash,
+                            "filename": decoded["name"],
+                            "original_bytes": clip_bytes,
+                            "composite_bytes": clip_bytes,
+                            "mime_type": decoded.get("mime_type", "image/png"),
+                            "annotations_json": "",
+                        }
+                        current_staged = st.session_state[staged_ergo_key]
+                except Exception as pe:
+                    st.error(str(pe))
+
+            is_uploaded_non_image = False
+            if uploaded_file is not None:
+                up_suffix = Path(uploaded_file.name).suffix.lower()
+                if up_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+                    up_bytes = uploaded_file.getvalue()
+                    up_hash = hashlib.sha256(up_bytes).hexdigest()
+                    if st.session_state.get(last_ergo_upload_hash_key) != up_hash or (
+                        not isinstance(current_staged, dict)
+                        and st.session_state.get(discarded_ergo_up_key) != up_hash
+                    ):
+                        st.session_state[last_ergo_upload_hash_key] = up_hash
+                        st.session_state.pop(discarded_ergo_up_key, None)
+                        up_mime = (
+                            "image/png"
+                            if up_suffix == ".png"
+                            else "image/webp"
+                            if up_suffix == ".webp"
+                            else "image/jpeg"
+                        )
+                        st.session_state[staged_ergo_key] = {
+                            "source": "upload",
+                            "hash": up_hash,
+                            "filename": uploaded_file.name,
+                            "original_bytes": up_bytes,
+                            "composite_bytes": up_bytes,
+                            "mime_type": up_mime,
+                            "annotations_json": "",
+                        }
+                        current_staged = st.session_state[staged_ergo_key]
+                elif up_suffix in {
+                    ".mp4",
+                    ".mov",
+                    ".webm",
+                    ".pdf",
+                    ".xlsx",
+                    ".xls",
+                    ".docx",
+                    ".doc",
+                    ".csv",
+                    ".txt",
+                    ".pptx",
+                    ".ppt",
+                }:
+                    is_uploaded_non_image = True
+            else:
+                st.session_state.pop(last_ergo_upload_hash_key, None)
+                st.session_state.pop(discarded_ergo_up_key, None)
+                if isinstance(current_staged, dict) and current_staged.get("source") in (
+                    "upload",
+                    "dialog_upload",
+                ):
+                    st.session_state.pop(staged_ergo_key, None)
+                    current_staged = None
+
+            if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
+                with st.container(border=True):
+                    st.markdown(f"**Image Ready:** `{current_staged.get('filename')}`")
+                    sp1, sp2 = st.columns([1, 2.5])
+                    with sp1:
+                        st.image(current_staged["composite_bytes"], width=150)
+                    with sp2:
+                        raw_ann_str = str(current_staged.get("annotations_json") or "").strip()
+                        has_ann = bool(raw_ann_str and raw_ann_str != "[]")
+                        if has_ann:
+                            st.success("Markup / crop / rotation applied", icon=":material/draw:")
+                        else:
+                            st.caption(
+                                "No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers."
+                            )
+                        staged_ergo_btns = st.container(horizontal=True)
+                        if staged_ergo_btns.button(
+                            "Annotate / Add Shapes",
+                            icon=":material/draw:",
+                            key=f"{key_prefix}_btn_ann_staged_ergo_{scope_id}",
+                            type="secondary",
+                        ):
+                            st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] = scope_id
+                            st.rerun()
+                        if staged_ergo_btns.button(
+                            "Delete",
+                            icon=":material/delete:",
+                            key=f"destructive_{key_prefix}_btn_discard_staged_ergo_{scope_id}",
+                        ):
+                            st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] = scope_id
+                            st.rerun()
+            elif uploaded_file is not None and is_uploaded_non_image:
+                st.info(f"**File Ready to Attach:** `{uploaded_file.name}`")
+
+            has_ready_media = (
+                isinstance(current_staged, dict) and bool(current_staged.get("composite_bytes"))
+            ) or is_uploaded_non_image
+            attach_btn_label = (
+                f"Attach to {fixed_tool_name}" if fixed_tool_name else "Attach Visual Aid / File"
+            )
+            if st.button(
+                attach_btn_label,
+                type=button_type,
+                icon=":material/attach_file:",
+                disabled=not has_ready_media,
+                key=f"{key_prefix}_btn_attach_media_{scope_id}",
+            ):
+                editor_name = _clean_text(st.session_state.get("current_editor")) or "Collaborator"
+                if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
+                    try:
+                        save_ergonomics_visual_media(
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            review_id=target_review_id,
+                            filename=current_staged["filename"],
+                            file_bytes=current_staged["composite_bytes"],
+                            original_file_bytes=current_staged["original_bytes"],
+                            annotations_json=current_staged.get("annotations_json", ""),
+                            caption=new_caption,
+                            sequence=int(new_seq),
+                            tool_name=chosen_tool,
+                            current_editor=editor_name,
+                        )
+                        if current_staged.get("source") in ("upload", "dialog_upload"):
+                            st.session_state[discarded_ergo_up_key] = current_staged.get("hash")
+                        st.session_state.pop(staged_ergo_key, None)
+                        st.session_state.pop(last_ergo_paste_hash_key, None)
+                        st.session_state.pop(last_ergo_upload_hash_key, None)
+                        st.session_state.pop(discarded_ergo_up_key, None)
+                        st.session_state[up_nonce_key] = up_nonce + 1
+                        st.toast("Attachment saved!", icon=":material/check_circle:")
+                        st.rerun()
+                    except Exception as save_err:
+                        st.error(str(save_err))
+                elif uploaded_file is not None and is_uploaded_non_image:
+                    try:
+                        save_ergonomics_visual_media(
+                            project_id=project_id,
+                            scenario_id=scenario_id,
+                            review_id=target_review_id,
+                            filename=uploaded_file.name,
+                            file_bytes=uploaded_file.getvalue(),
+                            caption=new_caption,
+                            sequence=int(new_seq),
+                            tool_name=chosen_tool,
+                            current_editor=editor_name,
+                        )
+                        st.session_state.pop(staged_ergo_key, None)
+                        st.session_state.pop(last_ergo_paste_hash_key, None)
+                        st.session_state.pop(last_ergo_upload_hash_key, None)
+                        st.session_state.pop(discarded_ergo_up_key, None)
+                        st.session_state[up_nonce_key] = up_nonce + 1
+                        st.toast("Attachment saved!", icon=":material/check_circle:")
+                        st.rerun()
+                    except Exception as save_err:
+                        st.error(str(save_err))
+
+            return {
+                "scope_id": scope_id,
+                "staged": current_staged,
+                "uploaded_file": uploaded_file if is_uploaded_non_image else None,
+                "caption": new_caption,
+                "sequence": int(new_seq),
+                "tool_name": chosen_tool,
+                "up_nonce_key": up_nonce_key,
+                "up_nonce": up_nonce,
+                "staged_ergo_key": staged_ergo_key,
+                "last_ergo_paste_hash_key": last_ergo_paste_hash_key,
+                "last_ergo_upload_hash_key": last_ergo_upload_hash_key,
+                "discarded_ergo_up_key": discarded_ergo_up_key,
+            }
+
+
+        @st.dialog("Edit Ergonomics Slide", width="large", dismissible=False)
+        def edit_ergo_slide_dialog(review_id: str) -> None:
+            rev_df = reviews[reviews["id"] == review_id]
+            if rev_df.empty:
+                st.info("Selected Ergonomics review could not be found.")
+                if st.button("Close", key=f"close_missing_ergo_slide_{review_id}"):
+                    _clear_ergo_slide_dialog_state(review_id)
+                    st.session_state.pop(f"ergo_edit_slide_active_{scenario_id}", None)
+                    st.rerun(scope="app")
+                return
+
+            rev_row = dict(rev_df.iloc[0])
+            cur_we_id = _clean_text(rev_row.get("work_element_id"))
+            cur_pitch = _clean_text(rev_row.get("pitch")) or "Unlinked"
+            cur_we_label = _clean_text(rev_row.get("work_element_label"))
+            cur_legacy = _clean_text(rev_row.get("legacy_description"))
+            cur_status = _clean_text(rev_row.get("status")) or "Started"
+            cur_risk = _clean_text(rev_row.get("risk_classification")) or "Not yet assessed"
+            cur_reviewer = _clean_text(rev_row.get("reviewer")) or _clean_text(
+                st.session_state.get("current_editor")
+            )
+            cur_notes = _clean_text(rev_row.get("notes"))
+            cur_hazards = [
+                hid for hid in _id_list(rev_row.get("hazard_option_ids")) if hid in hazard_options
+            ]
+            cur_due_str = _date_value(rev_row.get("requested_due_date"))
+            cur_due_date: date | None = None
+            if cur_due_str:
+                try:
+                    cur_due_date = date.fromisoformat(cur_due_str)
+                except ValueError:
+                    cur_due_date = None
+            cur_ppo_id = _clean_text(rev_row.get("process_part_option_id")) or None
+            upstream_changed = bool(rev_row.get("upstream_changed"))
+            upstream_diff = _clean_text(rev_row.get("upstream_diff_summary"))
+
+            cur_tool_assessments = get_ergonomics_review_tool_assessments(
+                project_id, scenario_id, review_id
+            )
+            dlg_media = get_ergonomics_visual_media(project_id, scenario_id, review_id)
+
+            cur_selected_tools: list[str] = []
+            cur_tool_notes_map: dict[str, str] = {}
+            for ta in cur_tool_assessments:
+                t_name = _clean_text(ta.get("tool_name"))
+                if t_name in ERGONOMIC_ASSESSMENT_TOOLS and t_name not in cur_tool_notes_map:
+                    cur_selected_tools.append(t_name)
+                    cur_tool_notes_map[t_name] = _clean_text(ta.get("notes"))
+            for m_item in dlg_media:
+                m_tool = _clean_text(m_item.get("tool_name"))
+                if m_tool in ERGONOMIC_ASSESSMENT_TOOLS and m_tool not in cur_tool_notes_map:
+                    cur_selected_tools.append(m_tool)
+                    cur_tool_notes_map[m_tool] = ""
+
+            draft_key = f"ergo_slide_edit_draft_{review_id}"
+            if draft_key not in st.session_state or not isinstance(st.session_state.get(draft_key), dict):
+                st.session_state[draft_key] = {
+                    "status": cur_status if cur_status in ERGONOMICS_REVIEW_STATUSES else "Started",
+                    "risk_classification": (
+                        cur_risk if cur_risk in ERGONOMICS_RISK_CLASSIFICATIONS else "Not yet assessed"
+                    ),
+                    "reviewer": cur_reviewer,
+                    "requested_due_date": cur_due_date,
+                    "hazard_option_ids": list(cur_hazards),
+                    "new_hazards": "",
+                    "legacy_description": cur_legacy,
+                    "notes": cur_notes,
+                    "target_work_element_id": "",
+                    "selected_tools": list(cur_selected_tools),
+                    "tool_notes": dict(cur_tool_notes_map),
+                }
+            draft = st.session_state[draft_key]
+
+            status_opts = list(ERGONOMICS_REVIEW_STATUSES)
+            risk_opts = list(ERGONOMICS_RISK_CLASSIFICATIONS)
+            status_wkey = f"dlg_ergo_status_{review_id}"
+            risk_wkey = f"dlg_ergo_risk_{review_id}"
+            reviewer_wkey = f"dlg_ergo_reviewer_{review_id}"
+            due_wkey = f"dlg_ergo_due_{review_id}"
+            hazards_wkey = f"dlg_ergo_hazards_{review_id}"
+            new_hazards_wkey = f"dlg_ergo_new_hazards_{review_id}"
+            legacy_wkey = f"dlg_ergo_legacy_{review_id}"
+            link_we_wkey = f"dlg_ergo_link_we_{review_id}"
+            notes_wkey = f"dlg_ergo_notes_{review_id}"
+            tools_wkey = f"dlg_ergo_tools_{review_id}"
+
+            if status_wkey not in st.session_state or st.session_state[status_wkey] not in status_opts:
+                st.session_state[status_wkey] = (
+                    draft["status"] if draft.get("status") in status_opts else status_opts[0]
+                )
+            if risk_wkey not in st.session_state or st.session_state[risk_wkey] not in risk_opts:
+                st.session_state[risk_wkey] = (
+                    draft["risk_classification"]
+                    if draft.get("risk_classification") in risk_opts
+                    else risk_opts[0]
+                )
+            if reviewer_wkey not in st.session_state:
+                st.session_state[reviewer_wkey] = str(draft.get("reviewer") or "")
+            if due_wkey not in st.session_state:
+                st.session_state[due_wkey] = draft.get("requested_due_date")
+            if hazards_wkey not in st.session_state:
+                st.session_state[hazards_wkey] = [
+                    hid for hid in (draft.get("hazard_option_ids") or []) if hid in hazard_options
+                ]
+            else:
+                st.session_state[hazards_wkey] = [
+                    hid for hid in (st.session_state.get(hazards_wkey) or []) if hid in hazard_options
+                ]
+            if new_hazards_wkey not in st.session_state:
+                st.session_state[new_hazards_wkey] = str(draft.get("new_hazards") or "")
+            if legacy_wkey not in st.session_state:
+                st.session_state[legacy_wkey] = str(draft.get("legacy_description") or "")
+            if not cur_we_id:
+                target_opts = work_options
+                if link_we_wkey not in st.session_state or st.session_state[link_we_wkey] not in target_opts:
+                    cur_target = str(draft.get("target_work_element_id") or "")
+                    st.session_state[link_we_wkey] = cur_target if cur_target in target_opts else ""
+            if notes_wkey not in st.session_state:
+                st.session_state[notes_wkey] = str(draft.get("notes") or "")
+            if tools_wkey not in st.session_state:
+                st.session_state[tools_wkey] = [
+                    t
+                    for t in (draft.get("selected_tools") or cur_selected_tools)
+                    if t in ERGONOMIC_ASSESSMENT_TOOLS
+                ]
+            else:
+                st.session_state[tools_wkey] = [
+                    t
+                    for t in (st.session_state.get(tools_wkey) or [])
+                    if t in ERGONOMIC_ASSESSMENT_TOOLS
+                ]
+
+            if cur_we_id:
+                st.info(f"**Process Step:** {cur_pitch} · {cur_we_label or cur_we_id}")
+            else:
+                st.info("**Unlinked Legacy Concern** — Not yet linked to a Process at a Glance step.")
+
+            if upstream_changed:
+                st.warning(
+                    f"**Upstream Process step changed since last review:** {upstream_diff or 'Step details updated.'}\n\n"
+                    "Saving this slide will update the assessment and clear the upstream change flag."
+                )
+
+            st.markdown("##### Ergonomics Assessment & Slide Details")
+            e_c1, e_c2 = st.columns(2)
+            with e_c1:
+                edit_status = st.selectbox(
+                    "Status",
+                    options=status_opts,
+                    key=status_wkey,
+                )
+                draft["status"] = edit_status
+
+                edit_risk = st.selectbox(
+                    "Risk classification",
+                    options=risk_opts,
+                    key=risk_wkey,
+                    help=(
+                        "Favorable Red and Favorable Green are assessments on a "
+                        "non-production-intent part awaiting confirmation. Red and Green are "
+                        "confirmed on the production-intent part."
+                    ),
+                )
+                draft["risk_classification"] = edit_risk
+
+                edit_reviewer = st.text_input(
+                    "Reviewer",
+                    key=reviewer_wkey,
+                )
+                draft["reviewer"] = edit_reviewer
+
+                edit_due_date = st.date_input(
+                    "Requested due date",
+                    format="YYYY-MM-DD",
+                    key=due_wkey,
+                )
+                draft["requested_due_date"] = edit_due_date
+
+            with e_c2:
+                edit_hazards = st.multiselect(
+                    "Hazard tags",
+                    options=hazard_options,
+                    format_func=lambda value: hazard_label_by_id.get(value, value),
+                    key=hazards_wkey,
+                )
+                draft["hazard_option_ids"] = list(edit_hazards)
+
+                edit_new_hazards = st.text_input(
+                    "Add new hazard tag(s) (comma-separated, optional)",
+                    placeholder="e.g. Pinch grip, Overhead reach",
+                    key=new_hazards_wkey,
+                )
+                draft["new_hazards"] = edit_new_hazards
+
+                edit_legacy = st.text_input(
+                    "Legacy concern / title",
+                    placeholder="Optional legacy concern title or slide subtitle",
+                    key=legacy_wkey,
+                )
+                draft["legacy_description"] = edit_legacy
+
+                edit_target_we_id = ""
+                if not cur_we_id:
+                    edit_target_we_id = st.selectbox(
+                        "Link to Process step (optional)",
+                        options=work_options,
+                        format_func=lambda value: (
+                            "Keep unlinked — no Process step"
+                            if not value
+                            else work_label_by_id.get(value, value)
+                        ),
+                        key=link_we_wkey,
+                        help="Select a Process step to link and merge this legacy concern when saving.",
+                    )
+                    draft["target_work_element_id"] = edit_target_we_id
+
+            st.divider()
+            st.markdown("##### Ergonomic Assessment Tools & Findings")
+            st.caption(
+                "Select the ergonomic assessment tools used to establish the Status and Risk classification. "
+                "For each selected tool, enter tool-specific notes and attach images, videos, or supporting documents."
+            )
+            edit_selected_tools = st.multiselect(
+                "Ergonomic assessment tools used",
+                options=list(ERGONOMIC_ASSESSMENT_TOOLS),
+                key=tools_wkey,
+                placeholder="Select one or more tools (Delmia, Work(s), Handpak, Shoulder Tool, NIOSH Single/Multi Task, Humantech, ErgoNOVA, Force Test)...",
+            )
+            draft["selected_tools"] = list(edit_selected_tools)
+
+            pending_upload_bundles: list[dict] = []
+            for t_name in edit_selected_tools:
+                t_slug = _tool_slug(t_name)
+                t_notes_wkey = f"dlg_ergo_tool_notes_{review_id}_{t_slug}"
+                if t_notes_wkey not in st.session_state:
+                    st.session_state[t_notes_wkey] = str(
+                        draft.get("tool_notes", {}).get(t_name, cur_tool_notes_map.get(t_name, ""))
+                    )
+                t_media = [m for m in dlg_media if _clean_text(m.get("tool_name")) == t_name]
+                with st.container(border=True):
+                    st.markdown(f"###### :material/build: {t_name} Assessment")
+                    t_notes_val = st.text_area(
+                        f"{t_name} assessment notes & findings",
+                        height=85,
+                        placeholder=f"Summarize {t_name} results, scores, thresholds, and ergonomic recommendations...",
+                        key=t_notes_wkey,
+                    )
+                    draft.setdefault("tool_notes", {})[t_name] = t_notes_val
+
+                    if t_media:
+                        st.markdown(f"**Attached {t_name} Visual Aids & Documents ({len(t_media)})**")
+                        for media_item in t_media:
+                            _render_ergo_media_card(media_item, key_prefix="dlg")
+
+                    with st.expander(
+                        f"Add Image, Video, or Document for {t_name}",
+                        expanded=not bool(t_media),
+                        icon=":material/attach_file:",
+                    ):
+                        pending_bundle = _render_ergo_attachment_uploader(
+                            scope_id=f"{review_id}_{t_slug}",
+                            target_review_id=review_id,
+                            fixed_tool_name=t_name,
+                            next_seq_default=(len(dlg_media) + 1) * 10,
+                            key_prefix="dlg",
+                            button_type="secondary",
+                        )
+                        pending_upload_bundles.append(pending_bundle)
+
+            edit_notes = st.text_area(
+                "General assessment notes & action items (optional)",
+                height=85,
+                placeholder="Document overall ergonomic observations, countermeasures, and follow-up actions...",
+                key=notes_wkey,
+            )
+            draft["notes"] = edit_notes
+            st.session_state[draft_key] = draft
+
+            general_media = [
+                m for m in dlg_media if _clean_text(m.get("tool_name")) not in edit_selected_tools
+            ]
+            st.divider()
+            st.markdown(
+                f"##### General Visual Aids & Unassigned Attachments ({len(general_media)} attached)"
+            )
+            st.caption(
+                "Manage general workstation photos, videos, or documents not assigned to one of the selected tools above."
+            )
+            if general_media:
+                for media_item in general_media:
+                    _render_ergo_media_card(media_item, key_prefix="dlg")
+
+            with st.expander(
+                "Add General Visual Aid or Document",
+                expanded=not bool(edit_selected_tools) and not bool(general_media),
+                icon=":material/add_photo_alternate:",
+            ):
+                gen_bundle = _render_ergo_attachment_uploader(
+                    scope_id=review_id,
+                    target_review_id=review_id,
+                    fixed_tool_name=None,
+                    next_seq_default=(len(dlg_media) + 1) * 10,
+                    key_prefix="dlg",
+                    button_type="secondary",
+                )
+                pending_upload_bundles.append(gen_bundle)
+
+            st.divider()
+            act_bar = st.container(horizontal=True)
+            if act_bar.button("Cancel", key=f"dlg_cancel_ergo_slide_{review_id}"):
+                _clear_ergo_slide_dialog_state(review_id)
+                st.session_state.pop(f"ergo_edit_slide_active_{scenario_id}", None)
+                st.rerun(scope="app")
+            if act_bar.button(
+                "Save & Refresh",
+                type="primary",
+                icon=":material/save:",
+                key=f"dlg_save_ergo_slide_{review_id}",
+            ):
+                try:
+                    editor_name = _clean_text(st.session_state.get("current_editor")) or "Collaborator"
+                    assigned_hazard_ids = list(edit_hazards)
+                    if edit_new_hazards.strip():
+                        for tag in edit_new_hazards.split(","):
+                            tag_clean = tag.strip()
+                            if tag_clean:
+                                tag_id = create_or_get_ergonomic_hazard_option(project_id, tag_clean)
+                                if tag_id not in assigned_hazard_ids:
+                                    assigned_hazard_ids.append(tag_id)
+
+                    tool_assessments_payload = [
+                        {
+                            "tool_name": t_name,
+                            "notes": _clean_text(
+                                st.session_state.get(
+                                    f"dlg_ergo_tool_notes_{review_id}_{_tool_slug(t_name)}",
+                                    draft.get("tool_notes", {}).get(t_name, ""),
+                                )
+                            ),
+                        }
+                        for t_name in edit_selected_tools
+                    ]
+
+                    save_res = save_ergonomics_review(
+                        project_id,
+                        scenario_id,
+                        {
+                            "id": review_id,
+                            "work_element_id": cur_we_id or None,
+                            "process_part_option_id": cur_ppo_id,
+                            "status": edit_status,
+                            "risk_classification": edit_risk,
+                            "reviewer": edit_reviewer.strip(),
+                            "notes": edit_notes.strip(),
+                            "requested_due_date": (
+                                edit_due_date.isoformat() if edit_due_date else None
+                            ),
+                            "legacy_description": edit_legacy.strip(),
+                            "hazard_option_ids": assigned_hazard_ids,
+                            "tool_assessments": tool_assessments_payload,
+                        },
+                    )
+                    record_audit_event(
+                        project_id,
+                        "Ergonomics reviews",
+                        "Save & Refresh",
+                        1,
+                        editor_name,
+                        {
+                            "scenario_id": scenario_id,
+                            "updated_ids": [review_id],
+                            "store_timestamp": save_res["timestamp"],
+                        },
+                    )
+
+                    final_rid = review_id
+                    if not cur_we_id and edit_target_we_id:
+                        link_res = link_legacy_concern_to_work_element(
+                            project_id,
+                            scenario_id,
+                            review_id,
+                            edit_target_we_id,
+                            editor_name=editor_name,
+                        )
+                        final_rid = link_res["surviving_id"]
+
+                    for media_item in dlg_media:
+                        m_id = media_item["id"]
+                        edited_cap = _clean_text(st.session_state.get(f"dlg_cap_edit_{m_id}"))
+                        edited_tool = _clean_text(
+                            st.session_state.get(
+                                f"dlg_tool_edit_{m_id}", media_item.get("tool_name", "")
+                            )
+                        )
+                        edited_seq = int(
+                            st.session_state.get(
+                                f"dlg_seq_edit_{m_id}", media_item.get("sequence", 10)
+                            )
+                        )
+                        orig_cap = _clean_text(media_item.get("caption"))
+                        orig_tool = _clean_text(media_item.get("tool_name"))
+                        orig_seq = int(media_item.get("sequence", 10))
+                        if (
+                            edited_cap != orig_cap
+                            or edited_seq != orig_seq
+                            or edited_tool != orig_tool
+                        ):
+                            update_ergonomics_visual_media(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                media_id=m_id,
+                                caption=edited_cap,
+                                sequence=edited_seq,
+                                tool_name=edited_tool,
+                                current_editor=editor_name,
+                            )
+
+                    for bundle in pending_upload_bundles:
+                        b_staged = bundle.get("staged")
+                        b_up_file = bundle.get("uploaded_file")
+                        if isinstance(b_staged, dict) and b_staged.get("composite_bytes"):
+                            save_ergonomics_visual_media(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                review_id=final_rid,
+                                filename=b_staged["filename"],
+                                file_bytes=b_staged["composite_bytes"],
+                                original_file_bytes=b_staged["original_bytes"],
+                                annotations_json=b_staged.get("annotations_json", ""),
+                                caption=bundle["caption"],
+                                sequence=int(bundle["sequence"]),
+                                tool_name=bundle["tool_name"],
+                                current_editor=editor_name,
+                            )
+                            st.session_state.pop(bundle["staged_ergo_key"], None)
+                            st.session_state.pop(bundle["last_ergo_paste_hash_key"], None)
+                            st.session_state.pop(bundle["last_ergo_upload_hash_key"], None)
+                            st.session_state.pop(bundle["discarded_ergo_up_key"], None)
+                            st.session_state[bundle["up_nonce_key"]] = int(bundle["up_nonce"]) + 1
+                        elif b_up_file is not None:
+                            save_ergonomics_visual_media(
+                                project_id=project_id,
+                                scenario_id=scenario_id,
+                                review_id=final_rid,
+                                filename=b_up_file.name,
+                                file_bytes=b_up_file.getvalue(),
+                                caption=bundle["caption"],
+                                sequence=int(bundle["sequence"]),
+                                tool_name=bundle["tool_name"],
+                                current_editor=editor_name,
+                            )
+                            st.session_state[bundle["up_nonce_key"]] = int(bundle["up_nonce"]) + 1
+
+                    _clear_ergo_slide_dialog_state(review_id)
+                    st.session_state.pop(f"ergo_edit_slide_active_{scenario_id}", None)
+                    request_table_editor_reset(logical_editor_key)
+                    st.session_state.pop(editor_key, None)
+                    st.session_state.pop(f"_table_editor_frozen_base_{editor_key}", None)
+                    st.session_state.pop(view_slide_click_key, None)
+                    _activate_ergo_slide(final_rid)
+                    st.toast("Ergonomics slide saved", icon=":material/check_circle:")
+                    st.rerun(scope="app")
+                except Exception as exc:
+                    st.error(str(exc))
 
 
         if st.session_state.get(f"show_add_legacy_dialog_{scenario_id}"):
@@ -1863,27 +2744,35 @@ elif review_tab.open:
         st.divider()
         st.subheader("Ergonomics Review Slides", anchor="ergonomics-slides")
         if st.session_state.pop("ergo_scroll_to_slides", False):
+            scroll_nonce = int(st.session_state.get("ergo_scroll_nonce", 0))
             st.html(
-                """<script>
-                function scrollToErgoSlides() {
-                    try {
-                        const parentDoc = window.parent ? window.parent.document : document;
-                        const elem = (parentDoc && parentDoc.getElementById('ergo-slides-section')) || document.getElementById('ergo-slides-section');
-                        if (elem) {
-                            elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                            return true;
-                        }
-                    } catch (e) {
-                        const elem = document.getElementById('ergo-slides-section');
-                        if (elem) {
-                            elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                setTimeout(scrollToErgoSlides, 150);
-                setTimeout(scrollToErgoSlides, 450);
+                f"""<script>
+                // scroll_nonce: {scroll_nonce}
+                (function() {{
+                    function scrollToErgoSlides() {{
+                        try {{
+                            const parentDoc = window.parent ? window.parent.document : document;
+                            const elem =
+                                (parentDoc && (parentDoc.getElementById('ergonomics-slides') || parentDoc.getElementById('ergo-slides-section'))) ||
+                                document.getElementById('ergonomics-slides') ||
+                                document.getElementById('ergo-slides-section');
+                            if (elem) {{
+                                elem.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                                return true;
+                            }}
+                        }} catch (e) {{
+                            const elem = document.getElementById('ergonomics-slides') || document.getElementById('ergo-slides-section');
+                            if (elem) {{
+                                elem.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                    scrollToErgoSlides();
+                    setTimeout(scrollToErgoSlides, 100);
+                    setTimeout(scrollToErgoSlides, 350);
+                }})();
                 </script>""",
                 unsafe_allow_javascript=True,
             )
@@ -1907,12 +2796,14 @@ elif review_tab.open:
             st.info("No saved Ergonomics reviews exist for this planning scenario yet. Add or link a review in the table above to view and present Ergonomics slides.")
         else:
             selected_rid_key = f"ergo_slide_selected_review_{scenario_id}"
+            select_widget_key = f"ergo_slide_select_{scenario_id}"
             if selected_rid_key not in st.session_state or st.session_state[selected_rid_key] not in dict(review_options):
                 st.session_state[selected_rid_key] = review_options[0][0]
 
             curr_rid = st.session_state[selected_rid_key]
             review_ids = [rid for rid, _ in review_options]
             curr_idx = review_ids.index(curr_rid) if curr_rid in review_ids else 0
+            st.session_state[select_widget_key] = curr_rid
 
             if st.session_state.get(f"ergo_present_active_{scenario_id}"):
                 ergo_presentation_dialog(
@@ -1975,7 +2866,7 @@ elif review_tab.open:
                             disc_up_key = f"_discarded_ergo_up_{discard_rid}"
                             st.toast("Discarded staged visual aid", icon=":material/delete:")
                             cur_st = st.session_state.get(st_key)
-                            if isinstance(cur_st, dict) and cur_st.get("source") == "upload":
+                            if isinstance(cur_st, dict) and cur_st.get("source") in ("upload", "dialog_upload"):
                                 st.session_state[disc_up_key] = cur_st.get("hash")
                             st.session_state.pop(st_key, None)
                             st.session_state.pop(f"last_ergo_paste_hash_{discard_rid}", None)
@@ -1986,15 +2877,25 @@ elif review_tab.open:
                             st.rerun()
 
                 confirm_discard_staged_ergo_media()
+            elif st.session_state.get(f"ergo_edit_slide_active_{scenario_id}"):
+                edit_target_rid = _clean_text(
+                    st.session_state.get(f"ergo_edit_slide_active_{scenario_id}")
+                ) or curr_rid
+                edit_ergo_slide_dialog(review_id=edit_target_rid)
 
-            ergo_sel_col, ergo_act_col = st.columns([2.2, 2.8], vertical_alignment="center")
+            def _on_ergo_slide_select_change() -> None:
+                chosen = _clean_text(st.session_state.get(select_widget_key))
+                if chosen:
+                    st.session_state[selected_rid_key] = chosen
+
+            ergo_sel_col, ergo_act_col = st.columns([1.9, 3.1], vertical_alignment="center")
             with ergo_sel_col:
                 new_sel = st.selectbox(
                     "Jump to Review",
                     options=review_ids,
-                    index=curr_idx,
                     format_func=lambda rid: dict(review_options).get(rid, rid),
-                    key=f"ergo_slide_select_{scenario_id}",
+                    key=select_widget_key,
+                    on_change=_on_ergo_slide_select_change,
                     label_visibility="collapsed",
                 )
                 if new_sel != curr_rid:
@@ -2004,10 +2905,24 @@ elif review_tab.open:
             with ergo_act_col:
                 ergo_nav_bar = st.container(horizontal=True, vertical_alignment="center")
                 if ergo_nav_bar.button("◀ Back", disabled=(curr_idx == 0), key=f"ergo_slide_prev_{scenario_id}"):
-                    st.session_state[selected_rid_key] = review_ids[curr_idx - 1]
+                    prev_rid = review_ids[curr_idx - 1]
+                    st.session_state[selected_rid_key] = prev_rid
+                    st.session_state[select_widget_key] = prev_rid
                     st.rerun()
                 if ergo_nav_bar.button("Next ▶", disabled=(curr_idx >= len(review_ids) - 1), key=f"ergo_slide_next_{scenario_id}"):
-                    st.session_state[selected_rid_key] = review_ids[curr_idx + 1]
+                    next_rid = review_ids[curr_idx + 1]
+                    st.session_state[selected_rid_key] = next_rid
+                    st.session_state[select_widget_key] = next_rid
+                    st.rerun()
+                if ergo_nav_bar.button(
+                    "Edit Slide",
+                    icon=":material/edit:",
+                    type="primary",
+                    key=f"btn_ergo_edit_slide_{scenario_id}",
+                    help="Edit Ergonomics assessment fields, hazard tags, notes, and visual aids for this slide",
+                ):
+                    _clear_ergo_slide_dialog_state(curr_rid)
+                    st.session_state[f"ergo_edit_slide_active_{scenario_id}"] = curr_rid
                     st.rerun()
                 if ergo_nav_bar.button("Present", icon=":material/slideshow:", key=f"btn_ergo_present_{scenario_id}", help="Full-screen PowerPoint presentation mode"):
                     st.session_state[f"ergo_present_active_{scenario_id}"] = True
@@ -2045,236 +2960,57 @@ elif review_tab.open:
                 slide_summary = {}
 
             attached_media = slide_summary.get("media", [])
+            attached_docs = [
+                m
+                for m in attached_media
+                if str(m.get("media_type") or "").lower() == "document"
+            ]
+            if attached_docs:
+                with st.container(border=True):
+                    st.markdown("**📄 Attached Assessment Documents**")
+                    doc_bar = st.container(horizontal=True)
+                    for doc_item in attached_docs:
+                        doc_id = doc_item["id"]
+                        doc_tool = _clean_text(doc_item.get("tool_name"))
+                        raw_fname = _clean_text(doc_item.get("original_filename")) or Path(
+                            str(doc_item.get("file_path") or "")
+                        ).name
+                        doc_label = (
+                            f"{doc_tool}: {raw_fname}" if doc_tool else (raw_fname or "Document")
+                        )
+                        doc_path = Path(str(doc_item.get("file_path") or ""))
+                        if doc_path.exists() and doc_path.is_file():
+                            doc_bar.download_button(
+                                label=doc_label,
+                                data=doc_path.read_bytes(),
+                                file_name=raw_fname or doc_path.name,
+                                key=f"slide_dl_doc_{doc_id}",
+                                icon=":material/download:",
+                            )
+
             with st.expander(
-                f"Visual Aids Manager ({len(attached_media)} attached)",
+                f"Visual Aids & Attachments Manager ({len(attached_media)} attached)",
                 expanded=False,
                 icon=":material/photo_library:",
             ):
-                st.markdown("##### Add Visual Aid")
+                st.markdown("##### Add Visual Aid or Supporting Document")
                 st.caption(
-                    "Upload photos, paste screenshots, or attach short video clips to display on this Ergonomics review slide. "
-                    "Images can be cropped, rotated in 90° increments, and annotated with arrows, callouts, boxes, circles, and step badges before or after attaching."
+                    "Upload photos, paste screenshots, attach video clips, or upload supporting documents (PDF, Excel, Word, CSV, PowerPoint, TXT) "
+                    "and optionally link them to a specific Ergonomic Assessment Tool."
+                )
+                _render_ergo_attachment_uploader(
+                    scope_id=f"{curr_rid}_mgr",
+                    target_review_id=curr_rid,
+                    fixed_tool_name=None,
+                    next_seq_default=(len(attached_media) + 1) * 10,
+                    key_prefix="mgr",
+                    button_type="primary",
                 )
 
-                ergo_up_nonce_key = f"ergo_up_nonce_{curr_rid}"
-                ergo_up_nonce = int(st.session_state.get(ergo_up_nonce_key, 0))
-                up_c1, up_c2 = st.columns([1.5, 1])
-                with up_c1:
-                    uploaded_file = st.file_uploader(
-                        "Upload photo or video clip (PNG, JPG, WEBP max 10MB / MP4, MOV, WEBM max 25MB)",
-                        type=["png", "jpg", "jpeg", "webp", "mp4", "mov", "webm"],
-                        key=f"ergo_file_upload_{curr_rid}_{ergo_up_nonce}",
-                    )
-                    st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-                    pasted = clipboard_image(key=f"ergo_paste_{curr_rid}_{ergo_up_nonce}")
-
-                with up_c2:
-                    new_caption = st.text_input(
-                        "Caption / Yellow Callout Note",
-                        key=f"ergo_new_caption_{curr_rid}_{ergo_up_nonce}",
-                        placeholder="e.g. Ensure 2-hand palm button clear of pinch hazard",
-                    )
-                    new_seq = st.number_input(
-                        "Sequence Order",
-                        min_value=1,
-                        value=(len(attached_media) + 1) * 10,
-                        step=5,
-                        key=f"ergo_new_seq_{curr_rid}_{ergo_up_nonce}",
-                    )
-
-                staged_ergo_key = f"ergo_staged_media_{curr_rid}"
-                last_ergo_paste_hash_key = f"last_ergo_paste_hash_{curr_rid}"
-                last_ergo_upload_hash_key = f"last_ergo_upload_hash_{curr_rid}"
-                discarded_ergo_up_key = f"_discarded_ergo_up_{curr_rid}"
-                current_staged = st.session_state.get(staged_ergo_key)
-
-                pasted_payload = getattr(pasted, "image", None)
-                if pasted_payload:
-                    try:
-                        decoded = decode_clipboard_image(pasted_payload, max_bytes=10 * 1024 * 1024)
-                        clip_bytes = decoded["bytes"]
-                        clip_hash = hashlib.sha256(clip_bytes).hexdigest()
-                        if st.session_state.get(last_ergo_paste_hash_key) != clip_hash:
-                            st.session_state[last_ergo_paste_hash_key] = clip_hash
-                            st.session_state[staged_ergo_key] = {
-                                "source": "clipboard",
-                                "hash": clip_hash,
-                                "filename": decoded["name"],
-                                "original_bytes": clip_bytes,
-                                "composite_bytes": clip_bytes,
-                                "mime_type": decoded.get("mime_type", "image/png"),
-                                "annotations_json": "",
-                            }
-                            current_staged = st.session_state[staged_ergo_key]
-                    except Exception as pe:
-                        st.error(str(pe))
-
-                is_uploaded_video = False
-                if uploaded_file is not None:
-                    up_suffix = Path(uploaded_file.name).suffix.lower()
-                    if up_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
-                        up_bytes = uploaded_file.getvalue()
-                        up_hash = hashlib.sha256(up_bytes).hexdigest()
-                        if st.session_state.get(last_ergo_upload_hash_key) != up_hash or (
-                            not isinstance(current_staged, dict)
-                            and st.session_state.get(discarded_ergo_up_key) != up_hash
-                        ):
-                            st.session_state[last_ergo_upload_hash_key] = up_hash
-                            st.session_state.pop(discarded_ergo_up_key, None)
-                            up_mime = "image/png" if up_suffix == ".png" else "image/webp" if up_suffix == ".webp" else "image/jpeg"
-                            st.session_state[staged_ergo_key] = {
-                                "source": "upload",
-                                "hash": up_hash,
-                                "filename": uploaded_file.name,
-                                "original_bytes": up_bytes,
-                                "composite_bytes": up_bytes,
-                                "mime_type": up_mime,
-                                "annotations_json": "",
-                            }
-                            current_staged = st.session_state[staged_ergo_key]
-                    elif up_suffix in {".mp4", ".mov", ".webm"}:
-                        is_uploaded_video = True
-                else:
-                    st.session_state.pop(last_ergo_upload_hash_key, None)
-                    st.session_state.pop(discarded_ergo_up_key, None)
-                    if isinstance(current_staged, dict) and current_staged.get("source") == "upload":
-                        st.session_state.pop(staged_ergo_key, None)
-                        current_staged = None
-
-                if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
-                    with st.container(border=True):
-                        st.markdown(f"**Image Ready:** `{current_staged.get('filename')}`")
-                        sp1, sp2 = st.columns([1, 2.5])
-                        with sp1:
-                            st.image(current_staged["composite_bytes"], width=150)
-                        with sp2:
-                            raw_ann_str = str(current_staged.get("annotations_json") or "").strip()
-                            has_ann = bool(raw_ann_str and raw_ann_str != "[]")
-                            if has_ann:
-                                st.success("Markup / crop / rotation applied", icon=":material/draw:")
-                            else:
-                                st.caption(
-                                    "No annotations added yet. Click below to crop, rotate 90°, or add arrows, focus boxes, callouts, or step numbers."
-                                )
-                            staged_ergo_btns = st.container(horizontal=True)
-                            if staged_ergo_btns.button(
-                                "Annotate / Add Shapes",
-                                icon=":material/draw:",
-                                key=f"btn_ann_staged_ergo_{curr_rid}",
-                                type="secondary",
-                            ):
-                                st.session_state[f"ergo_annotate_staged_active_{scenario_id}"] = curr_rid
-                                st.rerun()
-                            if staged_ergo_btns.button(
-                                "Delete",
-                                icon=":material/delete:",
-                                key=f"destructive_btn_discard_staged_ergo_{curr_rid}",
-                            ):
-                                st.session_state[f"ergo_pending_discard_staged_{scenario_id}"] = curr_rid
-                                st.rerun()
-
-                has_ready_media = (isinstance(current_staged, dict) and bool(current_staged.get("composite_bytes"))) or is_uploaded_video
-                if st.button(
-                    "Attach Visual Aid",
-                    type="primary",
-                    icon=":material/add_photo_alternate:",
-                    disabled=not has_ready_media,
-                    key=f"btn_attach_media_{curr_rid}",
-                ):
-                    if isinstance(current_staged, dict) and current_staged.get("composite_bytes"):
-                        try:
-                            save_ergonomics_visual_media(
-                                project_id=project_id,
-                                scenario_id=scenario_id,
-                                review_id=curr_rid,
-                                filename=current_staged["filename"],
-                                file_bytes=current_staged["composite_bytes"],
-                                original_file_bytes=current_staged["original_bytes"],
-                                annotations_json=current_staged.get("annotations_json", ""),
-                                caption=new_caption,
-                                sequence=int(new_seq),
-                                current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
-                            )
-                            if current_staged.get("source") == "upload":
-                                st.session_state[discarded_ergo_up_key] = current_staged.get("hash")
-                            st.session_state.pop(staged_ergo_key, None)
-                            st.session_state.pop(staged_ergo_key, None)
-                            st.session_state.pop(last_ergo_paste_hash_key, None)
-                            st.session_state.pop(last_ergo_upload_hash_key, None)
-                            st.session_state.pop(discarded_ergo_up_key, None)
-                            st.session_state[ergo_up_nonce_key] = ergo_up_nonce + 1
-                            st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
-                            st.rerun()
-                        except Exception as save_err:
-                            st.error(str(save_err))
-                    elif uploaded_file is not None and is_uploaded_video:
-                        try:
-                            save_ergonomics_visual_media(
-                                project_id=project_id,
-                                scenario_id=scenario_id,
-                                review_id=curr_rid,
-                                filename=uploaded_file.name,
-                                file_bytes=uploaded_file.getvalue(),
-                                caption=new_caption,
-                                sequence=int(new_seq),
-                                current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
-                            )
-                            st.session_state.pop(staged_ergo_key, None)
-                            st.session_state.pop(last_ergo_paste_hash_key, None)
-                            st.session_state.pop(last_ergo_upload_hash_key, None)
-                            st.session_state.pop(discarded_ergo_up_key, None)
-                            st.session_state[ergo_up_nonce_key] = ergo_up_nonce + 1
-                            st.toast("Visual aid attached successfully!", icon=":material/check_circle:")
-                            st.rerun()
-                        except Exception as save_err:
-                            st.error(str(save_err))
-
                 if attached_media:
-                    st.markdown("##### Attached Visual Aids")
+                    st.markdown("##### Attached Visual Aids & Documents")
                     for media_item in attached_media:
-                        m_id = media_item["id"]
-                        m_type = media_item.get("media_type", "image")
-                        with st.container(border=True):
-                            m_c1, m_c2 = st.columns([1.2, 2.5])
-                            with m_c1:
-                                d_url = media_item.get("data_url") or media_item.get("file_path", "")
-                                if m_type == "video":
-                                    st.video(d_url)
-                                else:
-                                    st.image(d_url, width="stretch")
-                            with m_c2:
-                                card_cap = st.text_input("Caption", value=media_item.get("caption", ""), key=f"cap_edit_{m_id}")
-                                card_seq = st.number_input("Sequence", value=int(media_item.get("sequence", 10)), step=5, key=f"seq_edit_{m_id}")
-                                raw_item_ann = str(media_item.get("annotations_json") or "").strip()
-                                if raw_item_ann and raw_item_ann != "[]":
-                                    st.caption("Markup: :material/draw: **Annotated** (editable shapes, crop & rotation)")
-                                ergo_card_btns = st.container(horizontal=True)
-                                if ergo_card_btns.button("Save", key=f"btn_save_media_{m_id}"):
-                                    try:
-                                        update_ergonomics_visual_media(
-                                            project_id=project_id,
-                                            scenario_id=scenario_id,
-                                            media_id=m_id,
-                                            caption=card_cap,
-                                            sequence=int(card_seq),
-                                            current_editor=_clean_text(st.session_state.get("current_editor")) or "Collaborator",
-                                        )
-                                        st.toast("Visual aid updated.", icon=":material/check_circle:")
-                                        st.rerun()
-                                    except Exception as ue:
-                                        st.error(str(ue))
-                                if m_type == "image":
-                                    if ergo_card_btns.button(
-                                        "Annotate",
-                                        icon=":material/draw:",
-                                        key=f"btn_annot_media_{m_id}",
-                                        help="Crop, rotate 90°, or add/edit arrows, text callouts, shapes, and badges",
-                                    ):
-                                        st.session_state[f"ergo_annotate_active_{scenario_id}"] = media_item
-                                        st.rerun()
-                                if ergo_card_btns.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{m_id}"):
-                                    st.session_state[f"ergo_del_media_target_{scenario_id}"] = media_item
-                                    st.rerun()
+                        _render_ergo_media_card(media_item, key_prefix="mgr")
 
 
 
