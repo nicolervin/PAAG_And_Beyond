@@ -102,6 +102,242 @@ def _normalize_variant_tokens(
     return tokens or {"__all__"}
 
 
+def _group_same_pitch_yamazumi_rows(
+    rows: list[dict] | list[sqlite3.Row],
+    *,
+    keep_private_fields: bool = False,
+) -> list[dict]:
+    """Combine same-pitch Yamazumi element rows that represent the same step across model variants."""
+    grouped: list[dict] = []
+    candidates_by_sig: dict[tuple[str, str, str, str, float], list[dict]] = {}
+    candidates_by_pitch_proc: dict[tuple[str, str, str], dict] = {}
+    for raw_row in rows:
+        row = dict(raw_row)
+        row_id = str(row.get("id") or row.get("yamazumi_element_id") or "").strip()
+        row_variants = parse_yamazumi_model_variants(
+            row.get("model_variants"), row.get("model_variant")
+        )
+        row_variant_keys = (
+            {"__all__"}
+            if (
+                not row_variants
+                or any(
+                    v.casefold() in {"base", "all", "all models"}
+                    for v in row_variants
+                )
+            )
+            else {v.casefold() for v in row_variants}
+        )
+        raw_primary_variant = str(row.get("model_variant") or "").strip()
+        if not raw_primary_variant and len(row_variants) == 1:
+            raw_primary_variant = row_variants[0]
+        primary_variant_key = (
+            "__all__"
+            if (
+                not raw_primary_variant
+                or raw_primary_variant.casefold() in {"base", "all", "all models"}
+            )
+            else raw_primary_variant.casefold()
+        )
+        row_proc_id = str(row.get("process_element_id") or "").strip()
+        pitch_id = str(
+            row.get("pitch_id") or row.get("resolved_pitch_id") or ""
+        ).strip()
+        area_id = str(row.get("area_id") or "").strip()
+
+        if not pitch_id:
+            entry = dict(row)
+            entry["_member_ids"] = [row_id] if row_id else []
+            entry["_variants"] = list(row_variants)
+            entry["_seen_variants"] = {v.casefold() for v in row_variants}
+            entry["_variant_keys"] = set(row_variant_keys)
+            entry["_primary_variant_keys"] = {primary_variant_key}
+            entry["_process_element_id"] = row_proc_id
+            grouped.append(entry)
+            continue
+
+        work_type_key = (
+            str(row.get("work_type") or "Cycle").strip().casefold() or "cycle"
+        )
+        desc_text = (
+            row.get("description")
+            if "description" in row
+            else row.get("yamazumi_description")
+        )
+        desc_key = str(desc_text or "").strip().casefold()
+        raw_time = (
+            row.get("time_s")
+            if "time_s" in row
+            else row.get("yamazumi_time_s")
+        )
+        time_key = round(float(raw_time or 0.0), 6)
+        sig = (area_id, pitch_id, work_type_key, desc_key, time_key)
+
+        matched_group: dict | None = None
+        if row_proc_id:
+            matched_group = candidates_by_pitch_proc.get(
+                (area_id, pitch_id, row_proc_id)
+            )
+        if matched_group is None:
+            for candidate in candidates_by_sig.get(sig, []):
+                cand_proc_id = candidate["_process_element_id"]
+                if cand_proc_id and row_proc_id and cand_proc_id != row_proc_id:
+                    continue
+                if not (cand_proc_id and row_proc_id and cand_proc_id == row_proc_id):
+                    if (
+                        "__all__" in candidate["_variant_keys"]
+                        or "__all__" in row_variant_keys
+                    ):
+                        continue
+                    is_disjoint = row_variant_keys.isdisjoint(
+                        candidate["_variant_keys"]
+                    )
+                    is_different_primary_stack = (
+                        primary_variant_key != "__all__"
+                        and primary_variant_key
+                        not in candidate["_primary_variant_keys"]
+                    )
+                    is_multi_variant_subset = (
+                        (
+                            len(candidate["_variant_keys"]) > 1
+                            and row_variant_keys.issubset(
+                                candidate["_variant_keys"]
+                            )
+                        )
+                        or (
+                            len(row_variant_keys) > 1
+                            and candidate["_variant_keys"].issubset(
+                                row_variant_keys
+                            )
+                        )
+                    )
+                    if not (
+                        is_disjoint
+                        or is_different_primary_stack
+                        or is_multi_variant_subset
+                    ):
+                        continue
+                matched_group = candidate
+                break
+
+        if matched_group is not None:
+            if row_id and row_id not in matched_group["_member_ids"]:
+                matched_group["_member_ids"].append(row_id)
+            for v in row_variants:
+                vk = v.casefold()
+                if vk not in matched_group["_seen_variants"]:
+                    matched_group["_seen_variants"].add(vk)
+                    matched_group["_variants"].append(v)
+            matched_group["_variant_keys"].update(row_variant_keys)
+            matched_group["_primary_variant_keys"].add(primary_variant_key)
+            if not matched_group["_process_element_id"] and row_proc_id:
+                matched_group["_process_element_id"] = row_proc_id
+                matched_group["process_element_id"] = row_proc_id
+                candidates_by_pitch_proc[(area_id, pitch_id, row_proc_id)] = (
+                    matched_group
+                )
+                if "process_sync_status" in row and row.get("process_sync_status"):
+                    matched_group["process_sync_status"] = row["process_sync_status"]
+            if "process_reflected" in matched_group or "process_reflected" in row:
+                matched_group["process_reflected"] = (
+                    1
+                    if (
+                        int(matched_group.get("process_reflected") or 0)
+                        or int(row.get("process_reflected") or 0)
+                    )
+                    else 0
+                )
+            if (
+                "material_group_count" in matched_group
+                or "material_group_count" in row
+            ):
+                matched_group["material_group_count"] = max(
+                    int(matched_group.get("material_group_count") or 0),
+                    int(row.get("material_group_count") or 0),
+                )
+        else:
+            entry = dict(row)
+            entry["_member_ids"] = [row_id] if row_id else []
+            entry["_variants"] = list(row_variants)
+            entry["_seen_variants"] = {v.casefold() for v in row_variants}
+            entry["_variant_keys"] = set(row_variant_keys)
+            entry["_primary_variant_keys"] = {primary_variant_key}
+            entry["_process_element_id"] = row_proc_id
+            grouped.append(entry)
+            candidates_by_sig.setdefault(sig, []).append(entry)
+            if row_proc_id:
+                candidates_by_pitch_proc[(area_id, pitch_id, row_proc_id)] = entry
+
+    for group in grouped:
+        combined_variants = list(group.get("_variants") or ["All models"])
+        if any(
+            v.casefold() in {"base", "all", "all models"}
+            for v in combined_variants
+        ):
+            combined_variants = ["All models"]
+        group["model_variant"] = combined_variants[0]
+        group["model_variants"] = json.dumps(combined_variants)
+        if "process_element_id" in group:
+            group["process_element_id"] = group.get("_process_element_id") or None
+        if not keep_private_fields:
+            group.pop("_member_ids", None)
+            group.pop("_variants", None)
+            group.pop("_seen_variants", None)
+            group.pop("_variant_keys", None)
+            group.pop("_primary_variant_keys", None)
+            group.pop("_process_element_id", None)
+    return grouped
+
+
+def _find_same_pitch_yamazumi_group_for_element(
+    conn: sqlite3.Connection,
+    project_id: str,
+    scenario_id: str,
+    yamazumi_element_id: str,
+) -> dict | None:
+    """Resolve the same-pitch variant group containing yamazumi_element_id."""
+    clean_id = str(yamazumi_element_id or "").strip()
+    if not clean_id:
+        return None
+    target = conn.execute(
+        """SELECT e.*, p.pitch_number, a.name AS area_name, a.section_id,
+                  COALESCE(NULLIF(TRIM(e.work_type), ''), 'Cycle') AS work_type
+           FROM yamazumi_elements e
+           LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
+           JOIN yamazumi_areas a ON a.id=e.area_id
+           WHERE e.id=? AND e.project_id=? AND a.scenario_id=?""",
+        (clean_id, project_id, scenario_id),
+    ).fetchone()
+    if not target:
+        return None
+    target_pitch_id = str(target["pitch_id"] or "").strip()
+    if not target_pitch_id:
+        groups = _group_same_pitch_yamazumi_rows(
+            [dict(target)], keep_private_fields=True
+        )
+        return groups[0] if groups else None
+    pitch_rows = conn.execute(
+        """SELECT e.*, p.pitch_number, a.name AS area_name, a.section_id,
+                  COALESCE(NULLIF(TRIM(e.work_type), ''), 'Cycle') AS work_type
+           FROM yamazumi_elements e
+           LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
+           JOIN yamazumi_areas a ON a.id=e.area_id
+           WHERE e.project_id=? AND a.scenario_id=? AND e.area_id=? AND e.pitch_id=?
+           ORDER BY e.sequence, e.id""",
+        (project_id, scenario_id, target["area_id"], target_pitch_id),
+    ).fetchall()
+    groups = _group_same_pitch_yamazumi_rows(
+        pitch_rows, keep_private_fields=True
+    )
+    for group in groups:
+        if clean_id in (group.get("_member_ids") or []):
+            return group
+    fallback = _group_same_pitch_yamazumi_rows(
+        [dict(target)], keep_private_fields=True
+    )
+    return fallback[0] if fallback else None
+
+
 def _resolve_target_variant_tokens(
     conn: sqlite3.Connection,
     project_id: str,
@@ -125,21 +361,17 @@ def _resolve_target_variant_tokens(
     resolved_we_id = str(work_element_id or "").strip() or None
     resolved_yam_id = str(yamazumi_element_id or "").strip() or None
     if resolved_yam_id:
-        yam_row = conn.execute(
-            """SELECT e.model_variants, e.model_variant, e.process_element_id
-               FROM yamazumi_elements e
-               JOIN yamazumi_areas a ON a.id=e.area_id
-               WHERE e.id=? AND e.project_id=? AND a.scenario_id=?""",
-            (resolved_yam_id, project_id, scenario_id),
-        ).fetchone()
+        yam_row = _find_same_pitch_yamazumi_group_for_element(
+            conn, project_id, scenario_id, resolved_yam_id
+        )
         if yam_row:
             yam_items = _extract_raw_variant_items(
-                yam_row["model_variants"], yam_row["model_variant"]
+                yam_row.get("model_variants"), yam_row.get("model_variant")
             )
             yam_tokens = _normalize_variant_tokens(yam_items, amap)
             if yam_tokens != {"__all__"}:
                 return yam_tokens
-            if not resolved_we_id and yam_row["process_element_id"]:
+            if not resolved_we_id and yam_row.get("process_element_id"):
                 resolved_we_id = (
                     str(yam_row["process_element_id"]).strip() or None
                 )
@@ -553,7 +785,7 @@ def yamazumi_elements_for_section(
            WHERE element.project_id=? AND area.scenario_id=? AND area.section_id=?
              AND LOWER(COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle')) = 'cycle'
            GROUP BY element.id
-           ORDER BY area.name, pitch.sequence, element.sequence""",
+           ORDER BY area.name, pitch.sequence, element.sequence, element.id""",
         (project_id, scenario_id, section_id),
     )
     if not rows:
@@ -565,7 +797,7 @@ def yamazumi_elements_for_section(
                 "material_group_count",
             ]
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(_group_same_pitch_yamazumi_rows(rows))
 
 @cached_store_read
 def yamazumi_context_for_process(project_id: str, scenario_id: str) -> pd.DataFrame:
@@ -610,33 +842,39 @@ def _yamazumi_context_raw_df(project_id: str, scenario_id: str) -> pd.DataFrame:
                    element.description AS yamazumi_description,
                    element.time_s AS yamazumi_time_s,
                    element.model_variant, element.model_variants,
+                   COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle') AS work_type,
+                   area.id AS area_id,
                    area.section_id AS section_id,
                    pitch.id AS pitch_id, pitch.pitch_number, pitch.pitch_name
            FROM yamazumi_elements element
            JOIN yamazumi_areas area ON area.id=element.area_id
            LEFT JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
            WHERE element.project_id=? AND area.scenario_id=?
-             AND element.process_element_id IS NOT NULL
-             AND TRIM(element.process_element_id) <> ''
-           ORDER BY area.name, pitch.sequence, element.sequence""",
+           ORDER BY area.name, pitch.sequence, element.sequence, element.id""",
         (project_id, scenario_id),
     )
-    return pd.DataFrame(rows)
+    grouped = [
+        {
+            k: v
+            for k, v in row.items()
+            if k not in {"work_type", "area_id"}
+        }
+        for row in _group_same_pitch_yamazumi_rows(rows)
+        if str(row.get("process_element_id") or "").strip()
+    ]
+    return pd.DataFrame(grouped)
 
 @cached_store_read
 def process_element_id_for_yamazumi(
     project_id: str, scenario_id: str, yamazumi_element_id: str
 ) -> str | None:
-    rows = query(
-        """SELECT element.process_element_id
-           FROM yamazumi_elements element
-           JOIN yamazumi_areas area ON area.id=element.area_id
-           WHERE element.id=? AND element.project_id=? AND area.scenario_id=?""",
-        (yamazumi_element_id, project_id, scenario_id),
-    )
-    if not rows:
+    with connection() as conn:
+        group = _find_same_pitch_yamazumi_group_for_element(
+            conn, project_id, scenario_id, yamazumi_element_id
+        )
+    if not group:
         return None
-    return str(rows[0].get("process_element_id") or "").strip() or None
+    return str(group.get("process_element_id") or "").strip() or None
 
 def _ensure_process_part_options_model_variant_column(conn: sqlite3.Connection) -> None:
     cols = {
@@ -1396,28 +1634,38 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
     """Accept Yamazumi station/time changes while retaining IE-authored process details."""
     if not element_ids:
         return 0
-    placeholders = ",".join("?" for _ in element_ids)
     timestamp = now_iso()
+    reconciled_count = 0
+    processed_member_ids: set[str] = set()
     with connection() as conn:
-        rows = conn.execute(
-            f"""SELECT e.*, p.pitch_number, a.name AS area_name
-                FROM yamazumi_elements e
-                LEFT JOIN yamazumi_pitches p ON p.id=e.pitch_id
-                JOIN yamazumi_areas a ON a.id=e.area_id
-                WHERE e.project_id=? AND a.scenario_id=? AND e.id IN ({placeholders})""",
-            (project_id, scenario_id, *element_ids),
-        ).fetchall()
-        for row in rows:
-            station = str(row["pitch_number"] or "Unassigned")
-            model_variants = parse_yamazumi_model_variants(
-                row["model_variants"], row["model_variant"]
+        for raw_eid in element_ids:
+            clean_eid = str(raw_eid or "").strip()
+            if not clean_eid or clean_eid in processed_member_ids:
+                continue
+            group = _find_same_pitch_yamazumi_group_for_element(
+                conn, project_id, scenario_id, clean_eid
+            )
+            if not group:
+                continue
+            member_ids = [
+                str(mid)
+                for mid in (group.get("_member_ids") or [clean_eid])
+                if str(mid).strip()
+            ]
+            processed_member_ids.update(member_ids)
+            station = str(group.get("pitch_number") or "Unassigned")
+            model_variants = list(
+                group.get("_variants")
+                or parse_yamazumi_model_variants(
+                    group.get("model_variants"), group.get("model_variant")
+                )
             )
             model_applicability = (
                 "All"
                 if any(value.casefold() in {"base", "all", "all models"} for value in model_variants)
                 else ", ".join(model_variants)
             )
-            process_id = str(row["process_element_id"] or "").strip()
+            process_id = str(group.get("process_element_id") or "").strip()
             if process_id:
                 exists = conn.execute(
                     "SELECT 1 FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
@@ -1430,7 +1678,7 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
                     """UPDATE work_elements SET station=?, cycle_time_s=?, model_applicability=?, updated_at=?
                        WHERE id=? AND project_id=? AND scenario_id=?""",
                     (
-                        station, float(row["time_s"] or 0),
+                        station, float(group.get("time_s") or 0),
                         model_applicability,
                         timestamp, process_id, project_id, scenario_id,
                     ),
@@ -1448,9 +1696,9 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
                     {
                         "sequence": next_sequence,
                         "station": station,
-                        "operation": str(row["description"]),
-                        "description": f"Yamazumi area: {row['area_name']}",
-                        "cycle_time_s": float(row["time_s"] or 0),
+                        "operation": str(group.get("description") or ""),
+                        "description": f"Yamazumi area: {group.get('area_name') or ''}",
+                        "cycle_time_s": float(group.get("time_s") or 0),
                         "part_number": "",
                         "tool": "",
                         "torque": "",
@@ -1465,12 +1713,14 @@ def reconcile_yamazumi_to_process(project_id: str, scenario_id: str, element_ids
                     },
                     timestamp,
                 )
+            member_placeholders = ",".join("?" for _ in member_ids)
             conn.execute(
-                """UPDATE yamazumi_elements SET process_element_id=?, process_sync_status='Synced', updated_at=?
-                   WHERE id=? AND project_id=?""",
-                (process_id, timestamp, row["id"], project_id),
+                f"""UPDATE yamazumi_elements SET process_element_id=?, process_sync_status='Synced', updated_at=?
+                    WHERE project_id=? AND id IN ({member_placeholders})""",
+                (process_id, timestamp, project_id, *member_ids),
             )
-    return len(rows)
+            reconciled_count += 1
+    return reconciled_count
 
 def _op_id_depth_letter(depth: int) -> str:
     """Return a lowercase spreadsheet-style letter for a zero-based depth."""
@@ -1555,6 +1805,8 @@ def work_element_op_contexts(
             """SELECT element.id AS yamazumi_element_id,
                       element.process_element_id, element.pitch_id,
                       element.sequence, element.description,
+                      element.time_s, element.model_variant, element.model_variants,
+                      COALESCE(NULLIF(TRIM(element.work_type), ''), 'Cycle') AS work_type,
                       area.id AS area_id, area.section_id,
                       pitch.id AS resolved_pitch_id, pitch.pitch_number,
                       pitch.sequence AS pitch_sequence
@@ -1584,9 +1836,10 @@ def work_element_op_contexts(
         if r["connection_type"] == "subassembly":
             subassembly_destinations.setdefault(str(r["from_section_id"]), []).append(str(r["to_section_id"]))
 
-    links_by_work: dict[str, list[sqlite3.Row]] = {}
-    stack_rows: dict[str, list[sqlite3.Row]] = {}
-    for row in yamazumi_rows:
+    grouped_yamazumi_rows = _group_same_pitch_yamazumi_rows(yamazumi_rows)
+    links_by_work: dict[str, list[dict]] = {}
+    stack_rows: dict[str, list[dict]] = {}
+    for row in grouped_yamazumi_rows:
         process_id = str(row["process_element_id"] or "").strip()
         if process_id:
             links_by_work.setdefault(process_id, []).append(row)
@@ -2015,8 +2268,14 @@ def get_pitch_visual_media(
             (project_id, scenario_id, *media_ids),
         ).fetchall()
         tags_by_media: dict[str, list[dict]] = {mid: [] for mid in media_ids}
+        seen_media_tags: set[tuple[str, str]] = set()
         for tr in tags_rows:
-            tags_by_media[str(tr["media_id"])].append(dict(tr))
+            mid_key = str(tr["media_id"])
+            we_key = str(tr["work_element_id"])
+            if (mid_key, we_key) in seen_media_tags:
+                continue
+            seen_media_tags.add((mid_key, we_key))
+            tags_by_media[mid_key].append(dict(tr))
 
         results: list[dict] = []
         for mr in media_rows:
@@ -3115,8 +3374,16 @@ def process_pitch_visual_summary(
                         yamazumi.id""",
             (scenario_id, project_id, normalized_pitch_id),
         ).fetchall()
-        work_ids = [str(row["work_element_id"]) for row in rows]
-        cards = [dict(row) for row in rows]
+        seen_work_ids: set[str] = set()
+        work_ids: list[str] = []
+        cards: list[dict] = []
+        for row in rows:
+            wid = str(row["work_element_id"])
+            if wid in seen_work_ids:
+                continue
+            seen_work_ids.add(wid)
+            work_ids.append(wid)
+            cards.append(dict(row))
 
         parts_by_work: dict[str, list[dict]] = {work_id: [] for work_id in work_ids}
         handling_by_work: dict[str, list[str | None]] = {
@@ -4368,17 +4635,21 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         total_steps = len(work_ids)
 
         yamazumi_rows = conn.execute(
-            """SELECT e.id, e.process_element_id
+            """SELECT e.id, e.process_element_id, e.area_id, e.pitch_id,
+                      COALESCE(NULLIF(TRIM(e.work_type), ''), 'Cycle') AS work_type,
+                      e.description, e.time_s, e.model_variant, e.model_variants
                FROM yamazumi_elements e
                JOIN yamazumi_areas a ON a.id=e.area_id
-               WHERE e.project_id=? AND a.scenario_id=?""",
+               WHERE e.project_id=? AND a.scenario_id=?
+               ORDER BY e.sequence, e.id""",
             (project_id, scenario_id),
         ).fetchall()
-        total_yamazumi_elements = len(yamazumi_rows)
+        grouped_yamazumi_rows = _group_same_pitch_yamazumi_rows(yamazumi_rows)
+        total_yamazumi_elements = len(grouped_yamazumi_rows)
         linked_process_ids: set[str] = set()
         synced_yamazumi_elements = 0
-        for yr in yamazumi_rows:
-            pid = str(yr["process_element_id"] or "").strip()
+        for yr in grouped_yamazumi_rows:
+            pid = str(yr.get("process_element_id") or "").strip()
             if pid and pid in work_id_set:
                 synced_yamazumi_elements += 1
                 linked_process_ids.add(pid)
@@ -4628,7 +4899,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         }
 
 
-_PROCESS_STORE_REV_20261102 = 8
+_PROCESS_STORE_REV_20261102 = 10
 __domain_exports__ = ['catalog_part_photos_for_pitch', 'copy_part_photo_to_pitch_visual_media', 'copy_pitch_visual_media', '_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'work_element_validation_contexts', 'process_pitch_visual_summary', 'process_readiness_metrics', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

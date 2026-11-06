@@ -14,6 +14,14 @@ from typing import Any
 import pandas as pd
 
 
+import json
+import os
+import subprocess
+import tempfile
+from PIL import Image
+
+_YAMAZUMI_PDF_HOT_RELOAD_REV = 1
+
 _RGB_FILL_PATTERN = re.compile(
     r"([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+rg"
 )
@@ -430,6 +438,591 @@ def parse_yamazumi_pdf(pdf_source: bytes | io.BytesIO | str) -> dict[str, Any]:
             "subline": subline,
             "takt_time": takt_time,
             "region_map": region_map,
+            "variants": detected_variants,
+        },
+        "pitches": detected_pitches,
+        "pitch_dataframe": pitch_df,
+        "dataframe": df,
+    }
+
+
+_SCREENSHOT_PITCH_CODE_RE = re.compile(
+    r"\b([0O]\d-[A-Za-z0-9]{2,6}-\d{2,4}(?:\([A-Za-z0-9]+\))?|\d{2}-[A-Za-z0-9]{2,6}-\d{2,4}(?:\([A-Za-z0-9]+\))?)\b"
+)
+_SCREENSHOT_TIME_TOKEN_RE = re.compile(
+    r"^([0-9]+(?:\.[0-9]+)?)\s*[sS]$"
+)
+_SCREENSHOT_INLINE_TIME_RE = re.compile(
+    r"^(.*?)\s+([0-9]+(?:\.[0-9]+)?)\s*[sS]\s*$"
+)
+
+
+def _run_windows_ocr(image_bytes: bytes) -> list[dict[str, Any]]:
+    """Run Windows built-in WinRT OCR on PNG bytes and return lines with word boxes."""
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        ps_script = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {{ $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' }})[0]
+function Await($WinRtTask, $ResultType) {{
+    $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+    $netTask = $asTask.Invoke($null, @($WinRtTask))
+    $netTask.Wait(-1) | Out-Null
+    $netTask.Result
+}}
+$fs = [System.IO.File]::OpenRead({json.dumps(tmp_path)})
+$stream = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($fs)
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+$result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+$stream.Dispose()
+$fs.Dispose()
+$lines = @()
+foreach ($line in $result.Lines) {{
+    $words = @()
+    foreach ($w in $line.Words) {{
+        $r = $w.BoundingRect
+        $words += @{{ t = $w.Text; x = [double]$r.X; y = [double]$r.Y; w = [double]$r.Width; h = [double]$r.Height }}
+    }}
+    $lines += @{{ text = $line.Text; words = $words }}
+}}
+ConvertTo-Json -InputObject @{{ lines = $lines }} -Depth 6 -Compress
+"""
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        raw_out = (proc.stdout or "").strip()
+        if not raw_out:
+            return []
+        json_start = raw_out.find("{")
+        if json_start < 0:
+            return []
+        payload = json.loads(raw_out[json_start:])
+        raw_lines = payload.get("lines") or []
+        if isinstance(raw_lines, dict):
+            raw_lines = [raw_lines]
+        parsed_lines: list[dict[str, Any]] = []
+        for l_obj in raw_lines:
+            words = l_obj.get("words") or []
+            if isinstance(words, dict):
+                words = [words]
+            if not words:
+                continue
+            x0 = min(float(w.get("x", 0.0)) for w in words)
+            y0 = min(float(w.get("y", 0.0)) for w in words)
+            x1 = max(float(w.get("x", 0.0)) + float(w.get("w", 0.0)) for w in words)
+            y1 = max(float(w.get("y", 0.0)) + float(w.get("h", 0.0)) for w in words)
+            parsed_lines.append(
+                {
+                    "text": str(l_obj.get("text") or "").strip(),
+                    "x": x0,
+                    "y": y0,
+                    "w": max(1.0, x1 - x0),
+                    "h": max(1.0, y1 - y0),
+                    "words": words,
+                }
+            )
+        return parsed_lines
+    except Exception:
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _sample_element_fill_rgb(
+    img: Image.Image,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> tuple[float, float, float] | None:
+    """Sample dominant non-text background RGB (0..1) inside a work element bounding box."""
+    w, h = img.size
+    ix0 = max(0, min(w - 1, int(x0)))
+    iy0 = max(0, min(h - 1, int(y0)))
+    ix1 = max(ix0 + 1, min(w, int(x1)))
+    iy1 = max(iy0 + 1, min(h, int(y1)))
+    step_x = max(1, (ix1 - ix0) // 12)
+    step_y = max(1, (iy1 - iy0) // 6)
+    samples: list[tuple[float, float, float]] = []
+    for py in range(iy0, iy1, step_y):
+        for px in range(ix0, ix1, step_x):
+            r, g, b = img.getpixel((px, py))[:3]
+            if r < 45 and g < 45 and b < 45:
+                continue
+            if r > 242 and g > 242 and b > 242:
+                continue
+            samples.append((r / 255.0, g / 255.0, b / 255.0))
+    if not samples:
+        return None
+    for s_rgb in samples:
+        if _work_type_from_fill_color(s_rgb) in ("Fluctuation", "Periodic"):
+            return s_rgb
+    avg_r = sum(s[0] for s in samples) / len(samples)
+    avg_g = sum(s[1] for s in samples) / len(samples)
+    avg_b = sum(s[2] for s in samples) / len(samples)
+    return (avg_r, avg_g, avg_b)
+
+
+def parse_yamazumi_screenshot(image_source: bytes | io.BytesIO | str) -> dict[str, Any]:
+    """Parse a pasted or uploaded Yamazumi screenshot into metadata, pitches, and work elements."""
+    if isinstance(image_source, str):
+        with open(image_source, "rb") as f:
+            data = f.read()
+    elif hasattr(image_source, "getvalue"):
+        data = image_source.getvalue()
+    elif hasattr(image_source, "read"):
+        data = image_source.read()
+    elif isinstance(image_source, (bytes, bytearray)):
+        data = bytes(image_source)
+    else:
+        raise TypeError(f"Unsupported image source type: {type(image_source)}")
+
+    if not data:
+        raise ValueError("The screenshot image is empty.")
+
+    try:
+        pil_img = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Could not open screenshot image: {exc}") from exc
+
+    orig_w, orig_h = pil_img.size
+    scale = 2.0 if orig_w < 1500 else 1.0
+    if scale > 1.0:
+        ocr_img = pil_img.resize(
+            (int(orig_w * scale), int(orig_h * scale)),
+            Image.Resampling.LANCZOS,
+        )
+    else:
+        ocr_img = pil_img
+
+    buf = io.BytesIO()
+    ocr_img.save(buf, format="PNG")
+    ocr_lines = _run_windows_ocr(buf.getvalue())
+
+    if scale != 1.0:
+        for line_item in ocr_lines:
+            line_item["x"] = float(line_item["x"]) / scale
+            line_item["y"] = float(line_item["y"]) / scale
+            line_item["w"] = float(line_item["w"]) / scale
+            line_item["h"] = float(line_item["h"]) / scale
+            for w_item in line_item.get("words") or []:
+                w_item["x"] = float(w_item["x"]) / scale
+                w_item["y"] = float(w_item["y"]) / scale
+                w_item["w"] = float(w_item["w"]) / scale
+                w_item["h"] = float(w_item["h"]) / scale
+
+    full_text = "\n".join(str(item.get("text") or "") for item in ocr_lines)
+    plant_match = re.search(r"Plant Name:\s*([^\n\r|]+)", full_text, re.IGNORECASE)
+    line_match = re.search(r"(?:^|\n)\s*Line:\s*([^\n\r|]+)", full_text, re.IGNORECASE)
+    subline_match = re.search(r"Sub\s*[-]?\s*Line:\s*([^\n\r|]+)", full_text, re.IGNORECASE)
+    takt_match = re.search(r"Tak(?:t)?\s*Time:\s*([0-9]+(?:\.[0-9]+)?)", full_text, re.IGNORECASE)
+
+    plant = plant_match.group(1).strip() if plant_match else ""
+    line = line_match.group(1).strip() if line_match else ""
+    subline = subline_match.group(1).strip() if subline_match else ""
+    takt_time = float(takt_match.group(1)) if takt_match else None
+
+    items: list[dict[str, Any]] = []
+    for l_obj in ocr_lines:
+        l_text = str(l_obj.get("text") or "").strip()
+        if not l_text:
+            continue
+        words = l_obj.get("words") or []
+        if len(words) >= 2:
+            last_two = f"{words[-2].get('t', '')} {words[-1].get('t', '')}".strip()
+            last_one = str(words[-1].get("t", "")).strip()
+            if _SCREENSHOT_TIME_TOKEN_RE.match(last_two) and len(words) > 2:
+                desc_words = words[:-2]
+                time_words = words[-2:]
+                dx0 = min(float(w["x"]) for w in desc_words)
+                dy0 = min(float(w["y"]) for w in desc_words)
+                dx1 = max(float(w["x"]) + float(w["w"]) for w in desc_words)
+                dy1 = max(float(w["y"]) + float(w["h"]) for w in desc_words)
+                items.append({
+                    "text": " ".join(str(w.get("t", "")) for w in desc_words).strip(),
+                    "x": dx0,
+                    "y": dy0,
+                    "w": max(1.0, dx1 - dx0),
+                    "h": max(1.0, dy1 - dy0),
+                })
+                tx0 = min(float(w["x"]) for w in time_words)
+                ty0 = min(float(w["y"]) for w in time_words)
+                tx1 = max(float(w["x"]) + float(w["w"]) for w in time_words)
+                ty1 = max(float(w["y"]) + float(w["h"]) for w in time_words)
+                items.append({
+                    "text": last_two,
+                    "x": tx0,
+                    "y": ty0,
+                    "w": max(1.0, tx1 - tx0),
+                    "h": max(1.0, ty1 - ty0),
+                })
+                continue
+            elif _SCREENSHOT_TIME_TOKEN_RE.match(last_one):
+                desc_words = words[:-1]
+                time_words = words[-1:]
+                dx0 = min(float(w["x"]) for w in desc_words)
+                dy0 = min(float(w["y"]) for w in desc_words)
+                dx1 = max(float(w["x"]) + float(w["w"]) for w in desc_words)
+                dy1 = max(float(w["y"]) + float(w["h"]) for w in desc_words)
+                items.append({
+                    "text": " ".join(str(w.get("t", "")) for w in desc_words).strip(),
+                    "x": dx0,
+                    "y": dy0,
+                    "w": max(1.0, dx1 - dx0),
+                    "h": max(1.0, dy1 - dy0),
+                })
+                tx0 = float(time_words[0]["x"])
+                ty0 = float(time_words[0]["y"])
+                tx1 = tx0 + float(time_words[0]["w"])
+                ty1 = ty0 + float(time_words[0]["h"])
+                items.append({
+                    "text": last_one,
+                    "x": tx0,
+                    "y": ty0,
+                    "w": max(1.0, tx1 - tx0),
+                    "h": max(1.0, ty1 - ty0),
+                })
+                continue
+        items.append({
+            "text": l_text,
+            "x": float(l_obj["x"]),
+            "y": float(l_obj["y"]),
+            "w": float(l_obj["w"]),
+            "h": float(l_obj["h"]),
+            "words": words,
+        })
+
+    pitch_headers: list[dict[str, Any]] = []
+    for l_obj in ocr_lines:
+        l_text = str(l_obj.get("text") or "").strip()
+        if l_text.startswith("Generated"):
+            continue
+        words = l_obj.get("words") or []
+        found_in_words = False
+        for w_obj in words:
+            w_txt = str(w_obj.get("t") or "").strip()
+            m_code = _SCREENSHOT_PITCH_CODE_RE.search(w_txt)
+            if m_code:
+                raw_code = m_code.group(1)
+                if raw_code.upper().startswith("O"):
+                    raw_code = "0" + raw_code[1:]
+                pitch_headers.append({
+                    "code": raw_code,
+                    "x": float(w_obj["x"]),
+                    "y": float(w_obj["y"]),
+                    "w": float(w_obj["w"]),
+                    "h": float(w_obj["h"]),
+                    "full_text": l_text,
+                })
+                found_in_words = True
+        if not found_in_words:
+            for m_code in _SCREENSHOT_PITCH_CODE_RE.finditer(l_text):
+                raw_code = m_code.group(1)
+                if raw_code.upper().startswith("O"):
+                    raw_code = "0" + raw_code[1:]
+                pitch_headers.append({
+                    "code": raw_code,
+                    "x": float(l_obj["x"]),
+                    "y": float(l_obj["y"]),
+                    "w": float(l_obj["w"]),
+                    "h": float(l_obj["h"]),
+                    "full_text": l_text,
+                })
+
+    all_elements: list[dict[str, Any]] = []
+    detected_pitches: list[dict[str, Any]] = []
+
+    if pitch_headers:
+        pitch_headers.sort(key=lambda p: p["y"])
+        bands: list[list[dict[str, Any]]] = []
+        band_y_tol = max(36.0, orig_h * 0.08)
+        for ph in pitch_headers:
+            if not bands or abs(ph["y"] - (sum(x["y"] for x in bands[-1]) / len(bands[-1]))) > band_y_tol:
+                bands.append([ph])
+            else:
+                bands[-1].append(ph)
+
+        band_centers = [sum(x["y"] for x in b) / len(b) for b in bands]
+        for b_idx, band in enumerate(bands):
+            band.sort(key=lambda p: p["x"])
+            dedup_band: list[dict[str, Any]] = []
+            for ph in band:
+                if dedup_band and dedup_band[-1]["code"].casefold() == ph["code"].casefold() and abs(ph["x"] - dedup_band[-1]["x"]) < 60:
+                    continue
+                dedup_band.append(ph)
+            band = dedup_band
+            band_y = band_centers[b_idx]
+            band_top = 0.0 if b_idx == 0 else (band_centers[b_idx - 1] + band_y) / 2.0
+            band_bottom = float(orig_h) if b_idx == len(bands) - 1 else (band_y + band_centers[b_idx + 1]) / 2.0
+
+            is_header_at_bottom = (band_y - band_top) > (band_bottom - band_y)
+
+            for i, p_info in enumerate(band):
+                p_code = p_info["code"]
+                p_cx = p_info["x"] + p_info["w"] / 2.0
+                prev_cx = (band[i - 1]["x"] + band[i - 1]["w"] / 2.0) if i > 0 else 0.0
+                next_cx = (band[i + 1]["x"] + band[i + 1]["w"] / 2.0) if i < len(band) - 1 else float(orig_w)
+                col_left = 0.0 if i == 0 else (prev_cx + p_cx) / 2.0
+                col_right = float(orig_w) if i == len(band) - 1 else (p_cx + next_cx) / 2.0
+
+                col_items = [
+                    it for it in items
+                    if col_left <= (it["x"] + it["w"] / 2.0) < col_right
+                    and band_top <= it["y"] <= band_bottom
+                ]
+
+                p_name = ""
+                for it in col_items:
+                    txt = it["text"].strip()
+                    if (
+                        txt
+                        and p_code not in txt
+                        and not _SCREENSHOT_PITCH_CODE_RE.search(txt)
+                        and not _SCREENSHOT_TIME_TOKEN_RE.match(txt)
+                        and txt.casefold() not in ("base", "all models", "s")
+                        and not txt.startswith("Generated")
+                        and abs(it["y"] - p_info["y"]) <= max(65.0, orig_h * 0.10)
+                    ):
+                        if is_header_at_bottom and it["y"] > p_info["y"]:
+                            p_name = txt
+                            break
+                        elif not is_header_at_bottom and it["y"] < p_info["y"]:
+                            p_name = txt
+                            break
+
+                detected_pitches.append({
+                    "pitch_number": p_code,
+                    "pitch_name": p_name,
+                    "page": 1,
+                    "orientation": "North" if is_header_at_bottom else "South",
+                    "Sub-Line": subline,
+                    "Pitch_number": p_code,
+                    "Pitch_status": "Active",
+                    "Pitch_name": p_name,
+                    "Pitch_Takt_time": takt_time,
+                    "Model_variants": ["Base"],
+                })
+
+                time_items: list[dict[str, Any]] = []
+                non_time_items: list[dict[str, Any]] = []
+                for it in col_items:
+                    txt = it["text"].strip()
+                    if not txt or p_code in txt or txt == p_name:
+                        continue
+                    if txt.startswith("Generated") or txt.startswith("Page"):
+                        continue
+                    if any(k in txt for k in ("Takt", "Theoretical", "Actual", "CT:", "Plant Name", "Sub Line")):
+                        continue
+                    if abs(it["y"] - p_info["y"]) < max(18.0, p_info["h"] * 0.9):
+                        continue
+                    m_time = _SCREENSHOT_TIME_TOKEN_RE.match(txt)
+                    if m_time:
+                        time_items.append({**it, "time_val": float(m_time.group(1))})
+                    else:
+                        non_time_items.append(it)
+
+                if is_header_at_bottom:
+                    time_items.sort(key=lambda it: -(it["y"]))
+                else:
+                    time_items.sort(key=lambda it: it["y"])
+
+                for ti, t_item in enumerate(time_items):
+                    ty = float(t_item["y"])
+                    th = float(t_item["h"])
+                    if is_header_at_bottom:
+                        upper_bound = (
+                            (float(time_items[ti + 1]["y"]) + float(time_items[ti + 1]["h"]))
+                            if ti < len(time_items) - 1
+                            else max(band_top, ty - max(60.0, orig_h * 0.12))
+                        )
+                        lower_bound = ty + th + 6.0
+                    else:
+                        upper_bound = (
+                            (float(time_items[ti - 1]["y"]) + float(time_items[ti - 1]["h"]))
+                            if ti > 0
+                            else max(band_top, ty - max(45.0, orig_h * 0.08))
+                        )
+                        lower_bound = ty + th + 6.0
+
+                    row_lines = [
+                        d for d in non_time_items
+                        if upper_bound - 4.0 <= float(d["y"]) <= lower_bound
+                        and d["text"].strip().casefold() not in ("base", "all models", "s")
+                    ]
+                    row_lines.sort(key=lambda d: (float(d["y"]), float(d["x"])))
+                    desc = " ".join(d["text"].strip() for d in row_lines if d["text"].strip()).strip()
+                    if not desc:
+                        continue
+
+                    fill_rgb = _sample_element_fill_rgb(
+                        pil_img,
+                        col_left + 4.0,
+                        min(ty, upper_bound),
+                        col_right - 4.0,
+                        lower_bound,
+                    )
+                    work_type = _work_type_from_fill_color(fill_rgb)
+                    all_elements.append({
+                        "Sub-Line": subline,
+                        "Pitch_number": p_code,
+                        "Pitch_status": "Active",
+                        "Pitch_name": p_name,
+                        "Pitch_Takt_time": takt_time,
+                        "Model_variant": "Base",
+                        "Work_Type": work_type,
+                        "Work_Description": desc,
+                        "Work_Time_to_complete": float(t_item["time_val"]),
+                        "Work_region": "None",
+                    })
+
+    if not all_elements and ocr_lines:
+        current_pitch = pitch_headers[0]["code"] if pitch_headers else "01-ASM-001"
+        current_pitch_name = ""
+        for l_obj in sorted(ocr_lines, key=lambda item: (float(item["y"]), float(item["x"]))):
+            l_text = str(l_obj.get("text") or "").strip()
+            if not l_text:
+                continue
+            m_code = _SCREENSHOT_PITCH_CODE_RE.search(l_text)
+            if m_code:
+                raw_code = m_code.group(1)
+                if raw_code.upper().startswith("O"):
+                    raw_code = "0" + raw_code[1:]
+                current_pitch = raw_code
+                rem = l_text.replace(m_code.group(0), "").strip(" -·:|")
+                if rem and not _SCREENSHOT_TIME_TOKEN_RE.match(rem):
+                    current_pitch_name = rem
+                if not any(p["Pitch_number"] == current_pitch for p in detected_pitches):
+                    detected_pitches.append({
+                        "pitch_number": current_pitch,
+                        "pitch_name": current_pitch_name,
+                        "page": 1,
+                        "orientation": "North",
+                        "Sub-Line": subline,
+                        "Pitch_number": current_pitch,
+                        "Pitch_status": "Active",
+                        "Pitch_name": current_pitch_name,
+                        "Pitch_Takt_time": takt_time,
+                        "Model_variants": ["Base"],
+                    })
+                continue
+            m_inline = _SCREENSHOT_INLINE_TIME_RE.match(l_text)
+            if m_inline:
+                desc_txt = m_inline.group(1).strip(" -·:|")
+                t_val = float(m_inline.group(2))
+                if desc_txt and not any(k in desc_txt for k in ("Takt Time", "Tak Time", "Actual CT", "Theoretical")):
+                    if not any(p["Pitch_number"] == current_pitch for p in detected_pitches):
+                        detected_pitches.append({
+                            "pitch_number": current_pitch,
+                            "pitch_name": current_pitch_name,
+                            "page": 1,
+                            "orientation": "North",
+                            "Sub-Line": subline,
+                            "Pitch_number": current_pitch,
+                            "Pitch_status": "Active",
+                            "Pitch_name": current_pitch_name,
+                            "Pitch_Takt_time": takt_time,
+                            "Model_variants": ["Base"],
+                        })
+                    all_elements.append({
+                        "Sub-Line": subline,
+                        "Pitch_number": current_pitch,
+                        "Pitch_status": "Active",
+                        "Pitch_name": current_pitch_name,
+                        "Pitch_Takt_time": takt_time,
+                        "Model_variant": "Base",
+                        "Work_Type": "Cycle",
+                        "Work_Description": desc_txt,
+                        "Work_Time_to_complete": t_val,
+                        "Work_region": "None",
+                    })
+
+    if not detected_pitches and not all_elements:
+        default_pitch = "01-ASM-001"
+        detected_pitches.append({
+            "pitch_number": default_pitch,
+            "pitch_name": "",
+            "page": 1,
+            "orientation": "North",
+            "Sub-Line": subline,
+            "Pitch_number": default_pitch,
+            "Pitch_status": "Active",
+            "Pitch_name": "",
+            "Pitch_Takt_time": takt_time,
+            "Model_variants": ["Base"],
+        })
+        fallback_desc = (
+            ocr_lines[0]["text"].strip()
+            if ocr_lines and str(ocr_lines[0].get("text") or "").strip()
+            else "Screenshot work element"
+        )
+        all_elements.append({
+            "Sub-Line": subline,
+            "Pitch_number": default_pitch,
+            "Pitch_status": "Active",
+            "Pitch_name": "",
+            "Pitch_Takt_time": takt_time,
+            "Model_variant": "Base",
+            "Work_Type": "Cycle",
+            "Work_Description": fallback_desc,
+            "Work_Time_to_complete": 0.0,
+            "Work_region": "None",
+        })
+
+    df = pd.DataFrame(all_elements)
+    if df.empty:
+        df = pd.DataFrame(columns=[
+            "Sub-Line", "Pitch_number", "Pitch_status", "Pitch_name",
+            "Pitch_Takt_time", "Model_variant", "Work_Type",
+            "Work_Description", "Work_Time_to_complete", "Work_region",
+        ])
+
+    pitch_columns = [
+        "Sub-Line", "Pitch_number", "Pitch_status", "Pitch_name",
+        "Pitch_Takt_time", "Model_variants",
+    ]
+    pitch_df = pd.DataFrame(detected_pitches)
+    if pitch_df.empty:
+        pitch_df = pd.DataFrame(columns=pitch_columns)
+    else:
+        pitch_df = (
+            pitch_df[pitch_columns]
+            .drop_duplicates(subset=["Sub-Line", "Pitch_number"], keep="first")
+            .reset_index(drop=True)
+        )
+
+    detected_variants: list[str] = []
+    for p_row in detected_pitches:
+        for v_item in p_row.get("Model_variants") or []:
+            v_str = str(v_item or "").strip()
+            if v_str and v_str not in detected_variants:
+                detected_variants.append(v_str)
+    for e_row in all_elements:
+        v_str = str(e_row.get("Model_variant") or "").strip()
+        if v_str and v_str not in detected_variants:
+            detected_variants.append(v_str)
+
+    return {
+        "metadata": {
+            "plant": plant,
+            "line": line,
+            "subline": subline,
+            "takt_time": takt_time,
+            "region_map": {},
             "variants": detected_variants,
         },
         "pitches": detected_pitches,

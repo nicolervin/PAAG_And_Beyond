@@ -205,6 +205,56 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
             app.session_state[f"process_show_factory_nickname_{self.scenario_id}"]
         )
 
+        # Verify single Search parts bar filters both Not consumed parts and Consumed parts
+        parts_search_inputs = [
+            ti for ti in app.text_input if ti.label == "Search parts"
+        ]
+        self.assertEqual(len(parts_search_inputs), 1)
+        parts_search_inputs[0].set_value("PART-").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        not_consumed_df = next(
+            df
+            for df in app.dataframe
+            if str(df.key).startswith(
+                f"process_part_source_{self.scenario_id}_{self.section_id}"
+            )
+        )
+        consumed_df = next(
+            df
+            for df in app.dataframe
+            if str(df.key).startswith(
+                f"process_part_source_consumed_{self.scenario_id}_{self.section_id}"
+            )
+        )
+        self.assertEqual(not_consumed_df.value["part_number"].tolist(), ["PART-200"])
+        self.assertEqual(consumed_df.value["part_number"].tolist(), ["PART-100"])
+
+        parts_search_inputs = [
+            ti for ti in app.text_input if ti.label == "Search parts"
+        ]
+        parts_search_inputs[0].set_value("Bracket").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+        consumed_df = next(
+            df
+            for df in app.dataframe
+            if str(df.key).startswith(
+                f"process_part_source_consumed_{self.scenario_id}_{self.section_id}"
+            )
+        )
+        self.assertEqual(consumed_df.value["part_number"].tolist(), ["PART-100"])
+        self.assertTrue(
+            any(
+                "No not-consumed fishbone parts match these filters" in info.value
+                for info in app.info
+            )
+        )
+
+        parts_search_inputs = [
+            ti for ti in app.text_input if ti.label == "Search parts"
+        ]
+        parts_search_inputs[0].set_value("").run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
         # Filter by Handled -> Handled (none should match)
         handled_sb = [sb for sb in app.selectbox if sb.label == "Handled"][0]
         handled_sb.select("Handled").run(timeout=30)
@@ -534,7 +584,7 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
                 (yam_id, self.project_id, self.area_id, self.pitch_id, we_id, timestamp),
             )
 
-        # Retag the Yamazumi element to "Pedestal / Riser = Pedestal" and move it to pitch 13
+        # Retag the Yamazumi element to "Pedestal / Riser = Pedestal", update time, and move it to pitch 13
         store.update_yamazumi_element(
             self.project_id,
             self.area_id,
@@ -545,21 +595,22 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
                 "model_variants": ["Pedestal / Riser = Pedestal"],
                 "work_type": "Cycle",
                 "description": "Install 1 drawer slide rail",
-                "time_s": 7.0,
+                "time_s": 9.5,
             },
         )
         store.move_yamazumi_element(self.project_id, yam_id, pitch_13_id)
 
         we_row = store.query(
-            "SELECT station, model_applicability FROM work_elements WHERE id=?",
+            "SELECT station, cycle_time_s, model_applicability FROM work_elements WHERE id=?",
             (we_id,),
         )[0]
         self.assertEqual(we_row["station"], "01-PED-013")
+        self.assertAlmostEqual(float(we_row["cycle_time_s"]), 9.5)
         self.assertEqual(
             we_row["model_applicability"], "Pedestal / Riser = Pedestal"
         )
 
-        # Render Process at a Glance and verify the table and Edit line dialog show the feature variant
+        # Render Process at a Glance and verify the table and Edit line dialog show the feature variant and time as read-only
         app = AppTest.from_file(
             str(store.ROOT / "app_pages/process.py"), default_timeout=30
         )
@@ -592,6 +643,13 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
             models_ms.value,
             ["Pedestal / Riser = Pedestal"],
         )
+        self.assertTrue(models_ms.disabled)
+
+        time_input = app.number_input(
+            key=f"edit_line_time_{self.scenario_id}_{we_id}"
+        )
+        self.assertAlmostEqual(float(time_input.value), 9.5)
+        self.assertTrue(time_input.disabled)
 
 
     def test_variant_specific_consume_allowance_across_mutually_exclusive_features(

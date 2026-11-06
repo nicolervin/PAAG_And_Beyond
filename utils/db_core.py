@@ -2359,6 +2359,9 @@ def init_db() -> None:
                 section_id TEXT REFERENCES assembly_sections(id) ON DELETE SET NULL,
                 name TEXT NOT NULL, takt_override_s REAL,
                 conveyor_type TEXT NOT NULL DEFAULT '2-sided' CHECK(conveyor_type IN ('1-sided', '2-sided')),
+                team_leaders INTEGER NOT NULL DEFAULT 0 CHECK(team_leaders >= 0),
+                control_person INTEGER NOT NULL DEFAULT 0 CHECK(control_person >= 0),
+                replacement_operators INTEGER NOT NULL DEFAULT 0 CHECK(replacement_operators >= 0),
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, scenario_id, name)
             );
@@ -3429,6 +3432,12 @@ def init_db() -> None:
                 conn.execute("PRAGMA legacy_alter_table = OFF")
                 conn.execute("PRAGMA foreign_keys = ON")
         area_columns = {row[1] for row in conn.execute("PRAGMA table_info(yamazumi_areas)").fetchall()}
+        for _hc_col in ("team_leaders", "control_person", "replacement_operators"):
+            if _hc_col not in area_columns:
+                conn.execute(
+                    f"ALTER TABLE yamazumi_areas ADD COLUMN {_hc_col} "
+                    f"INTEGER NOT NULL DEFAULT 0 CHECK({_hc_col} >= 0)"
+                )
         if "conveyor_type" not in area_columns:
             conn.execute(
                 "ALTER TABLE yamazumi_areas ADD COLUMN conveyor_type "

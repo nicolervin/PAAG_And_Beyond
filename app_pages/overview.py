@@ -18,7 +18,7 @@ from utils.store import (
     get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
     project_table, projects, record_audit_event, save_planning_scenario_rows,
     active_part_ids, project_models, set_last_active_workspace, update_project,
-    yamazumi_pitches_for_scenario,
+    yamazumi_areas, yamazumi_pitches_for_scenario,
 )
 
 
@@ -240,6 +240,45 @@ active_pitch_count = (
     if not pitches_df.empty and "status" in pitches_df.columns
     else 0
 )
+areas_df = (
+    yamazumi_areas(project_id, scenario_id)
+    if scenario_id
+    else pd.DataFrame()
+)
+team_leaders_count = (
+    int(
+        pd.to_numeric(areas_df["team_leaders"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .sum()
+    )
+    if not areas_df.empty and "team_leaders" in areas_df.columns
+    else 0
+)
+control_person_count = (
+    int(
+        pd.to_numeric(areas_df["control_person"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .sum()
+    )
+    if not areas_df.empty and "control_person" in areas_df.columns
+    else 0
+)
+replacement_operators_count = (
+    int(
+        pd.to_numeric(areas_df["replacement_operators"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+        .sum()
+    )
+    if not areas_df.empty and "replacement_operators" in areas_df.columns
+    else 0
+)
+area_support_headcount = (
+    team_leaders_count + control_person_count + replacement_operators_count
+)
+total_headcount = active_pitch_count + area_support_headcount
 models_df = project_models(project_id)
 active_models_df = (
     models_df[models_df["active"].fillna(1).astype(bool)]
@@ -256,10 +295,10 @@ total_active_eau = (
     if not active_models_df.empty and "eau" in active_models_df.columns
     else 0.0
 )
-annual_labor_hours = active_pitch_count * ANNUAL_HOURS_PER_OPERATOR
+annual_labor_hours = total_headcount * ANNUAL_HOURS_PER_OPERATOR
 current_hpu = (
     annual_labor_hours / total_active_eau
-    if (active_pitch_count > 0 and total_active_eau > 0)
+    if (total_headcount > 0 and total_active_eau > 0)
     else None
 )
 baseline_hpu_val = project.get("baseline_hpu")
@@ -284,11 +323,15 @@ if current_hpu is not None:
         hpu_delta_color = "inverse"
     else:
         hpu_value_str = f"{hpu_num_str} hrs"
-        hpu_delta = f"{active_pitch_count} active pitch(es) · {int(round(total_active_eau)):,} EAU"
+        hpu_delta = (
+            f"{total_headcount} total headcount ({active_pitch_count} pitch(es) + {area_support_headcount} area support) · {int(round(total_active_eau)):,} EAU"
+            if area_support_headcount > 0
+            else f"{active_pitch_count} active pitch(es) · {int(round(total_active_eau)):,} EAU"
+        )
         hpu_delta_color = "off"
 else:
     hpu_value_str = "—"
-    if active_pitch_count == 0 and total_active_eau <= 0:
+    if total_headcount == 0 and total_active_eau <= 0:
         hpu_delta = "Needs active pitches & model EAU"
     elif total_active_eau <= 0:
         hpu_delta = "Set EAU on active models"
@@ -296,9 +339,12 @@ else:
         hpu_delta = "No active Yamazumi pitches"
     hpu_delta_color = "off"
 hpu_help = (
-    "Labor Hours Per Unit = (Active Yamazumi Operator Pitches × 2,000 annual working hours per operator) "
-    "÷ Total EAU of Active Models. "
-    f"Current scenario: {active_pitch_count} active pitch(es) ({int(annual_labor_hours):,} labor hrs/yr) "
+    "Labor Hours Per Unit = (Total Headcount × 2,000 annual working hours per operator) "
+    "÷ Total EAU of Active Models, where Total Headcount = Active Yamazumi Operator Pitches "
+    "+ Team Leaders + Control Person + Replacement Operators across Yamazumi areas. "
+    f"Current scenario: {total_headcount} total headcount ({active_pitch_count} active pitch(es), "
+    f"{team_leaders_count} team leader(s), {control_person_count} control person(s), "
+    f"{replacement_operators_count} replacement operator(s); {int(annual_labor_hours):,} labor hrs/yr) "
     f"÷ {int(round(total_active_eau)):,} active-model EAU. "
     "Compared against Baseline HPU in Project definition—a negative % means fewer labor hours per unit."
 )

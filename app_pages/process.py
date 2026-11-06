@@ -3,6 +3,7 @@ import hashlib
 import importlib as _importlib
 import json
 from pathlib import Path
+import re
 import sys as _sys
 
 import pandas as pd
@@ -11,7 +12,7 @@ import streamlit.components.v1 as components
 
 if "utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "_TABLE_UI_REV_20261102"):
     _importlib.reload(_sys.modules["utils.table_ui"])
-if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 8:
+if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 10:
     if "utils.assembly_store" in _sys.modules:
         _importlib.reload(_sys.modules["utils.assembly_store"])
     _importlib.reload(_sys.modules["utils.process_store"])
@@ -127,6 +128,31 @@ from utils.table_ui import (
     stage_native_delete_confirmation,
     table_has_unsaved_changes,
 )
+
+
+def _pitch_address_sort_key(value: object) -> tuple:
+    text = str(value or "").strip()
+    if not text:
+        return (1, (), "")
+    tokens = tuple(
+        (0, int(tok)) if tok.isdigit() else (1, tok.casefold())
+        for tok in re.split(r"(\d+)", text)
+        if tok
+    )
+    return (0, tokens, text.casefold())
+
+
+def _sort_pitches_by_address_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "pitch_number" not in df.columns:
+        return df
+    sorted_idx = sorted(
+        df.index,
+        key=lambda idx: (
+            _pitch_address_sort_key(df.at[idx, "pitch_number"]),
+            str(df.at[idx, "id"]) if "id" in df.columns else "",
+        ),
+    )
+    return df.loc[sorted_idx].reset_index(drop=True)
 
 
 def _inject_disabled_consumed_placement_options_script() -> None:
@@ -776,7 +802,7 @@ def print_slide_dialog(
     all_pitch_ids = [pid for pid, _ in pitch_opts]
     all_pitch_dict = dict(pitch_opts)
 
-    pitches_df = (
+    pitches_df = _sort_pitches_by_address_df(
         scenario_pitches_df
         if scenario_pitches_df is not None
         else yamazumi_pitches_for_scenario(project_id, scenario_id)
@@ -2092,6 +2118,7 @@ if tab_plan.open:
                 "Unassigned": "Unassigned",
             }
             if not all_section_yamazumi_rows.empty:
+                discovered_pitches: list[str] = []
                 for p_num_val, p_name_val in zip(
                     all_section_yamazumi_rows["pitch_number"],
                     all_section_yamazumi_rows["pitch_name"],
@@ -2099,8 +2126,9 @@ if tab_plan.open:
                     p_num = str(p_num_val or "").strip()
                     p_name = str(p_name_val or "").strip()
                     if p_num and p_num not in pitch_label_map:
-                        pitch_options.append(p_num)
+                        discovered_pitches.append(p_num)
                         pitch_label_map[p_num] = f"{p_num} — {p_name}" if p_name else p_num
+                pitch_options.extend(sorted(discovered_pitches, key=_pitch_address_sort_key))
                 if (
                     all_section_yamazumi_rows["pitch_number"].isna()
                     | all_section_yamazumi_rows["pitch_number"].astype(str).str.strip().eq("")
@@ -2435,7 +2463,67 @@ if tab_plan.open:
                     st.session_state[nickname_key] = not show_nickname
                     st.rerun()
 
+                parts_search = (
+                    st.text_input(
+                        "Search parts",
+                        placeholder="Search part number, name, nickname, or model",
+                        key=f"process_parts_search_{scenario_id}_{section_id}",
+                        help="Search both Not consumed parts and Consumed parts by part number, part name, factory nickname, use description, or model.",
+                    )
+                    .strip()
+                    .casefold()
+                )
+
                 if not available_parts.empty:
+                    if parts_search:
+                        parts_search_mask = pd.Series(
+                            False, index=available_parts.index
+                        )
+                        part_search_cols = [
+                            "part_number",
+                            "description",
+                            "factory_nickname",
+                            "handling",
+                            "model_applicability",
+                            "use_description",
+                            "section_name",
+                        ]
+                        for col in part_search_cols:
+                            if col in available_parts.columns:
+                                parts_search_mask |= (
+                                    available_parts[col]
+                                    .fillna("")
+                                    .astype(str)
+                                    .str.casefold()
+                                    .str.contains(parts_search, regex=False)
+                                )
+                        if not candidate_placements.empty:
+                            placement_search_mask = pd.Series(
+                                False, index=candidate_placements.index
+                            )
+                            for col in part_search_cols:
+                                if col in candidate_placements.columns:
+                                    placement_search_mask |= (
+                                        candidate_placements[col]
+                                        .fillna("")
+                                        .astype(str)
+                                        .str.casefold()
+                                        .str.contains(parts_search, regex=False)
+                                    )
+                            matching_placement_part_ids = set(
+                                candidate_placements.loc[
+                                    placement_search_mask, "part_id"
+                                ].astype(str)
+                            )
+                            parts_search_mask |= (
+                                available_parts["part_id"]
+                                .astype(str)
+                                .isin(matching_placement_part_ids)
+                            )
+                        available_parts = available_parts.loc[
+                            parts_search_mask
+                        ].copy()
+
                     if handled_filter == "Handled":
                         available_parts = available_parts.loc[
                             available_parts["part_id"].astype(str).isin(handled_part_ids)
@@ -2541,6 +2629,7 @@ if tab_plan.open:
 
                 has_active_part_filters = bool(
                     pairing_search
+                    or parts_search
                     or handled_filter != "All"
                     or model_filter != "All models"
                 )
@@ -4015,6 +4104,18 @@ if tab_plan.open:
                         & yamazumi_models.str.casefold().ne("all"),
                         elements["model_applicability"].fillna("All").astype(str),
                     )
+                if "yamazumi_time_s" in yamazumi_context.columns:
+                    linked_time_mask = process_ids.isin(yamazumi_context.index)
+                    yamazumi_times = pd.to_numeric(
+                        process_ids.map(yamazumi_context["yamazumi_time_s"]),
+                        errors="coerce",
+                    )
+                    elements["cycle_time_s"] = yamazumi_times.where(
+                        linked_time_mask & yamazumi_times.notna(),
+                        pd.to_numeric(elements["cycle_time_s"], errors="coerce").fillna(
+                            0.0
+                        ),
+                    )
                 yamazumi_descriptions = process_ids.map(
                     yamazumi_context["yamazumi_description"].fillna("").astype(str)
                 ).fillna("")
@@ -4104,6 +4205,8 @@ if tab_plan.open:
                 "handling",
                 "ergonomics_risk",
                 "criticality",
+                "cycle_time_s",
+                "model_applicability",
             ],
             column_order=["selected", *compact_columns],
             column_config={
@@ -4193,9 +4296,19 @@ if tab_plan.open:
                         "Safety comes from an active Safety requirement linked to this Process step."
                     ),
                 ),
-                "cycle_time_s": st.column_config.NumberColumn("Time (s)", min_value=0.0, step=0.1, format="%.1f"),
+                "cycle_time_s": st.column_config.NumberColumn(
+                    "Time (s)",
+                    min_value=0.0,
+                    step=0.1,
+                    format="%.1f",
+                    disabled=True,
+                    help="Work element cycle time (managed in the Yamazumi tab).",
+                ),
                 "model_applicability": st.column_config.MultiselectColumn(
-                    "Feature", options=process_model_options
+                    "Feature",
+                    options=process_model_options,
+                    disabled=True,
+                    help="Model/feature applicability (managed in the Yamazumi tab).",
                 ),
             },
         )
@@ -4793,7 +4906,7 @@ if tab_plan.open:
             )
             st.caption(
                 "Replace an incorrectly assigned part, adjust handling classification or "
-                "Fishbone location, or update this line's tool, resource, models, time, and sequence."
+                "Fishbone location, or update this line's tool, resource, and sequence."
             )
 
             default_line_sec_id = ""
@@ -5516,6 +5629,8 @@ if tab_plan.open:
                 "Feature",
                 options=model_options,
                 default=current_models,
+                disabled=True,
+                help="Update feature/model applicability in the Yamazumi tab.",
                 key=f"edit_line_models_{scenario_id}_{target_id}",
             )
 
@@ -5540,6 +5655,8 @@ if tab_plan.open:
                 value=max(current_time, 0.0),
                 step=0.1,
                 format="%.1f",
+                disabled=True,
+                help="Update work element time in the Yamazumi tab.",
                 key=f"edit_line_time_{scenario_id}_{target_id}",
             )
             edit_sequence = seq_col.number_input(
@@ -5836,7 +5953,9 @@ elif tab_flow.open:
 
 elif tab_slides.open:
     with tab_slides:
-        all_scenario_pitches_df = yamazumi_pitches_for_scenario(project_id, scenario_id)
+        all_scenario_pitches_df = _sort_pitches_by_address_df(
+            yamazumi_pitches_for_scenario(project_id, scenario_id)
+        )
         if not all_scenario_pitches_df.empty and "element_count" in all_scenario_pitches_df.columns:
             scenario_pitches_df = all_scenario_pitches_df.loc[
                 pd.to_numeric(all_scenario_pitches_df["element_count"], errors="coerce").fillna(0) > 0

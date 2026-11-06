@@ -462,6 +462,47 @@ function saveFishboneView(key, vState) {
   } catch (e) {}
 }
 
+function getSavedConnNodes(key) {
+  if (typeof window === "undefined" || !key) return {}
+  window.__paag_fishbone_conn_nodes = window.__paag_fishbone_conn_nodes || {}
+  if (window.__paag_fishbone_conn_nodes[key]) {
+    return { ...window.__paag_fishbone_conn_nodes[key] }
+  }
+  try {
+    const raw = localStorage.getItem("paag_fishbone_nodes_" + key) || sessionStorage.getItem("paag_fishbone_nodes_" + key)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === "object") {
+        window.__paag_fishbone_conn_nodes[key] = parsed
+        return { ...parsed }
+      }
+    }
+  } catch (e) {}
+  return {}
+}
+
+function saveConnNodes(key, overrides) {
+  if (typeof window === "undefined" || !key || !overrides) return
+  window.__paag_fishbone_conn_nodes = window.__paag_fishbone_conn_nodes || {}
+  window.__paag_fishbone_conn_nodes[key] = { ...overrides }
+  try {
+    const serialized = JSON.stringify(overrides)
+    sessionStorage.setItem("paag_fishbone_nodes_" + key, serialized)
+    localStorage.setItem("paag_fishbone_nodes_" + key, serialized)
+  } catch (e) {}
+}
+
+function clearSavedConnNodes(key) {
+  if (typeof window === "undefined" || !key) return
+  if (window.__paag_fishbone_conn_nodes) {
+    delete window.__paag_fishbone_conn_nodes[key]
+  }
+  try {
+    sessionStorage.removeItem("paag_fishbone_nodes_" + key)
+    localStorage.removeItem("paag_fishbone_nodes_" + key)
+  } catch (e) {}
+}
+
 function svgElement(name, attributes = {}) {
   const element = document.createElementNS(SVG_NS, name)
   Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)))
@@ -568,7 +609,7 @@ function findNearestNodePoint(sec, wx, wy) {
   return best
 }
 
-function findBestSnapTarget(candidateSections, currX, currY, snapRadius = 140) {
+function findBestSnapTarget(candidateSections, currX, currY, snapRadius = 180) {
   let bestSec = null
   let bestNode = null
   let bestDist = Infinity
@@ -579,7 +620,7 @@ function findBestSnapTarget(candidateSections, currX, currY, snapRadius = 140) {
     const halfW = w / 2
     const halfH = h / 2
 
-    const isInside = (Math.abs(currX - sec.sx) <= halfW + 15) && (Math.abs(currY - sec.sy) <= halfH + 15)
+    const isInside = (Math.abs(currX - sec.sx) <= halfW + 24) && (Math.abs(currY - sec.sy) <= halfH + 24)
 
     const nodes = getSectionNodePoints(sec)
     for (const node of nodes) {
@@ -593,7 +634,7 @@ function findBestSnapTarget(candidateSections, currX, currY, snapRadius = 140) {
     }
   }
 
-  if (bestNode && (bestDist <= snapRadius || (bestSec && Math.abs(currX - bestSec.sx) <= (bestSec.secWidth || 220) / 2 + 30 && Math.abs(currY - bestSec.sy) <= (bestSec.secHeight || 64) / 2 + 30))) {
+  if (bestNode && (bestDist <= snapRadius || (bestSec && Math.abs(currX - bestSec.sx) <= (bestSec.secWidth || 220) / 2 + 60 && Math.abs(currY - bestSec.sy) <= (bestSec.secHeight || 64) / 2 + 60))) {
     return { section: bestSec, node: bestNode, distance: bestDist }
   }
   return null
@@ -621,16 +662,16 @@ function computeSmoothConnectionPath(p1, p2) {
 }
 
 function resolveConnectionEndpoints(connections, sectionById) {
-  const outCounts = new Map()
-  const inCounts = new Map()
+  const usedNodes = new Set()
 
   connections.forEach(conn => {
-    outCounts.set(conn.from_section_id, (outCounts.get(conn.from_section_id) || 0) + 1)
-    inCounts.set(conn.to_section_id, (inCounts.get(conn.to_section_id) || 0) + 1)
+    if (conn.from_section_id && conn.from_node) {
+      usedNodes.add(`${conn.from_section_id}:${conn.from_node}`)
+    }
+    if (conn.to_section_id && conn.to_node) {
+      usedNodes.add(`${conn.to_section_id}:${conn.to_node}`)
+    }
   })
-
-  const outIndices = new Map()
-  const inIndices = new Map()
 
   return connections.map(conn => {
     const start = sectionById.get(conn.from_section_id)
@@ -655,53 +696,48 @@ function resolveConnectionEndpoints(connections, sectionById) {
 
     const dx = end.sx - start.sx
     const dy = end.sy - start.sy
+    const startW = start.secWidth || 220
+    const startH = start.secHeight || 64
+    const endW = end.secWidth || 220
+    const endH = end.secHeight || 64
+    const overlapLeft = Math.max(start.sx - startW / 2, end.sx - endW / 2)
+    const overlapRight = Math.min(start.sx + startW / 2, end.sx + endW / 2)
+    const horizOverlap = overlapRight - overlapLeft
+    const vertGap = Math.abs(dy) - (startH / 2 + endH / 2)
+    const isVertical = (vertGap > 0 && horizOverlap > 0) || (Math.abs(dy) > Math.abs(dx) * 1.5)
+    const anchorX = horizOverlap > 0 ? (overlapLeft + overlapRight) / 2 : (start.sx + end.sx) / 2
 
     if (!p1) {
-      const outIdx = outIndices.get(conn.from_section_id) || 0
-      outIndices.set(conn.from_section_id, outIdx + 1)
-      const totalOut = outCounts.get(conn.from_section_id) || 1
-
-      if (Math.abs(dy) > Math.abs(dx) * 1.5) {
-        if (dy > 0) {
-          const slot = (totalOut <= 1) ? 2 : (outIdx % 5)
-          p1 = startNodeMap.get(`bottom_${slot}`) || startNodeMap.get("bottom_2")
-        } else {
-          const slot = (totalOut <= 1) ? 2 : (outIdx % 5)
-          p1 = startNodeMap.get(`top_${slot}`) || startNodeMap.get("top_2")
-        }
+      if (isVertical) {
+        const edgePrefix = dy > 0 ? "bottom" : "top"
+        const candidates = startNodes
+          .filter(n => n.edge === edgePrefix)
+          .sort((a, b) => Math.abs(a.x - anchorX) - Math.abs(b.x - anchorX))
+        p1 = candidates.find(n => !usedNodes.has(`${start.id}:${n.id}`)) || candidates[0] || startNodeMap.get(`${edgePrefix}_2`)
       } else {
-        if (dx >= 0) {
-          const slot = (totalOut <= 1) ? 1 : (outIdx % 3)
-          p1 = startNodeMap.get(`right_${slot}`) || startNodeMap.get("right_1")
-        } else {
-          const slot = (totalOut <= 1) ? 1 : (outIdx % 3)
-          p1 = startNodeMap.get(`left_${slot}`) || startNodeMap.get("left_1")
-        }
+        const edgePrefix = dx >= 0 ? "right" : "left"
+        const slotOrder = [1, 0, 2]
+        const candidates = slotOrder.map(s => startNodeMap.get(`${edgePrefix}_${s}`)).filter(Boolean)
+        p1 = candidates.find(n => !usedNodes.has(`${start.id}:${n.id}`)) || candidates[0]
       }
+      if (p1) usedNodes.add(`${start.id}:${p1.id}`)
     }
 
     if (!p2) {
-      const inIdx = inIndices.get(conn.to_section_id) || 0
-      inIndices.set(conn.to_section_id, inIdx + 1)
-      const totalIn = inCounts.get(conn.to_section_id) || 1
-
-      if (Math.abs(dy) > Math.abs(dx) * 1.5) {
-        if (dy > 0) {
-          const slot = (totalIn <= 1) ? 2 : (inIdx % 5)
-          p2 = endNodeMap.get(`top_${slot}`) || endNodeMap.get("top_2")
-        } else {
-          const slot = (totalIn <= 1) ? 2 : (inIdx % 5)
-          p2 = endNodeMap.get(`bottom_${slot}`) || endNodeMap.get("bottom_2")
-        }
+      if (isVertical) {
+        const edgePrefix = dy > 0 ? "top" : "bottom"
+        const targetX = p1 ? p1.x : anchorX
+        const candidates = endNodes
+          .filter(n => n.edge === edgePrefix)
+          .sort((a, b) => Math.abs(a.x - targetX) - Math.abs(b.x - targetX))
+        p2 = candidates.find(n => !usedNodes.has(`${end.id}:${n.id}`)) || candidates[0] || endNodeMap.get(`${edgePrefix}_2`)
       } else {
-        if (dx >= 0) {
-          const slot = (totalIn <= 1) ? 1 : (inIdx % 3)
-          p2 = endNodeMap.get(`left_${slot}`) || endNodeMap.get("left_1")
-        } else {
-          const slot = (totalIn <= 1) ? 1 : (inIdx % 3)
-          p2 = endNodeMap.get(`right_${slot}`) || endNodeMap.get("right_1")
-        }
+        const edgePrefix = dx >= 0 ? "left" : "right"
+        const slotOrder = [1, 0, 2]
+        const candidates = slotOrder.map(s => endNodeMap.get(`${edgePrefix}_${s}`)).filter(Boolean)
+        p2 = candidates.find(n => !usedNodes.has(`${end.id}:${n.id}`)) || candidates[0]
       }
+      if (p2) usedNodes.add(`${end.id}:${p2.id}`)
     }
 
     return {
@@ -837,10 +873,36 @@ export default function renderFishbone(component) {
   if (!state.clusterActiveIndices) {
     state.clusterActiveIndices = new Map()
   }
+  if (!state.connNodeOverrides) {
+    state.connNodeOverrides = getSavedConnNodes(storageKey)
+  }
   world.replaceChildren()
 
   const sections = (data.sections || []).map(s => ({ ...s }))
-  const connections = (data.connections || []).map(c => ({ ...c }))
+  let overridesChanged = false
+  const connections = (data.connections || []).map(c => {
+    const copy = { ...c }
+    const pairKey = `${copy.from_section_id}->${copy.to_section_id}`
+    const saved = (copy.id && state.connNodeOverrides[copy.id]) || state.connNodeOverrides[pairKey] || null
+    if (copy.from_node || copy.to_node) {
+      const merged = {
+        from_node: copy.from_node || (saved && saved.from_node) || null,
+        to_node: copy.to_node || (saved && saved.to_node) || null
+      }
+      copy.from_node = merged.from_node
+      copy.to_node = merged.to_node
+      if (copy.id) state.connNodeOverrides[copy.id] = merged
+      state.connNodeOverrides[pairKey] = merged
+      overridesChanged = true
+    } else if (saved) {
+      if (saved.from_node) copy.from_node = saved.from_node
+      if (saved.to_node) copy.to_node = saved.to_node
+    }
+    return copy
+  })
+  if (overridesChanged) {
+    saveConnNodes(storageKey, state.connNodeOverrides)
+  }
   const parts = data.parts || []
   const paletteItems = data.palette_items || []
   const allSections = data.all_sections || sections
@@ -2184,16 +2246,20 @@ export default function renderFishbone(component) {
   const edgeLayer = svgElement("g", { id: "edge-layer" })
   const sectionLayer = svgElement("g", { id: "section-layer" })
   const activeEdgeLayer = svgElement("g", { id: "active-edge-layer" })
+  const handleLayer = svgElement("g", { id: "handle-layer" })
   const ghostLayer = svgElement("g", { id: "ghost-layer" })
   world.appendChild(edgeLayer)
   world.appendChild(sectionLayer)
   world.appendChild(activeEdgeLayer)
+  world.appendChild(handleLayer)
   world.appendChild(ghostLayer)
 
   // Auto-arrange sections logically
   autoArrangeBtn.onclick = () => {
     state.hasUserInteracted = false
     state.fitted = false
+    state.connNodeOverrides = {}
+    clearSavedConnNodes(storageKey)
     try {
       sessionStorage.removeItem("paag_fishbone_view_" + storageKey)
       if (window.__paag_fishbone_views) delete window.__paag_fishbone_views[storageKey]
@@ -2342,6 +2408,8 @@ export default function renderFishbone(component) {
             oldToId: selectedResolved.end.id,
             fromNode: selectedResolved.p1.id,
             toNode: selectedResolved.p2.id,
+            p1: selectedResolved.p1,
+            p2: selectedResolved.p2,
             fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
             connType: selectedResolved.conn.connection_type || "subassembly",
             originX: e.clientX,
@@ -2363,11 +2431,14 @@ export default function renderFishbone(component) {
         oldToId: end.id,
         fromNode: p1.id,
         toNode: p2.id,
+        p1: p1,
+        p2: p2,
         fixedPoint: (handleType === "start") ? p2 : p1,
         connType: conn.connection_type || "subassembly",
         originX: e.clientX,
         originY: e.clientY,
-        isDrag: false
+        isDrag: false,
+        fromHandle: false
       }
     }
 
@@ -2427,6 +2498,8 @@ export default function renderFishbone(component) {
         oldToId: end.id,
         fromNode: p1.id,
         toNode: p2.id,
+        p1: p1,
+        p2: p2,
         fixedPoint: p2,
         fromHandle: true,
         connType: conn.connection_type || "subassembly",
@@ -2442,7 +2515,7 @@ export default function renderFishbone(component) {
         startHandleG.style.pointerEvents = "none"
       }
     }
-    targetEdgeLayer.appendChild(startHandleG)
+    handleLayer.appendChild(startHandleG)
 
     // Arrow-end handle for dragging to a different snap node or different section
     const endHandleG = svgElement("g", {
@@ -2474,6 +2547,8 @@ export default function renderFishbone(component) {
         oldToId: end.id,
         fromNode: p1.id,
         toNode: p2.id,
+        p1: p1,
+        p2: p2,
         fixedPoint: p1,
         fromHandle: true,
         connType: conn.connection_type || "subassembly",
@@ -2489,7 +2564,7 @@ export default function renderFishbone(component) {
         endHandleG.style.pointerEvents = "none"
       }
     }
-    targetEdgeLayer.appendChild(endHandleG)
+    handleLayer.appendChild(endHandleG)
 
     // Selected Connection Action Button (Red X)
     let delGroup = null
@@ -2516,7 +2591,7 @@ export default function renderFishbone(component) {
           connType: conn.connection_type || "subassembly"
         })
       }
-      targetEdgeLayer.appendChild(delGroup)
+      handleLayer.appendChild(delGroup)
     }
 
     edgeRefs.push({
@@ -2677,31 +2752,31 @@ export default function renderFishbone(component) {
       snapCircle.onmousedown = (e) => {
         e.stopPropagation()
         state.hasUserInteracted = true
-        if (selectedResolved) {
-          const isSelStart = (selectedResolved.start.id === section.id && selectedResolved.p1.id === sNode.id)
-          const isSelEnd = (selectedResolved.end.id === section.id && selectedResolved.p2.id === sNode.id)
-          if (isSelStart || isSelEnd) {
-            const selHandleType = isSelStart ? "start" : "end"
-            state.reconnectingConnection = {
-              handleType: selHandleType,
-              connId: selectedResolved.conn.id,
-              fromId: selectedResolved.start.id,
-              fromName: selectedResolved.start.name,
-              oldToId: selectedResolved.end.id,
-              fromNode: selectedResolved.p1.id,
-              toNode: selectedResolved.p2.id,
-              fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
-              connType: selectedResolved.conn.connection_type || "subassembly",
-              originX: e.clientX,
-              originY: e.clientY,
-              isDrag: false,
-              fromHandle: true
-            }
-            return
+        const attachedResolved = (selectedResolved && ((selectedResolved.start.id === section.id && selectedResolved.p1.id === sNode.id) || (selectedResolved.end.id === section.id && selectedResolved.p2.id === sNode.id)))
+          ? selectedResolved
+          : resolvedConns.find(rc => (rc.start.id === section.id && rc.p1.id === sNode.id) || (rc.end.id === section.id && rc.p2.id === sNode.id))
+        if (attachedResolved) {
+          const isStart = (attachedResolved.start.id === section.id && attachedResolved.p1.id === sNode.id)
+          const selHandleType = isStart ? "start" : "end"
+          state.reconnectingConnection = {
+            handleType: selHandleType,
+            connId: attachedResolved.conn.id,
+            fromId: attachedResolved.start.id,
+            fromName: attachedResolved.start.name,
+            oldToId: attachedResolved.end.id,
+            fromNode: attachedResolved.p1.id,
+            toNode: attachedResolved.p2.id,
+            p1: attachedResolved.p1,
+            p2: attachedResolved.p2,
+            fixedPoint: (selHandleType === "start") ? attachedResolved.p2 : attachedResolved.p1,
+            connType: attachedResolved.conn.connection_type || "subassembly",
+            originX: e.clientX,
+            originY: e.clientY,
+            isDrag: false,
+            fromHandle: true
           }
+          return
         }
-        e.stopPropagation()
-        state.hasUserInteracted = true
         state.pendingConnection = {
           fromId: section.id,
           fromName: section.name,
@@ -2723,33 +2798,37 @@ export default function renderFishbone(component) {
     port.onmousedown = (e) => {
       e.stopPropagation()
       state.hasUserInteracted = true
-      if (selectedResolved) {
-        const portX = section.sx + secWidth / 2
-        const portY = section.sy - secHeight / 2 + 21
-        const isSelStart = (selectedResolved.start.id === section.id && (selectedResolved.p1.id === "right_1" || Math.hypot(selectedResolved.p1.x - portX, selectedResolved.p1.y - portY) <= 28))
-        const isSelEnd = (selectedResolved.end.id === section.id && (selectedResolved.p2.id === "right_1" || Math.hypot(selectedResolved.p2.x - portX, selectedResolved.p2.y - portY) <= 28))
-        if (isSelStart || isSelEnd) {
-          const selHandleType = isSelStart ? "start" : "end"
-          state.reconnectingConnection = {
-            handleType: selHandleType,
-            connId: selectedResolved.conn.id,
-            fromId: selectedResolved.start.id,
-            fromName: selectedResolved.start.name,
-            oldToId: selectedResolved.end.id,
-            fromNode: selectedResolved.p1.id,
-            toNode: selectedResolved.p2.id,
-            fixedPoint: (selHandleType === "start") ? selectedResolved.p2 : selectedResolved.p1,
-            connType: selectedResolved.conn.connection_type || "subassembly",
-            originX: e.clientX,
-            originY: e.clientY,
-            isDrag: false,
-            fromHandle: true
-          }
-          return
+      const portX = section.sx + secWidth / 2
+      const portY = section.sy - secHeight / 2 + 21
+      const matchesPort = (rc) => (
+        (rc.start.id === section.id && (rc.p1.id === "right_1" || Math.hypot(rc.p1.x - portX, rc.p1.y - portY) <= 28)) ||
+        (rc.end.id === section.id && (rc.p2.id === "right_1" || Math.hypot(rc.p2.x - portX, rc.p2.y - portY) <= 28))
+      )
+      const attachedPortResolved = (selectedResolved && matchesPort(selectedResolved))
+        ? selectedResolved
+        : resolvedConns.find(matchesPort)
+      if (attachedPortResolved) {
+        const isStart = (attachedPortResolved.start.id === section.id && (attachedPortResolved.p1.id === "right_1" || Math.hypot(attachedPortResolved.p1.x - portX, attachedPortResolved.p1.y - portY) <= 28))
+        const selHandleType = isStart ? "start" : "end"
+        state.reconnectingConnection = {
+          handleType: selHandleType,
+          connId: attachedPortResolved.conn.id,
+          fromId: attachedPortResolved.start.id,
+          fromName: attachedPortResolved.start.name,
+          oldToId: attachedPortResolved.end.id,
+          fromNode: attachedPortResolved.p1.id,
+          toNode: attachedPortResolved.p2.id,
+          p1: attachedPortResolved.p1,
+          p2: attachedPortResolved.p2,
+          fixedPoint: (selHandleType === "start") ? attachedPortResolved.p2 : attachedPortResolved.p1,
+          connType: attachedPortResolved.conn.connection_type || "subassembly",
+          originX: e.clientX,
+          originY: e.clientY,
+          isDrag: false,
+          fromHandle: true
         }
+        return
       }
-      e.stopPropagation()
-      state.hasUserInteracted = true
       state.pendingConnection = {
         fromId: section.id,
         fromName: section.name,
@@ -3676,101 +3755,38 @@ export default function renderFishbone(component) {
         if (currentLine) currentLine.classList.add("dragging-dimmed")
 
         document.querySelectorAll(".snap-target-highlight").forEach(el => el.classList.remove("snap-target-highlight"))
+        document.querySelectorAll(".section-snap-node").forEach(el => {
+          const sid = el.getAttribute("data-section-id")
+          if (!rConn.fromHandle || rConn.handleType !== "start" || sid === rConn.fromId || sid === rConn.oldToId) {
+            el.classList.add("connecting-active")
+          }
+        })
 
-        if (rConn.handleType === "start") {
-          // Dragging tail: snap node on source section (fromId)
-          document.querySelectorAll(`.section-snap-node[data-section-id="${rConn.fromId}"]`).forEach(el => el.classList.add("connecting-active"))
-
-          const sourceSec = sections.find(s => s.id === rConn.fromId)
-          const snapRes = sourceSec ? findBestSnapTarget([sourceSec], currX, currY, 140) : null
-          const nearestStartNode = snapRes ? snapRes.node : null
-
-          if (nearestStartNode) {
-            const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${sourceSec.id}"][data-node-id="${nearestStartNode.id}"]`)
+        const resolved = resolveReconnectTarget(rConn, currX, currY)
+        if (resolved && resolved.highlights) {
+          resolved.highlights.forEach(h => {
+            const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${h.sectionId}"][data-node-id="${h.nodeId}"]`)
             if (matchedCircle) matchedCircle.classList.add("snap-target-highlight")
-          }
+          })
+        }
 
-          const p2 = rConn.fixedPoint
-          let ghostPathD = ""
-          if (nearestStartNode) {
-            const p1 = { x: nearestStartNode.x, y: nearestStartNode.y, nx: nearestStartNode.nx, ny: nearestStartNode.ny }
-            const pathData = computeSmoothConnectionPath(p1, p2)
-            ghostPathD = pathData.d
-          } else {
-            const dx = p2.x - currX
-            const dy = p2.y - currY
-            const dist = Math.hypot(dx, dy)
-            const bend = Math.min(Math.max(dist * 0.4, 30), 120)
-            const c2x = p2.x + (p2.nx || -1) * bend
-            const c2y = p2.y + (p2.ny || 0) * bend
-            ghostPathD = `M ${currX} ${currY} Q ${c2x} ${c2y} ${p2.x} ${p2.y}`
-          }
-
+        if (resolved && resolved.p1 && resolved.p2) {
+          const pathData = computeSmoothConnectionPath(resolved.p1, resolved.p2)
           const ghost = svgElement("path", {
-            d: ghostPathD,
+            d: pathData.d,
             fill: "none",
-            stroke: nearestStartNode ? "#22c55e" : "#3b82f6",
+            stroke: "#22c55e",
             "stroke-width": 3.5,
             "stroke-dasharray": "6 4",
-            "marker-end": "url(#arrow-flow)"
+            "marker-end": "url(#arrow-snap)"
           })
           ghostLayer.appendChild(ghost)
+          const hp = resolved.handlePoint || resolved.p2
           const ghostHandle = svgElement("circle", {
-            cx: nearestStartNode ? nearestStartNode.x : currX,
-            cy: nearestStartNode ? nearestStartNode.y : currY,
-            r: 7,
-            fill: nearestStartNode ? "#22c55e" : "#3b82f6",
-            stroke: "white",
-            "stroke-width": 2
-          })
-          ghostLayer.appendChild(ghostHandle)
-
-        } else {
-          // Dragging arrowhead (handleType === "end")
-          document.querySelectorAll(".section-snap-node").forEach(el => {
-            if (el.getAttribute("data-section-id") !== rConn.fromId) {
-              el.classList.add("connecting-active")
-            }
-          })
-
-          const candidateSections = sections.filter(s => s.id !== rConn.fromId)
-          const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
-
-          if (snapRes) {
-            const matchedCircle = document.querySelector(`.section-snap-node[data-section-id="${snapRes.section.id}"][data-node-id="${snapRes.node.id}"]`)
-            if (matchedCircle) matchedCircle.classList.add("snap-target-highlight")
-          }
-
-          const p1 = rConn.fixedPoint
-          let ghostPathD = ""
-          if (snapRes) {
-            const p2 = { x: snapRes.node.x, y: snapRes.node.y, nx: snapRes.node.nx, ny: snapRes.node.ny }
-            const pathData = computeSmoothConnectionPath(p1, p2)
-            ghostPathD = pathData.d
-          } else {
-            const dx = currX - p1.x
-            const dy = currY - p1.y
-            const dist = Math.hypot(dx, dy)
-            const bend = Math.min(Math.max(dist * 0.4, 30), 120)
-            const c1x = p1.x + (p1.nx || 1) * bend
-            const c1y = p1.y + (p1.ny || 0) * bend
-            ghostPathD = `M ${p1.x} ${p1.y} Q ${c1x} ${c1y} ${currX} ${currY}`
-          }
-
-          const ghost = svgElement("path", {
-            d: ghostPathD,
-            fill: "none",
-            stroke: snapRes ? "#22c55e" : "#3b82f6",
-            "stroke-width": 3.5,
-            "stroke-dasharray": "6 4",
-            "marker-end": snapRes ? "url(#arrow-snap)" : "url(#arrow-flow)"
-          })
-          ghostLayer.appendChild(ghost)
-          const ghostHandle = svgElement("circle", {
-            cx: snapRes ? snapRes.node.x : currX,
-            cy: snapRes ? snapRes.node.y : currY,
+            cx: hp.x,
+            cy: hp.y,
             r: 7.5,
-            fill: snapRes ? "#22c55e" : "#3b82f6",
+            fill: "#22c55e",
             stroke: "white",
             "stroke-width": 2
           })
@@ -3779,6 +3795,143 @@ export default function renderFishbone(component) {
       }
       return
     }
+  }
+
+  function resolveReconnectTarget(rConn, currX, currY) {
+    const sourceSec = sectionById.get(rConn.fromId) || sections.find(s => s.id === rConn.fromId)
+    const endSec = sectionById.get(rConn.oldToId) || sections.find(s => s.id === rConn.oldToId)
+    const origP1 = rConn.p1 || (sourceSec ? findNearestNodePoint(sourceSec, currX, currY) : null)
+    const origP2 = rConn.p2 || (endSec ? findNearestNodePoint(endSec, currX, currY) : null)
+
+    if (!rConn.fromHandle) {
+      const otherSections = sections.filter(s => s.id !== rConn.fromId && s.id !== rConn.oldToId)
+      const otherSnap = findBestSnapTarget(otherSections, currX, currY, 110)
+      const nearStart = sourceSec ? findNearestNodePoint(sourceSec, currX, currY) : null
+      const nearEnd = endSec ? findNearestNodePoint(endSec, currX, currY) : null
+      const dStart = nearStart ? Math.hypot(nearStart.x - currX, nearStart.y - currY) : Infinity
+      const dEnd = nearEnd ? Math.hypot(nearEnd.x - currX, nearEnd.y - currY) : Infinity
+
+      if (otherSnap && otherSnap.distance < Math.min(dStart, dEnd)) {
+        return {
+          mode: "move_connection",
+          toSectionId: otherSnap.section.id,
+          fromNode: rConn.fromNode,
+          toNode: otherSnap.node.id,
+          p1: origP1,
+          p2: otherSnap.node,
+          highlights: [{ sectionId: otherSnap.section.id, nodeId: otherSnap.node.id }],
+          handlePoint: otherSnap.node
+        }
+      }
+
+      if (nearStart && dStart <= 75 && dEnd > 110) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: nearStart.id,
+          toNode: rConn.toNode,
+          p1: nearStart,
+          p2: origP2,
+          highlights: [{ sectionId: rConn.fromId, nodeId: nearStart.id }],
+          handlePoint: nearStart
+        }
+      }
+
+      if (nearEnd && dEnd <= 75 && dStart > 110) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: rConn.fromNode,
+          toNode: nearEnd.id,
+          p1: origP1,
+          p2: nearEnd,
+          highlights: [{ sectionId: rConn.oldToId, nodeId: nearEnd.id }],
+          handlePoint: nearEnd
+        }
+      }
+
+      if (nearStart && nearEnd) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: nearStart.id,
+          toNode: nearEnd.id,
+          p1: nearStart,
+          p2: nearEnd,
+          highlights: [
+            { sectionId: rConn.fromId, nodeId: nearStart.id },
+            { sectionId: rConn.oldToId, nodeId: nearEnd.id }
+          ],
+          handlePoint: (dStart <= dEnd) ? nearStart : nearEnd
+        }
+      }
+    }
+
+    if (rConn.handleType === "start") {
+      const nearStart = sourceSec ? findNearestNodePoint(sourceSec, currX, currY) : null
+      const nearEnd = endSec ? findNearestNodePoint(endSec, currX, currY) : null
+      const dStart = nearStart ? Math.hypot(nearStart.x - currX, nearStart.y - currY) : Infinity
+      const dEnd = nearEnd ? Math.hypot(nearEnd.x - currX, nearEnd.y - currY) : Infinity
+      if (nearEnd && dEnd <= 65 && dStart > 140) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: rConn.fromNode,
+          toNode: nearEnd.id,
+          p1: origP1,
+          p2: nearEnd,
+          highlights: [{ sectionId: rConn.oldToId, nodeId: nearEnd.id }],
+          handlePoint: nearEnd
+        }
+      }
+      if (nearStart) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: nearStart.id,
+          toNode: rConn.toNode,
+          p1: nearStart,
+          p2: origP2,
+          highlights: [{ sectionId: rConn.fromId, nodeId: nearStart.id }],
+          handlePoint: nearStart
+        }
+      }
+      return null
+    }
+
+    const candidateSections = sections.filter(s => s.id !== rConn.fromId)
+    let snapRes = findBestSnapTarget(candidateSections, currX, currY, 240)
+    if (!snapRes && endSec) {
+      const nearEnd = findNearestNodePoint(endSec, currX, currY)
+      if (nearEnd) {
+        snapRes = { section: endSec, node: nearEnd, distance: Math.hypot(nearEnd.x - currX, nearEnd.y - currY) }
+      }
+    }
+    if (snapRes) {
+      if (snapRes.section.id === rConn.oldToId) {
+        return {
+          mode: "update_nodes",
+          toSectionId: rConn.oldToId,
+          fromNode: rConn.fromNode,
+          toNode: snapRes.node.id,
+          p1: origP1,
+          p2: snapRes.node,
+          highlights: [{ sectionId: rConn.oldToId, nodeId: snapRes.node.id }],
+          handlePoint: snapRes.node
+        }
+      }
+      return {
+        mode: "move_connection",
+        toSectionId: snapRes.section.id,
+        fromNode: rConn.fromNode,
+        toNode: snapRes.node.id,
+        p1: origP1,
+        p2: snapRes.node,
+        highlights: [{ sectionId: snapRes.section.id, nodeId: snapRes.node.id }],
+        handlePoint: snapRes.node
+      }
+    }
+    return null
   }
 
   window.onmouseup = (e) => {
@@ -3799,9 +3952,17 @@ export default function renderFishbone(component) {
       const currY = (e.clientY - rect.top - state.y) / state.scale
 
       const candidateSections = sections.filter(s => s.id !== fromId)
-      const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
+      const snapRes = findBestSnapTarget(candidateSections, currX, currY, 180)
 
       if (snapRes) {
+        const updatedNodes = { from_node: fromNode, to_node: snapRes.node.id }
+        state.connNodeOverrides[`${fromId}->${snapRes.section.id}`] = updatedNodes
+        const existingConn = connections.find(c => c.from_section_id === fromId && c.to_section_id === snapRes.section.id)
+        if (existingConn && existingConn.id) {
+          state.connNodeOverrides[existingConn.id] = updatedNodes
+        }
+        saveConnNodes(storageKey, state.connNodeOverrides)
+        renderWorld()
         component.setTriggerValue("create_connection", {
           from_section_id: fromId,
           to_section_id: snapRes.section.id,
@@ -3824,55 +3985,40 @@ export default function renderFishbone(component) {
         const rect = svg.getBoundingClientRect()
         const currX = (e.clientX - rect.left - state.x) / state.scale
         const currY = (e.clientY - rect.top - state.y) / state.scale
+        const resolved = resolveReconnectTarget(rConn, currX, currY)
 
-        if (rConn.handleType === "start") {
-          // Adjusting start snap node on source section
-          const sourceSec = sections.find(s => s.id === rConn.fromId)
-          if (sourceSec) {
-            const snapRes = findBestSnapTarget([sourceSec], currX, currY, 140)
-            if (snapRes && snapRes.node.id !== rConn.fromNode) {
+        if (resolved) {
+          if (resolved.mode === "update_nodes") {
+            const updatedNodes = { from_node: resolved.fromNode, to_node: resolved.toNode }
+            if (rConn.connId) state.connNodeOverrides[rConn.connId] = updatedNodes
+            state.connNodeOverrides[`${rConn.fromId}->${rConn.oldToId}`] = updatedNodes
+            saveConnNodes(storageKey, state.connNodeOverrides)
+            renderWorld()
+            if (resolved.fromNode !== rConn.fromNode || resolved.toNode !== rConn.toNode) {
               component.setTriggerValue("update_connection_nodes", {
                 connection_id: rConn.connId,
                 from_section_id: rConn.fromId,
                 to_section_id: rConn.oldToId,
-                from_node: snapRes.node.id,
-                to_node: rConn.toNode
+                from_node: resolved.fromNode,
+                to_node: resolved.toNode
               })
             }
-          }
-        } else {
-          // Adjusting arrowhead snap node or moving to another section
-          const candidateSections = sections.filter(s => s.id !== rConn.fromId)
-          const snapRes = findBestSnapTarget(candidateSections, currX, currY, 140)
-
-          if (snapRes) {
-            const targetSec = snapRes.section
-            const toNodeId = snapRes.node.id
-
-            if (targetSec.id === rConn.oldToId) {
-              // Dropped on same section: snap node position updated!
-              if (toNodeId !== rConn.toNode) {
-                component.setTriggerValue("update_connection_nodes", {
-                  connection_id: rConn.connId,
-                  from_section_id: rConn.fromId,
-                  to_section_id: rConn.oldToId,
-                  from_node: rConn.fromNode,
-                  to_node: toNodeId
-                })
-              }
-            } else {
-              // Dropped on different section: move connection!
-              state.selectedConnId = null
-              component.setTriggerValue("move_connection", {
-                connection_id: rConn.connId,
-                from_section_id: rConn.fromId,
-                to_section_id: targetSec.id,
-                old_to_section_id: rConn.oldToId,
-                connection_type: rConn.connType,
-                from_node: rConn.fromNode,
-                to_node: toNodeId
-              })
-            }
+          } else if (resolved.mode === "move_connection") {
+            const updatedNodes = { from_node: resolved.fromNode, to_node: resolved.toNode }
+            if (rConn.connId) state.connNodeOverrides[rConn.connId] = updatedNodes
+            state.connNodeOverrides[`${rConn.fromId}->${resolved.toSectionId}`] = updatedNodes
+            saveConnNodes(storageKey, state.connNodeOverrides)
+            state.selectedConnId = null
+            renderWorld()
+            component.setTriggerValue("move_connection", {
+              connection_id: rConn.connId,
+              from_section_id: rConn.fromId,
+              to_section_id: resolved.toSectionId,
+              old_to_section_id: rConn.oldToId,
+              connection_type: rConn.connType,
+              from_node: resolved.fromNode,
+              to_node: resolved.toNode
+            })
           }
         }
       } else {
@@ -4890,10 +5036,10 @@ export default function renderFishbone(component) {
 }
 """
 
-_FISHBONE_VISUAL_HOT_RELOAD_REV = 6
+_FISHBONE_VISUAL_HOT_RELOAD_REV = 7
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v41",
+    "paag_interactive_fishbone_builder_v42",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -4957,6 +5103,7 @@ def interactive_fishbone(
     on_unstack_part_variant: Callable[[], None] | None = None,
 ) -> Any:
     """Render the simplified interactive Fishbone builder canvas with simple blocks and direct parent/child flow."""
+    _noop = lambda: None  # noqa: E731
     kwargs = {
         "key": key,
         "data": {
@@ -4969,36 +5116,21 @@ def interactive_fishbone(
         },
         "width": "stretch",
         "height": "content",
+        "on_create_section_change": on_create_section or _noop,
+        "on_move_node_change": on_move_node or _noop,
+        "on_auto_arrange_change": on_auto_arrange or _noop,
+        "on_create_connection_change": on_create_connection or _noop,
+        "on_move_connection_change": on_move_connection or _noop,
+        "on_update_connection_nodes_change": on_update_connection_nodes or _noop,
+        "on_delete_connection_change": on_delete_connection or _noop,
+        "on_delete_section_request_change": on_delete_section_request or _noop,
+        "on_clear_fishbone_request_change": on_clear_fishbone_request or _noop,
+        "on_drop_part_change": on_drop_part or _noop,
+        "on_drop_assembly_change": on_drop_assembly or _noop,
+        "on_remove_part_change": on_remove_part or _noop,
+        "on_move_part_assignment_change": on_move_part_assignment or _noop,
+        "on_replicate_part_uses_change": on_replicate_part_uses or _noop,
+        "on_unstack_part_variant_change": on_unstack_part_variant or _noop,
     }
-    if on_create_section:
-        kwargs["on_create_section_change"] = on_create_section
-    if on_move_node:
-        kwargs["on_move_node_change"] = on_move_node
-    if on_auto_arrange:
-        kwargs["on_auto_arrange_change"] = on_auto_arrange
-    if on_create_connection:
-        kwargs["on_create_connection_change"] = on_create_connection
-    if on_move_connection:
-        kwargs["on_move_connection_change"] = on_move_connection
-    if on_update_connection_nodes:
-        kwargs["on_update_connection_nodes_change"] = on_update_connection_nodes
-    if on_delete_connection:
-        kwargs["on_delete_connection_change"] = on_delete_connection
-    if on_delete_section_request:
-        kwargs["on_delete_section_request_change"] = on_delete_section_request
-    if on_clear_fishbone_request:
-        kwargs["on_clear_fishbone_request_change"] = on_clear_fishbone_request
-    if on_drop_part:
-        kwargs["on_drop_part_change"] = on_drop_part
-    if on_drop_assembly:
-        kwargs["on_drop_assembly_change"] = on_drop_assembly
-    if on_remove_part:
-        kwargs["on_remove_part_change"] = on_remove_part
-    if on_move_part_assignment:
-        kwargs["on_move_part_assignment_change"] = on_move_part_assignment
-    if on_replicate_part_uses:
-        kwargs["on_replicate_part_uses_change"] = on_replicate_part_uses
-    if on_unstack_part_variant:
-        kwargs["on_unstack_part_variant_change"] = on_unstack_part_variant
 
     return _FISHBONE_COMPONENT(**kwargs)
