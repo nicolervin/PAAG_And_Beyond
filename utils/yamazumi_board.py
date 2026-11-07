@@ -163,12 +163,17 @@ _HTML = """
         <span id="board-toolbar-summary"></span>
       </div>
       <div class="board-toolbar-controls">
-        <button id="add-pitch" type="button">＋ Add Pitch</button>
+        <button id="undo-board-btn" type="button" title="Revert the most recent Yamazumi board edit" class="btn-tool" disabled>↶ Undo last edit</button>
+        <button id="redo-board-btn" type="button" title="Reapply the most recently undone Yamazumi board edit" class="btn-tool" disabled>↷ Redo last edit</button>
+        <button id="discard-board-btn" type="button" title="Discard all unsaved Yamazumi board changes and restore the last saved stack order" class="btn-tool" disabled>↻ Discard all edits</button>
+        <button id="save-board-btn" type="button" title="Save and refresh Yamazumi board changes" class="btn-tool" style="background:#16a34a; color:white; border-color:#16a34a; font-weight:700;">💾 Save &amp; Refresh</button>
+        <button id="print-board" type="button" title="Choose whether to print all pitches or only pitches containing work elements across pages in readable mode" class="btn-tool">🖨️ Print</button>
+        <button id="add-pitch" type="button" title="Add new pitch" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Pitch</button>
         <div class="scale-mode-toggle" id="scale-mode-toggle" role="group" aria-label="Board display scale">
           <button id="scale-to-scale" type="button" class="scale-mode-btn active" data-scale-mode="to_scale" aria-pressed="true" title="Scale work elements proportionally to cycle time">To Scale</button>
           <button id="scale-readable" type="button" class="scale-mode-btn" data-scale-mode="readable" aria-pressed="false" title="Expand work elements so text is readable">Readable</button>
         </div>
-        <button id="print-board" type="button" title="Print the Yamazumi board">🖨️ Print</button>
+
         <div class="fullscreen-zoom-controls" id="fullscreen-zoom-controls">
           <button id="zoom-out" type="button" title="Zoom out">−</button>
           <button id="zoom-in" type="button" title="Zoom in">+</button>
@@ -227,11 +232,11 @@ _HTML = """
 
 _CSS = """
 :host { display:block; width:100%; max-width:100%; color: var(--st-text-color); font-family: var(--st-font); }
-.board { position:relative; box-sizing:border-box; width:100%; max-width:100%; min-width:0; padding:4px 2px 16px; overflow:visible; background:var(--st-background-color); }
+.board { position:relative; box-sizing:border-box; width:100%; max-width:100%; min-width:0; padding:0; border:1px solid var(--st-border-color); border-radius:var(--st-base-radius); overflow:hidden; background:var(--st-background-color); }
 .board.fullscreen-board { position:fixed; inset:0; z-index:999995; width:100vw; height:100vh; max-width:100vw; min-width:0; display:flex; flex-direction:column; padding:0; overflow:hidden; background:var(--st-background-color); }
-.board-header { position:sticky; left:0; z-index:30; box-sizing:border-box; width:100%; max-width:100%; flex:0 0 auto; background:var(--st-background-color); }
+.board-header { position:sticky; left:0; z-index:30; box-sizing:border-box; width:100%; max-width:100%; flex:0 0 auto; border-bottom:1px solid var(--st-border-color); background:var(--st-background-color); }
 .board.fullscreen-board .board-header { position:sticky; top:0; left:0; z-index:999996; padding:0; border-bottom:1px solid var(--st-border-color); background:var(--st-background-color); box-shadow:0 2px 8px rgba(0,0,0,.08); }
-.board-viewport { position:relative; box-sizing:border-box; width:100%; max-width:100%; min-width:0; overflow-x:auto; overflow-y:visible; }
+.board-viewport { position:relative; box-sizing:border-box; width:100%; max-width:100%; min-width:0; padding:8px 14px 16px; overflow-x:auto; overflow-y:visible; }
 .board.fullscreen-board .board-viewport { flex:1 1 auto; min-height:0; padding:12px; overflow:scroll; overscroll-behavior:contain; scrollbar-gutter:stable both-edges; scrollbar-color:var(--st-secondary-text-color) var(--st-secondary-background-color); }
 .board.fullscreen-board.is-panning .board-viewport { cursor:grabbing; user-select:none; }
 .board.fullscreen-board .board-viewport::-webkit-scrollbar { width:14px; height:14px; }
@@ -239,24 +244,24 @@ _CSS = """
 .board.fullscreen-board .board-viewport::-webkit-scrollbar-thumb { border:3px solid var(--st-secondary-background-color); border-radius:10px; background:var(--st-secondary-text-color); }
 .board-zoom-stage { position:relative; box-sizing:border-box; width:max-content; min-width:100%; }
 .board-content { box-sizing:border-box; width:max-content; min-width:100%; transform-origin:0 0; }
-.board-actions { display:flex; align-items:center; gap:8px; margin:2px 0 10px; flex-wrap:wrap; }
+.board-actions { width:100%; box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; gap:8px 12px; margin:0; padding:8px 14px; border-bottom:1px solid var(--st-border-color); background:var(--st-secondary-background-color); flex-wrap:wrap; }
 .board.fullscreen-board .board-actions { width:100%; box-sizing:border-box; margin:0; padding:10px 16px; border-bottom:1px solid var(--st-border-color); border-radius:0; background:var(--st-secondary-background-color); justify-content:space-between; gap:12px; flex-wrap:wrap; }
-.board-toolbar-title { display:none; align-items:baseline; gap:10px; min-width:0; }
+.board-toolbar-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; min-width:0; }
 .board.fullscreen-board .board-toolbar-title { display:flex; }
 .board-toolbar-title strong { font-size:.95rem; color:var(--st-text-color); }
 .board-toolbar-title span { color:var(--st-secondary-text-color); font-size:.82rem; white-space:nowrap; }
-.board-toolbar-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.board-toolbar-controls { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .scale-mode-toggle { display:none; align-items:center; gap:2px; padding:2px; border:1px solid var(--st-border-color); border-radius:7px; background:var(--st-background-color); }
 .board.fullscreen-board .scale-mode-toggle { display:inline-flex; }
 .scale-mode-toggle button.scale-mode-btn { border:none; border-radius:5px; padding:4px 10px; font-size:.8rem; font-weight:650; color:var(--st-secondary-text-color); background:transparent; cursor:pointer; }
 .scale-mode-toggle button.scale-mode-btn:hover { color:var(--st-primary-color); }
 .scale-mode-toggle button.scale-mode-btn.active { background:var(--st-primary-color); color:#fff; }
-#print-board { display:none; }
+#print-board { display:inline-flex; align-items:center; gap:4px; }
 .board.fullscreen-board #print-board { display:inline-flex; align-items:center; gap:4px; }
 .fullscreen-zoom-controls { display:none; align-items:center; gap:6px; margin-left:2px; }
 .board.fullscreen-board .fullscreen-zoom-controls { display:inline-flex; }
 .fullscreen-zoom-controls button { min-width:34px; text-align:center; }
-.board-actions button:not(.scale-mode-btn), .add-element, .edit-pitch, .delete-unassigned, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
+.board-actions button:not(.scale-mode-btn) { display:inline-flex; align-items:center; justify-content:center; gap:4px; min-width:30px; min-height:30px; height:auto; padding:4px 10px; white-space:nowrap; flex-shrink:0; line-height:1.2; box-sizing:border-box; border:1px solid var(--st-border-color); border-radius:var(--st-button-radius); color:var(--st-text-color); background:var(--st-background-color); cursor:pointer; font:inherit; font-size:.81rem; font-weight:600; } .board-actions button.btn-tool { background:var(--st-secondary-background-color); } .board-actions button:not(.scale-mode-btn):hover:not(:disabled) { border-color:var(--st-primary-color); color:var(--st-primary-color); } .board-actions button#save-board-btn:hover:not(:disabled), .board-actions button#add-pitch:hover:not(:disabled) { opacity:.92; color:#fff; } .add-element, .edit-pitch, .delete-unassigned, .edit-element { border:1px solid var(--st-primary-color); border-radius:6px; padding:5px 9px; color:var(--st-primary-color); background:var(--st-background-color); cursor:pointer; font-weight:650; }
 .board.fullscreen-board .board-actions button:not(.scale-mode-btn) { min-height:32px; padding:4px 10px; border-color:var(--st-border-color); color:var(--st-text-color); font-size:.84rem; }
 .board.fullscreen-board .board-actions button#add-pitch { background:var(--st-primary-color); border-color:var(--st-primary-color); color:#fff; }
 .board.fullscreen-board .board-actions button:not(.scale-mode-btn):hover { border-color:var(--st-primary-color); color:var(--st-primary-color); }
@@ -266,7 +271,8 @@ _CSS = """
 .board.fullscreen-board.readable-mode .scale-notice { display:block; margin:8px 16px; }
 @media print {
   .board.fullscreen-board { position:static !important; width:max-content !important; height:auto !important; padding:0 !important; overflow:visible !important; }
-  .board-actions, .pitch-actions, .edit-element, .takt-line, .status, .print-dialog-backdrop { display:none !important; }
+  .board-actions, .pitch-actions, .edit-element, .takt-line, .status, .print-dialog-backdrop, .drop-slot { display:none !important; }
+  .pitch, .stack { overflow:hidden !important; }
   .board-viewport, .board-zoom-stage, .board-content { transform:none !important; width:max-content !important; height:auto !important; overflow:visible !important; }
   .pitch, .pitch-placeholder, .lane { break-inside:avoid !important; page-break-inside:avoid !important; }
   .element { height:auto !important; flex:0 0 auto !important; min-height:32px !important; padding:5px 8px 6px 8px !important; overflow:visible !important; }
@@ -325,7 +331,7 @@ _CSS = """
 .criticality-tag { box-sizing:border-box; padding:1px 4px; border:1px solid currentColor; border-radius:3px; background:#fff; font-weight:900; line-height:1.2; white-space:nowrap; }
 .criticality-tag.ctq { color:#8a4b00; background:#fff4d6; }
 .criticality-tag.safety { color:#8b0000; background:#ffe8e8; }
-.legend { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:4px; font-size:.8rem; }
+.legend { display:flex; flex-wrap:wrap; gap:12px; padding:6px 14px; margin:0; font-size:.8rem; background:var(--st-background-color); }
 .board.fullscreen-board .legend { padding:8px 18px 8px 18px; margin-bottom:0; background:var(--st-background-color); }
 .swatch { width:12px; height:12px; display:inline-block; border-radius:2px; margin-right:4px; }
 .unassigned-lane { display:flex; margin:8px 2px 12px; }
@@ -412,7 +418,45 @@ export default function(component) {
     }
   }
   syncScaleModeControls()
-  addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true })
+  addPitch.onclick = () => setTriggerValue('add_pitch', { requested: true, ts: Date.now() })
+  const undoBoardBtn = parentElement.querySelector('#undo-board-btn')
+  const redoBoardBtn = parentElement.querySelector('#redo-board-btn')
+  const discardBoardBtn = parentElement.querySelector('#discard-board-btn')
+  const saveBoardBtn = parentElement.querySelector('#save-board-btn')
+  const unsavedCount = Number(data.unsaved_count) || 0
+  const canUndoLast = Boolean(data.can_undo_last)
+  const canRedoLast = Boolean(data.can_redo_last)
+  const canDiscardAll = Boolean(data.can_discard_all) || unsavedCount > 0
+  if (undoBoardBtn) {
+    undoBoardBtn.disabled = !canUndoLast
+    undoBoardBtn.onclick = () => {
+      if (!canUndoLast) return
+      setTriggerValue('undo_last_edit', { requested: true, ts: Date.now() })
+    }
+  }
+  if (redoBoardBtn) {
+    redoBoardBtn.disabled = !canRedoLast
+    redoBoardBtn.onclick = () => {
+      if (!canRedoLast) return
+      setTriggerValue('redo_last_edit', { requested: true, ts: Date.now() })
+    }
+  }
+  if (discardBoardBtn) {
+    discardBoardBtn.disabled = !canDiscardAll
+    discardBoardBtn.onclick = () => {
+      if (!canDiscardAll) return
+      setTriggerValue('discard_all_edits', { requested: true, ts: Date.now() })
+    }
+  }
+  if (saveBoardBtn) {
+    saveBoardBtn.textContent = unsavedCount > 0 ? `💾 Save & Refresh (${unsavedCount})` : '💾 Save & Refresh'
+    saveBoardBtn.title = unsavedCount > 0
+      ? `Save and refresh Yamazumi board changes (${unsavedCount} unsaved edit${unsavedCount === 1 ? '' : 's'})`
+      : 'Save and refresh Yamazumi board changes'
+    saveBoardBtn.onclick = () => {
+      setTriggerValue('save_and_refresh', { requested: true, ts: Date.now() })
+    }
+  }
   legend.innerHTML = `<span><i class="swatch" style="background:#35c84a"></i>Cycle</span>`
     + `<span><i class="swatch" style="background:#ffd54f"></i>Periodic</span>`
     + `<span><i class="swatch" style="background:#ef5350"></i>Fluctuation</span>`
@@ -1220,11 +1264,58 @@ export default function(component) {
           padding-right: 52px !important;
           line-height: 1.25 !important;
         }
+        .print-page-stage.board {
+          height: auto !important;
+          flex: 0 0 auto !important;
+          max-width: none !important;
+        }
+        .print-page-header,
+        .print-page-stage .scale-notice,
+        .print-page-stage .lane-label,
+        .print-page-stage .line {
+          position: relative !important;
+          z-index: 5 !important;
+          flex: 0 0 auto !important;
+        }
+        .print-page-stage .lane,
+        .print-page-stage .lane.north,
+        .print-page-stage .lane.south {
+          flex: 0 0 auto !important;
+          height: auto !important;
+          min-height: auto !important;
+        }
+        .print-page-stage .pitch,
+        .print-page-stage .pitch-placeholder {
+          height: auto !important;
+          min-height: auto !important;
+          overflow: hidden !important;
+        }
+        .print-page-stage .variants,
+        .print-page-stage .pitch.north .variants,
+        .print-page-stage .pitch.south .variants {
+          flex: 1 0 auto !important;
+          min-height: auto !important;
+        }
+        .print-page-stage .variant {
+          flex: 1 1 0% !important;
+          min-height: auto !important;
+        }
+        .print-page-stage .stack,
+        .print-page-stage .pitch.north .stack,
+        .print-page-stage .pitch.south .stack {
+          flex: 1 0 auto !important;
+          min-height: auto !important;
+          height: auto !important;
+          overflow: hidden !important;
+        }
+        .print-page-stage .drop-slot {
+          display: none !important;
+        }
       </style></head><body>${sheetsHtml}</body></html>`)
       frameDoc.close()
       const prepareAndPrint = () => {
         try {
-          frameDoc.querySelectorAll('.takt-line, .status').forEach(el => el.remove())
+          frameDoc.querySelectorAll('.takt-line, .status, .drop-slot').forEach(el => el.remove())
           frameDoc.querySelectorAll('.stack').forEach(el => el.classList.remove('takt-scale'))
           frameDoc.querySelectorAll('.element').forEach(el => {
             el.style.removeProperty('--element-height')
@@ -1242,11 +1333,81 @@ export default function(component) {
             const maxTitleH = Math.max(0, ...titles.map(el => el.scrollHeight))
             for (const el of infos) el.style.minHeight = `${maxInfoH}px`
             for (const el of titles) el.style.minHeight = `${maxTitleH}px`
+            stage.style.width = ''
+            stage.style.transform = ''
+            stage.style.transformOrigin = ''
+            stage.style.zoom = ''
+            const measureStackElementsHeight = stEl => {
+              const elChildren = [...stEl.querySelectorAll(':scope > .element')]
+              const childrenH = elChildren.reduce(
+                (sum, ch) => sum + Math.max(ch.offsetHeight, ch.scrollHeight),
+                0,
+              )
+              return Math.max(120, childrenH + 6)
+            }
+            const equalizeStageHeights = () => {
+              const stEls = [...stage.querySelectorAll('.stack')]
+              const pEls = [...stage.querySelectorAll('.pitch, .pitch-placeholder')]
+              for (const el of [...infos, ...titles, ...stEls, ...pEls]) {
+                el.style.removeProperty('min-height')
+              }
+              const mInfoH = Math.max(0, ...infos.map(el => el.scrollHeight))
+              const mTitleH = Math.max(0, ...titles.map(el => el.scrollHeight))
+              for (const el of infos) el.style.setProperty('min-height', `${mInfoH}px`, 'important')
+              for (const el of titles) el.style.setProperty('min-height', `${mTitleH}px`, 'important')
+              const mStackH = Math.max(120, ...stEls.map(measureStackElementsHeight))
+              for (const el of stEls) el.style.setProperty('min-height', `${mStackH}px`, 'important')
+              const mPitchH = Math.max(
+                0,
+                ...pEls.map(el => Math.max(el.scrollHeight, el.offsetHeight)),
+              )
+              for (const el of pEls) el.style.setProperty('min-height', `${mPitchH}px`, 'important')
+              return { stEls, pEls, mStackH, mPitchH }
+            }
+            let { stEls, pEls, mStackH } = equalizeStageHeights()
             const availH = sheet.clientHeight
+            const rawNeededH = Math.max(stage.scrollHeight, stage.offsetHeight)
+            if (availH > 0 && rawNeededH < availH - 4 && stEls.length > 0) {
+              const expandedStackH = mStackH + (availH - 4 - rawNeededH)
+              for (const el of stEls) {
+                el.style.setProperty('min-height', `${expandedStackH}px`, 'important')
+              }
+              const expandedPitchH = Math.max(
+                0,
+                ...pEls.map(el => Math.max(el.scrollHeight, el.offsetHeight)),
+              )
+              for (const el of pEls) {
+                el.style.setProperty('min-height', `${expandedPitchH}px`, 'important')
+              }
+            } else if (availH > 0 && rawNeededH > availH - 2) {
+              let scaleFactor = Math.max(0.45, (availH - 4) / rawNeededH)
+              stage.style.width = `${(100 / scaleFactor).toFixed(4)}%`
+              stage.style.transformOrigin = '0 0'
+              stage.style.transform = `scale(${scaleFactor.toFixed(4)})`
+              ;({ stEls, pEls, mStackH } = equalizeStageHeights())
+              const remeasuredH = Math.max(stage.scrollHeight, stage.offsetHeight)
+              const targetUnscaledH = Math.floor((availH - 4) / scaleFactor)
+              if (remeasuredH < targetUnscaledH - 2 && stEls.length > 0) {
+                const expandedStackH = mStackH + (targetUnscaledH - 2 - remeasuredH)
+                for (const el of stEls) {
+                  el.style.setProperty('min-height', `${expandedStackH}px`, 'important')
+                }
+                const expandedPitchH = Math.max(
+                  0,
+                  ...pEls.map(el => Math.max(el.scrollHeight, el.offsetHeight)),
+                )
+                for (const el of pEls) {
+                  el.style.setProperty('min-height', `${expandedPitchH}px`, 'important')
+                }
+              } else if (remeasuredH > targetUnscaledH + 2) {
+                scaleFactor = Math.max(0.4, (availH - 4) / remeasuredH)
+                stage.style.transform = `scale(${scaleFactor.toFixed(4)})`
+              }
+            }
             const neededH = stage.scrollHeight
             if (availH > 0 && neededH > availH + 2) {
               const zoomFactor = Math.max(0.45, (availH - 2) / neededH)
-              stage.style.zoom = String(zoomFactor)
+              void zoomFactor
             }
           }
           requestAnimationFrame(() => {
@@ -1562,11 +1723,11 @@ export default function(component) {
 }
 """
 
-_YAMAZUMI_BOARD_HOT_RELOAD_REV = 21
+_YAMAZUMI_BOARD_HOT_RELOAD_REV = 23
 
 # Supersedes paag_yamazumi_drag_board_v34 through v47
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v48",
+    "paag_yamazumi_drag_board_v50",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -1591,6 +1752,14 @@ def yamazumi_board(
     on_edit_element: Callable[[], None],
     on_scale_mode: Callable[[], None] | None = None,
     on_delete_unassigned: Callable[[], None] | None = None,
+    unsaved_count: int = 0,
+    can_undo_last: bool = False,
+    can_redo_last: bool = False,
+    can_discard_all: bool = False,
+    on_undo_last: Callable[[], None] | None = None,
+    on_redo_last: Callable[[], None] | None = None,
+    on_discard_all: Callable[[], None] | None = None,
+    on_save: Callable[[], None] | None = None,
 ):
     safe_takt = float(takt)
     if not math.isfinite(safe_takt):
@@ -1626,6 +1795,10 @@ def yamazumi_board(
                 "takt_suffix": takt_unit.suffix,
                 "scale_mode": normalized_scale_mode,
                 "print_request_token": int(print_request_token or 0),
+                "unsaved_count": int(unsaved_count or 0),
+                "can_undo_last": bool(can_undo_last),
+                "can_redo_last": bool(can_redo_last),
+                "can_discard_all": bool(can_discard_all),
             }
         ),
         on_move_change=on_move,
@@ -1635,6 +1808,10 @@ def yamazumi_board(
         on_edit_element_change=on_edit_element,
         on_scale_mode_change=on_scale_mode or (lambda: None),
         on_delete_unassigned_change=on_delete_unassigned or (lambda: None),
+        on_undo_last_edit_change=on_undo_last or (lambda: None),
+        on_redo_last_edit_change=on_redo_last or (lambda: None),
+        on_discard_all_edits_change=on_discard_all or (lambda: None),
+        on_save_and_refresh_change=on_save or (lambda: None),
         width="stretch",
         height="content",
     )

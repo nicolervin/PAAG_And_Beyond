@@ -5,7 +5,7 @@ import sys as _sys
 
 if (
     ("utils.table_ui" in _sys.modules and not hasattr(_sys.modules["utils.table_ui"], "has_active_table_selections_or_edits"))
-    or ("utils.split_workspace" in _sys.modules and not hasattr(_sys.modules["utils.split_workspace"], "workspace_cross_tab_sync"))
+    or ("utils.split_workspace" in _sys.modules and getattr(_sys.modules["utils.split_workspace"], "_SPLIT_WORKSPACE_REV_20261106", 0) < 1)
     or ("utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"))
     or ("utils.fishbone_store" in _sys.modules and getattr(_sys.modules["utils.fishbone_store"], "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2)
     or ("utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 10)

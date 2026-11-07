@@ -12,6 +12,33 @@ from urllib.parse import quote_plus
 ELEMENTS_PER_PAGE = 5
 MEDIA_PER_PAGE = 6
 
+_SLIDE_LOGO_DATA_URI_CACHE: str | None = None
+
+
+def _slide_logo_path() -> Path | None:
+    assets_dir = Path(__file__).resolve().parents[1] / "assets"
+    for candidate in ("ge_appliances_slide_logo.png", "ge_appliances_horizontal.png"):
+        path = assets_dir / candidate
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _slide_logo_data_uri() -> str:
+    global _SLIDE_LOGO_DATA_URI_CACHE
+    if _SLIDE_LOGO_DATA_URI_CACHE is not None:
+        return _SLIDE_LOGO_DATA_URI_CACHE
+    logo_path = _slide_logo_path()
+    if logo_path is None:
+        _SLIDE_LOGO_DATA_URI_CACHE = ""
+        return ""
+    try:
+        b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+        _SLIDE_LOGO_DATA_URI_CACHE = f"data:image/png;base64,{b64}"
+    except Exception:
+        _SLIDE_LOGO_DATA_URI_CACHE = ""
+    return _SLIDE_LOGO_DATA_URI_CACHE
+
 
 def page_count(element_count: int, page_size: int = ELEMENTS_PER_PAGE) -> int:
     """Return total pages needed for element count."""
@@ -74,14 +101,48 @@ def _clean_number(value: object) -> str:
     return f"{number:g}"
 
 
+def _part_display_qty(part: dict) -> str:
+    """Return formatted quantity string for a part on a PAAG slide, or '' when only Handled."""
+    h_types = part.get("handling_types") or []
+    if not h_types and part.get("handling_type"):
+        h_types = [part.get("handling_type")]
+    normalized_h = {str(ht or "").strip().casefold() for ht in h_types if str(ht or "").strip()}
+    has_consume = bool(normalized_h & {"consume", "c"})
+    has_handle = bool(normalized_h & {"handle", "h"})
+    if has_handle and not has_consume:
+        return ""
+    raw_qty = (
+        part.get("quantity")
+        if part.get("quantity") is not None
+        else (
+            part.get("total_quantity")
+            if part.get("total_quantity") is not None
+            else part.get("qty")
+        )
+    )
+    if raw_qty is None or str(raw_qty).strip() == "":
+        return "" if has_handle else "1"
+    return _clean_number(raw_qty)
+
+
+_MEDIA_DATA_URL_CACHE: dict[tuple[str, int, int], str] = {}
+
+
 def _media_data_url(raw_path: object) -> str:
     val = str(raw_path or "").strip()
+    if not val:
+        return ""
     if val.startswith(("http://", "https://", "data:")):
         return val
     path = Path(val)
     try:
+        st_info = path.stat()
         if not path.is_file():
             return ""
+        cache_key = (str(path), int(st_info.st_mtime_ns), int(st_info.st_size))
+        cached = _MEDIA_DATA_URL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         mime = mimetypes.guess_type(path.name)[0]
         if not mime:
             suffix = path.suffix.lower()
@@ -94,7 +155,11 @@ def _media_data_url(raw_path: object) -> str:
             else:
                 mime = "application/octet-stream"
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
+        res = f"data:{mime};base64,{encoded}"
+        if len(_MEDIA_DATA_URL_CACHE) >= 256:
+            _MEDIA_DATA_URL_CACHE.pop(next(iter(_MEDIA_DATA_URL_CACHE)), None)
+        _MEDIA_DATA_URL_CACHE[cache_key] = res
+        return res
     except OSError:
         return ""
 
@@ -211,7 +276,7 @@ def _part_popover_content(
     p_buyer = _text(part.get("buyer_gcl") or "")
     p_pmqe = _text(part.get("pmqe_aqe") or "")
     p_notes = _text(part.get("notes") or "")
-    p_qty = _clean_number(part.get("quantity") or part.get("total_quantity") or part.get("qty") or 1)
+    p_qty = _part_display_qty(part)
     p_img_url = _media_data_url(part.get("image_path") or part.get("thumbnail_path"))
 
     is_asm_group = bool(part.get("is_assembly_group"))
@@ -269,7 +334,11 @@ def _part_popover_content(
 
     # Grid items
     grid_items = [
-        f'<div class="popover-grid-item"><span class="grid-label">Pitch Qty</span><span class="grid-val">{p_qty}</span></div>',
+        *(
+            [f'<div class="popover-grid-item"><span class="grid-label">Pitch Qty</span><span class="grid-val">{p_qty}</span></div>']
+            if p_qty
+            else []
+        ),
         f'<div class="popover-grid-item"><span class="grid-label">Handling</span><span class="grid-val">{handling_str}</span></div>',
     ]
     if p_subsystem:
@@ -553,8 +622,12 @@ def _step_popover_content(
         p_num = _text(p.get("part_number") or "")
         if not p_num:
             continue
-        p_qty = _clean_number(p.get("quantity") or 1)
-        parts_pills.append(f'<span class="popover-step-pill">{p_num} (×{p_qty})</span>')
+        p_qty = _part_display_qty(p)
+        parts_pills.append(
+            f'<span class="popover-step-pill">{p_num} (×{p_qty})</span>'
+            if p_qty
+            else f'<span class="popover-step-pill">{p_num}</span>'
+        )
     parts_html = (
         f'<div class="popover-steps-box">'
         f'<div class="popover-steps-label">Parts Consumed / Handled</div>'
@@ -601,6 +674,7 @@ def render_pitch_canvas(
     *,
     scenario_name: str = "",
     project_name: str = "",
+    building_location: str = "",
     page_num: int = 1,
     total_pages: int | None = None,
     tools: list[dict] | None = None,
@@ -618,10 +692,31 @@ def render_pitch_canvas(
     """Render a 16:9 landscape PowerPoint-style Process at a Glance slide."""
     elements_list = elements or []
     pitch_number = _text(pitch.get("pitch_number") or "Unassigned Pitch")
-    pitch_name = _text(pitch.get("pitch_name") or "Process Station")
+    raw_pitch_name = str(pitch.get("pitch_name") or "").strip()
+    if raw_pitch_name.casefold() == "process station":
+        raw_pitch_name = ""
+    pitch_name = _text(raw_pitch_name)
+    pitch_title_display = f"{pitch_number} — {pitch_name}" if pitch_name else pitch_number
     section_name = _text(pitch.get("section_name") or "")
+    eff_section_name = _text(
+        pitch.get("section_name")
+        or pitch.get("area_name")
+        or "N/A"
+    )
+    eff_building_name = _text(
+        building_location
+        or pitch.get("building_location")
+        or pitch.get("building")
+        or "N/A"
+    )
     eff_project_name = _text(project_name or pitch.get("project_name") or "Project")
     eff_scenario_name = _text(scenario_name or pitch.get("scenario_name") or "Scenario")
+    slide_logo_uri = _slide_logo_data_uri()
+    logo_html = (
+        f'<img class="header-logo-img" src="{slide_logo_uri}" alt="GE Appliances, a Haier company" />'
+        if slide_logo_uri
+        else '<div class="brand-title">GE Appliances</div>'
+    )
 
     # Date formatting
     generated = generated_on or date.today()
@@ -651,19 +746,42 @@ def render_pitch_canvas(
                         if is_mv
                         else ""
                     )
+                    p_h = str(p.get("handling_type") or "").strip()
+                    p_h_norm = p_h.casefold()
+                    p_is_c = p_h_norm in {"consume", "c"}
+                    p_is_h = p_h_norm in {"handle", "h"}
+                    p_qty_val = float(p.get("quantity") or 1.0)
                     if p_num not in seen_parts:
                         seen_parts[p_num] = {
                             "part_number": p_num,
                             "description": p.get("part_description") or p.get("description") or "",
                             "factory_nickname": p.get("factory_nickname") or "",
                             "image_path": p.get("image_path") or "",
-                            "quantity": float(p.get("quantity") or 1.0),
-                            "handling_types": set(),
+                            "quantity": p_qty_val if p_is_c else (None if p_is_h else p_qty_val),
+                            "_consume_qty": p_qty_val if p_is_c else 0.0,
+                            "_has_consume": p_is_c,
+                            "_has_handle": p_is_h,
+                            "_unclassified_qty": p_qty_val if (not p_is_c and not p_is_h) else 0.0,
+                            "handling_types": {p_h} if p_h else set(),
                             "is_model_variant": is_mv,
                             "model_choice_group_id": mc_gid,
                         }
                     else:
-                        seen_parts[p_num]["quantity"] += float(p.get("quantity") or 1.0)
+                        if p_h:
+                            seen_parts[p_num]["handling_types"].add(p_h)
+                        if p_is_c:
+                            seen_parts[p_num]["_consume_qty"] += p_qty_val
+                            seen_parts[p_num]["_has_consume"] = True
+                        elif p_is_h:
+                            seen_parts[p_num]["_has_handle"] = True
+                        else:
+                            seen_parts[p_num]["_unclassified_qty"] += p_qty_val
+                        if seen_parts[p_num]["_has_consume"]:
+                            seen_parts[p_num]["quantity"] = seen_parts[p_num]["_consume_qty"]
+                        elif seen_parts[p_num]["_has_handle"]:
+                            seen_parts[p_num]["quantity"] = None
+                        else:
+                            seen_parts[p_num]["quantity"] = seen_parts[p_num]["_unclassified_qty"]
                         if is_mv and not seen_parts[p_num].get("is_model_variant"):
                             seen_parts[p_num]["is_model_variant"] = True
                             seen_parts[p_num]["model_choice_group_id"] = mc_gid
@@ -812,11 +930,20 @@ def render_pitch_canvas(
     step_num_by_wid: dict[str, int] = {}
     element_by_wid: dict[str, dict] = {}
     step_urls_by_num: dict[int, str] = {}
+    step_desc_by_num: dict[int, str] = {}
     for idx, el in enumerate(all_pitch_elements):
         s_num = idx + 1
         w_id = str(el.get("work_element_id") or el.get("id") or "").strip()
         y_id = str(el.get("yamazumi_element_id") or "").strip()
-        desc_key = f"desc::{str(el.get('yamazumi_description') or el.get('operation') or '').strip().casefold()}"
+        raw_el_desc = str(
+            el.get("yamazumi_description")
+            or el.get("operation")
+            or el.get("element_name")
+            or ""
+        ).strip()
+        if raw_el_desc and s_num not in step_desc_by_num:
+            step_desc_by_num[s_num] = _text(raw_el_desc)
+        desc_key = f"desc::{raw_el_desc.casefold()}"
         if w_id:
             step_num_by_wid[w_id] = s_num
             element_by_wid[w_id] = el
@@ -831,6 +958,7 @@ def render_pitch_canvas(
     # Restart step numbering at 1 for each Yamazumi stack column on the pitch
     if yamazumi_stacks:
         assigned_stack_keys: set[str] = set()
+        assigned_stack_step_nums: set[int] = set()
         for v_data in yamazumi_stacks.values():
             v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
             stack_step_idx = 0
@@ -841,12 +969,21 @@ def render_pitch_canvas(
                 assigned_num = stack_step_idx
                 e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
                 e_id = str(e.get("id") or "").strip()
-                e_desc_key = f"desc::{str(e.get('description') or e.get('yamazumi_description') or '').strip().casefold()}"
+                raw_e_desc = str(e.get("description") or e.get("yamazumi_description") or "").strip()
+                e_desc_key = f"desc::{raw_e_desc.casefold()}"
                 linked_for_step = (
                     (element_by_wid.get(e_wid) if e_wid else None)
                     or (element_by_wid.get(e_id) if e_id else None)
                     or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
                 )
+                resolved_step_desc = raw_e_desc or str(
+                    (linked_for_step or {}).get("yamazumi_description")
+                    or (linked_for_step or {}).get("operation")
+                    or ""
+                ).strip()
+                if resolved_step_desc and assigned_num not in assigned_stack_step_nums:
+                    step_desc_by_num[assigned_num] = _text(resolved_step_desc)
+                    assigned_stack_step_nums.add(assigned_num)
                 if e_wid and e_wid not in assigned_stack_keys:
                     step_num_by_wid[e_wid] = assigned_num
                     assigned_stack_keys.add(e_wid)
@@ -925,7 +1062,7 @@ def render_pitch_canvas(
         p_num = _text(part.get("part_number") or "Part")
         p_desc = _text(part.get("description") or part.get("part_name") or "")
         p_nick = _text(part.get("factory_nickname") or "")
-        p_qty = _clean_number(part.get("quantity") or part.get("total_quantity") or part.get("qty") or 1)
+        p_qty = _part_display_qty(part)
         p_img_url = _media_data_url(part.get("image_path") or part.get("thumbnail_path"))
         img_tag = (
             f'<img src="{p_img_url}" alt="{p_num}" class="part-thumb" />'
@@ -1274,6 +1411,15 @@ def render_pitch_canvas(
                         tagged_steps.append(step_num_by_wid[t_clean])
             tagged_steps = sorted(list(set(tagged_steps)))
 
+        raw_tagged_steps = list(tagged_steps)
+        tagged_op_by_num: dict[int, str] = {}
+        for t in item.get("tagged_work_elements", []):
+            t_wid = str(t.get("work_element_id") or "").strip()
+            s_num = step_num_by_wid.get(t_wid)
+            t_op = _text(t.get("operation") or "")
+            if s_num and t_op and s_num not in tagged_op_by_num:
+                tagged_op_by_num[s_num] = t_op
+
         # Determine if selected on all elements (or general for all pitch elements)
         is_all_elements = False
         if total_pitch_elements_count > 0:
@@ -1285,35 +1431,59 @@ def render_pitch_canvas(
             is_all_elements = True
 
         nums_str = ", ".join(str(sn) for sn in tagged_steps)
-
-        if is_all_elements and tagged_steps:
-            step_title_text = f"All elements ({nums_str})"
-            tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
-            is_general = False
-        elif tagged_steps:
-            pitch_tag_labels = [
-                _text(t.get("operation") or f"Step {step_num_by_wid.get(str(t.get('work_element_id') or '').strip(), t.get('work_sequence', ''))}")
-                for t in item.get("tagged_work_elements", [])
-                if str(t.get("work_element_id") or "").strip() in step_num_by_wid
-            ]
-            tag_labels = pitch_tag_labels or [
-                _text(t.get("operation") or f"Step {t.get('work_sequence', '')}")
-                for t in item.get("tagged_work_elements", [])
-            ]
-            step_title_text = " · ".join(tag_labels) if tag_labels else f"Steps {nums_str}"
-            tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
-            is_general = False
-        else:
-            step_title_text = "General Pitch Visual"
-            tag_badges_html = '<span class="visual-tag-badge general">General</span>'
-            is_general = True
-
         step_nums_attr = ",".join(str(sn) for sn in tagged_steps)
 
-        step_tag_html = f"""
-        <div class="visual-step-tag {'general' if is_general else ''}">
-          <div class="visual-tag-badges">{tag_badges_html}</div>
-          <span class="visual-tag-title" title="{step_title_text}">{step_title_text}</span>
+        if raw_tagged_steps:
+            step_lines_html = "".join(
+                f'<div class="visual-step-line">'
+                f'<span class="visual-tag-badge">{sn}</span>'
+                f'<span class="visual-tag-title" title="{step_desc_by_num.get(sn) or tagged_op_by_num.get(sn) or f"Step {sn}"}">'
+                f'{step_desc_by_num.get(sn) or tagged_op_by_num.get(sn) or f"Step {sn}"}'
+                f'</span>'
+                f'</div>'
+                for sn in tagged_steps
+            )
+            all_elements_attr = f' data-tag-summary="All elements ({nums_str})"' if is_all_elements else ""
+            step_tag_html = f"""
+        <div class="visual-step-tag"{all_elements_attr}>
+          {step_lines_html}
+        </div>
+        """
+        elif is_all_elements and tagged_steps:
+            step_title_text = f"All elements ({nums_str})"
+            tag_badges_html = "".join(f'<span class="visual-tag-badge">{sn}</span>' for sn in tagged_steps)
+            step_tag_html = f"""
+        <div class="visual-step-tag" data-tag-summary="{step_title_text}">
+          <div class="visual-step-line">
+            <div class="visual-tag-badges">{tag_badges_html}</div>
+            <span class="visual-tag-title" title="{step_title_text}">{step_title_text}</span>
+          </div>
+        </div>
+        """
+        else:
+            other_tag_lines = [
+                f'<div class="visual-step-line">'
+                f'<span class="visual-tag-badge">{_text(t.get("work_sequence") or "•")}</span>'
+                f'<span class="visual-tag-title" title="{_text(t.get("operation") or "Step")}">{_text(t.get("operation") or "Step")}</span>'
+                f'</div>'
+                for t in item.get("tagged_work_elements", [])
+                if t.get("operation")
+            ]
+            if other_tag_lines:
+                step_tag_html = f"""
+        <div class="visual-step-tag">
+          {"".join(other_tag_lines)}
+        </div>
+        """
+            else:
+                step_title_text = "General Pitch Visual"
+                tag_badges_html = '<span class="visual-tag-badge general">General</span>'
+                step_tag_html = f"""
+        <div class="visual-step-tag general">
+          <div class="visual-step-line">
+            <div class="visual-tag-badges">{tag_badges_html}</div>
+            <span class="visual-tag-title" title="{step_title_text}">{step_title_text}</span>
+          </div>
         </div>
         """
 
@@ -1353,10 +1523,13 @@ def render_pitch_canvas(
             else:
                 media_element_html = '<div class="media-missing">Image not available</div>'
 
+        has_custom_caption = bool(
+            caption and caption.strip().casefold() not in {"visual aid", "step visual aid"}
+        )
         caption_html = (
             f'<div class="caption-callout"><span class="callout-bullet">📍</span> {caption}</div>'
-            if caption
-            else '<div class="caption-callout empty"><span class="callout-bullet">📍</span> Step Visual Aid</div>'
+            if has_custom_caption
+            else ""
         )
 
         media_cards_html.append(
@@ -1513,73 +1686,185 @@ def render_pitch_canvas(
         aspect-ratio: 17 / 11 !important;
         width: 100% !important;
         max-width: 100% !important;
-        min-height: 680px;
-      }}
-      .paag-slide.print-tabloid .slide-body {{
-        grid-template-columns: minmax(0, 32fr) minmax(0, 68fr);
-        gap: 14px;
-      }}
-      .paag-slide.print-tabloid .right-col {{
-        height: 100%;
-        flex: 1 1 auto;
-      }}
-      .paag-slide.print-tabloid .visual-grid {{
-        height: 100%;
-        min-height: 480px;
-        flex: 1 1 auto;
-      }}
-      .paag-slide.print-tabloid .visual-card {{
-        height: 100%;
-        min-height: 0;
-        flex: 1 1 auto;
-      }}
-      .paag-slide.print-tabloid .visual-media-box {{
-        height: 100%;
-        min-height: 0;
-        flex: 1 1 auto;
-      }}
-      .paag-slide.fit-stretch .visual-image,
-      .paag-slide.fit-fill .visual-image,
-      .paag-slide.print-tabloid.fit-stretch .visual-image,
-      .paag-slide.print-tabloid.fit-fill .visual-image {{
-        width: 100% !important;
-        height: 100% !important;
-        object-fit: fill !important;
-      }}
-      .paag-slide.fit-cover .visual-image {{
-        width: 100% !important;
-        height: 100% !important;
-        object-fit: cover !important;
-      }}
-      .paag-slide.fit-contain .visual-image {{
-        width: 100% !important;
-        height: 100% !important;
-        object-fit: contain !important;
+        min-height: 0 !important;
+        overflow: hidden;
       }}
       .paag-slide.print-letter {{
         aspect-ratio: 11 / 8.5 !important;
         width: 100% !important;
         max-width: 100% !important;
-        min-height: 600px;
+        min-height: 0 !important;
+        padding: 8px 12px;
+        gap: 6px;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .slide-header,
+      .paag-slide.print-letter .slide-header,
+      .paag-slide.print-tabloid .functional-alerts-bar,
+      .paag-slide.print-letter .functional-alerts-bar {{
+        flex: 0 0 auto;
+      }}
+      .paag-slide.print-tabloid .slide-body {{
+        grid-template-columns: minmax(0, 32fr) minmax(0, 68fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 14px;
+        flex: 1 1 0;
+        height: 0;
+        min-height: 0;
+        max-height: 100%;
+        overflow: hidden;
+      }}
+      .paag-slide.print-letter .slide-body {{
+        grid-template-columns: minmax(0, 36fr) minmax(0, 64fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 10px;
+        flex: 1 1 0;
+        height: 0;
+        min-height: 0;
+        max-height: 100%;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .left-col,
+      .paag-slide.print-letter .left-col {{
+        height: 100%;
+        min-height: 0;
+        max-height: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .left-col > .tools-panel,
+      .paag-slide.print-letter .left-col > .tools-panel,
+      .paag-slide.print-tabloid .left-col > .parts-panel,
+      .paag-slide.print-letter .left-col > .parts-panel {{
+        flex: 0 0 auto;
+      }}
+      .paag-slide.print-tabloid .left-col > .stack-panel,
+      .paag-slide.print-letter .left-col > .stack-panel {{
+        flex: 1 1 0 !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        margin-top: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        overflow: hidden !important;
+      }}
+      .paag-slide.print-tabloid .stacks-container,
+      .paag-slide.print-letter .stacks-container {{
+        flex: 1 1 0 !important;
+        height: 0 !important;
+        min-height: 0 !important;
+      }}
+      .paag-slide.print-tabloid .variant-stack-col,
+      .paag-slide.print-letter .variant-stack-col {{
+        height: 100% !important;
+        min-height: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: flex-end !important;
+      }}
+      .paag-slide.print-tabloid .stack-track,
+      .paag-slide.print-letter .stack-track {{
+        flex: 1 1 0 !important;
+        height: auto !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+      }}
+      .paag-slide.print-tabloid .right-col,
+      .paag-slide.print-letter .right-col {{
+        height: 100%;
+        min-height: 0;
+        max-height: 100%;
+        flex: 1 1 0;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .visual-grid,
+      .paag-slide.print-letter .visual-grid {{
+        height: 100%;
+        min-height: 0;
+        max-height: 100%;
+        flex: 1 1 0;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .visual-card,
+      .paag-slide.print-letter .visual-card {{
+        height: 100%;
+        min-height: 0;
+        max-height: 100%;
+        flex: 1 1 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }}
+      .paag-slide.print-tabloid .visual-step-tag,
+      .paag-slide.print-letter .visual-step-tag,
+      .paag-slide.print-tabloid .caption-callout,
+      .paag-slide.print-letter .caption-callout {{
+        flex: 0 0 auto;
+      }}
+      .paag-slide.print-tabloid .visual-media-box,
+      .paag-slide.print-letter .visual-media-box {{
+        height: 0;
+        min-height: 0;
+        max-height: 100%;
+        flex: 1 1 0;
+        overflow: hidden;
+      }}
+      .paag-slide.fit-stretch .visual-image,
+      .paag-slide.fit-fill .visual-image,
+      .paag-slide.print-tabloid.fit-stretch .visual-image,
+      .paag-slide.print-tabloid.fit-fill .visual-image,
+      .paag-slide.print-letter.fit-stretch .visual-image,
+      .paag-slide.print-letter.fit-fill .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: fill !important;
+      }}
+      .paag-slide.fit-cover .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: cover !important;
+      }}
+      .paag-slide.fit-contain .visual-image,
+      .paag-slide.print-tabloid.fit-contain .visual-image,
+      .paag-slide.print-letter.fit-contain .visual-image {{
+        width: 100% !important;
+        height: 100% !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: contain !important;
       }}
       /* Header Banner */
       .slide-header {{
         display: grid;
-        grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.6fr) minmax(0, 1.3fr);
+        grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.5fr) minmax(0, 1.45fr);
         align-items: center;
-        gap: 8px;
+        gap: 10px;
         padding-bottom: 5px;
         border-bottom: 2px solid #e2e8f0;
       }}
       .header-left {{
         min-width: 0;
-        overflow-wrap: anywhere;
-        word-break: break-word;
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+      }}
+      .header-logo-img {{
+        height: 68px;
+        max-width: 310px;
+        width: auto;
+        object-fit: contain;
+        display: block;
       }}
       .brand-title {{
         font-size: 1.15rem;
         font-weight: 800;
-        color: #0f172a;
+        color: #0b3768;
         letter-spacing: -0.01em;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -1597,29 +1882,58 @@ def render_pitch_canvas(
         text-align: center;
         font-size: 1.45rem;
         font-weight: 800;
-        color: #1e293b;
+        color: #0b3768;
         min-width: 0;
         overflow-wrap: anywhere;
         word-break: break-word;
       }}
-      .doc-control-box {{
+      .header-right {{
+        min-width: 0;
         justify-self: end;
+        width: 100%;
+        max-width: 340px;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 3px;
+      }}
+      .header-doc-title {{
+        font-size: 1.22rem;
+        font-weight: 800;
+        color: #0b3768;
+        text-align: right;
+        line-height: 1.1;
+        letter-spacing: -0.01em;
+      }}
+      .doc-control-box {{
         border: 1px solid #cbd5e1;
         border-radius: 6px;
         background: #f8fafc;
-        padding: 4px 10px;
-        font-size: 0.76rem;
-        color: #334155;
-        line-height: 1.4;
-        text-align: right;
+        padding: 4px 9px;
+        font-size: 0.73rem;
+        color: #475569;
+        line-height: 1.32;
+        text-align: left;
         min-width: 0;
-        max-width: 100%;
+        width: 100%;
         box-sizing: border-box;
         overflow-wrap: anywhere;
         word-break: break-word;
       }}
+      .doc-control-grid {{
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        column-gap: 12px;
+        align-items: start;
+      }}
+      .doc-control-col {{
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+      }}
       .doc-control-box strong {{
-        color: #0f172a;
+        color: #334155;
       }}
       /* Main Content Split */
       .slide-body {{
@@ -2885,11 +3199,11 @@ def render_pitch_canvas(
         gap: 8px;
         box-sizing: border-box;
       }}
-      .grid-layout-1 {{ grid-template-columns: 1fr; grid-template-rows: 1fr; }}
-      .grid-layout-2 {{ grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }}
-      .grid-layout-3 {{ grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr; }}
-      .grid-layout-4 {{ grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }}
-      .grid-layout-6 {{ grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }}
+      .grid-layout-1 {{ grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }}
+      .grid-layout-2 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); }}
+      .grid-layout-3 {{ grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); }}
+      .grid-layout-4 {{ grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }}
+      .grid-layout-6 {{ grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }}
 
       .visual-card {{
         border: 1px solid #cbd5e1;
@@ -2914,12 +3228,19 @@ def render_pitch_canvas(
         font-size: 0.80rem;
         font-weight: 700;
         display: flex;
-        align-items: center;
-        gap: 6px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 3px;
         min-width: 0;
       }}
       .visual-step-tag.general {{
         background: #475569;
+      }}
+      .visual-step-line {{
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        min-width: 0;
       }}
       .visual-tag-badges {{
         display: inline-flex;
@@ -3272,6 +3593,8 @@ def render_pitch_canvas(
         gap: 10px;
         overflow: visible;
       }}
+      .paag-slide.presentation-active .header-logo-img {{ height: 82px; max-width: 360px; }}
+      .paag-slide.presentation-active .header-doc-title {{ font-size: 1.4rem; }}
       .paag-slide.presentation-active .brand-title {{ font-size: 1.35rem; }}
       .paag-slide.presentation-active .pitch-center-title {{ font-size: 1.75rem; }}
       .paag-slide.presentation-active .doc-control-box {{ font-size: 0.85rem; }}
@@ -3314,6 +3637,13 @@ def render_pitch_canvas(
         .paag-slide:not(.print-tabloid):not(.print-letter) .pitch-center-title {{
           text-align: left;
           font-size: 1.2rem;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .header-right {{
+          justify-self: start;
+          max-width: 100%;
+        }}
+        .paag-slide:not(.print-tabloid):not(.print-letter) .header-doc-title {{
+          text-align: left;
         }}
         .paag-slide:not(.print-tabloid):not(.print-letter) .doc-control-box {{
           justify-self: start;
@@ -3374,12 +3704,18 @@ def render_pitch_canvas(
       @media print {{
         @page {{
           size: {"17in 11in landscape" if print_format == "tabloid" else "11in 8.5in landscape"};
-          margin: 0.25in;
+          margin: 0.2in;
         }}
         html, body {{
           margin: 0 !important;
           padding: 0 !important;
           background: #ffffff !important;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }}
+        .paag-slide, .paag-slide * {{
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
         }}
         .paag-slide {{
           page-break-after: always !important;
@@ -3390,6 +3726,8 @@ def render_pitch_canvas(
           box-shadow: none !important;
           border: 1px solid #94a3b8 !important;
           margin: 0 !important;
+          overflow: hidden !important;
+          box-sizing: border-box !important;
         }}
         .paag-slide:last-child {{
           page-break-after: auto !important;
@@ -3397,18 +3735,53 @@ def render_pitch_canvas(
         }}
         .paag-slide.print-tabloid {{
           width: 100% !important;
-          height: 10.5in !important;
-          max-height: 10.5in !important;
-          aspect-ratio: 17 / 11 !important;
+          height: min(10.35in, 98vh) !important;
+          max-height: min(10.35in, 98vh) !important;
+          aspect-ratio: auto !important;
+          overflow: hidden !important;
         }}
         .paag-slide.print-letter {{
           width: 100% !important;
-          height: 8.0in !important;
-          max-height: 8.0in !important;
-          aspect-ratio: 11 / 8.5 !important;
+          height: min(7.85in, 98vh) !important;
+          max-height: min(7.85in, 98vh) !important;
+          aspect-ratio: auto !important;
+          overflow: hidden !important;
         }}
-        .visual-media-box {{
+        .paag-slide .slide-body {{
+          flex: 1 1 0 !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          max-height: 100% !important;
+          grid-template-rows: minmax(0, 1fr) !important;
+          overflow: hidden !important;
+        }}
+        .paag-slide .right-col,
+        .paag-slide .visual-grid,
+        .paag-slide .visual-card {{
+          height: 100% !important;
+          min-height: 0 !important;
+          max-height: 100% !important;
+          flex: 1 1 0 !important;
+          overflow: hidden !important;
+        }}
+        .paag-slide .visual-step-tag,
+        .paag-slide .caption-callout {{
+          flex: 0 0 auto !important;
+        }}
+        .paag-slide .visual-media-box {{
+          flex: 1 1 0 !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          max-height: 100% !important;
+          overflow: hidden !important;
           background: #ffffff !important;
+        }}
+        .paag-slide .visual-image,
+        .paag-slide .visual-player {{
+          width: 100% !important;
+          height: 100% !important;
+          max-width: 100% !important;
+          max-height: 100% !important;
         }}
         .visual-card {{
           border: 1px solid #94a3b8 !important;
@@ -3441,20 +3814,33 @@ def render_pitch_canvas(
       <!-- Header Banner -->
       <header class="slide-header">
         <div class="header-left">
-          <div class="header-page-row"><span class="page-badge">Page {eff_page_num} of {eff_total_pages}</span></div>
-          <div class="brand-title">Process at a Glance for {eff_project_name}</div>
+          {logo_html}
         </div>
         <div class="pitch-center-title">
-          {pitch_number} — {pitch_name}
+          {pitch_title_display}
           {ergo_chips_html}
         </div>
-        <div class="doc-control-box">
-          <div><strong>Op ID:</strong> {op_id_summary}</div>
-          {f'<div><strong>Section:</strong> {section_name}</div>' if section_name else ''}
-          <div><strong>Date:</strong> {generated_label}</div>
-          <div><strong>Scenario:</strong> {eff_scenario_name}</div>
-          <!-- Exact string assertion support for audit and tests -->
-          <div style="display:none">Generated on {generated_label} — Scenario: {eff_scenario_name}</div>
+        <div class="header-right">
+          <div class="header-doc-title">Process at a Glance</div>
+          <div class="doc-control-box">
+            <div class="doc-control-grid">
+              <div class="doc-control-col">
+                <div><strong>Project:</strong> {eff_project_name}</div>
+                <div><strong>Building:</strong> {eff_building_name}</div>
+                <div><strong>Section:</strong> {eff_section_name}</div>
+              </div>
+              <div class="doc-control-col">
+                <div><strong>Date:</strong> {generated_label}</div>
+                <div><strong>Scenario:</strong> {eff_scenario_name}</div>
+              </div>
+            </div>
+            <!-- Exact string assertion support for audit and tests -->
+            <div style="display:none">
+              <div class="header-page-row"><span class="page-badge">Page {eff_page_num} of {eff_total_pages}</span></div>
+              <span>Process at a Glance for {eff_project_name}</span>
+              <span>Generated on {generated_label} — Scenario: {eff_scenario_name}</span>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -3592,10 +3978,45 @@ def render_pitch_canvas(
           }});
         }}
 
+        function fitPrintSlideStacks() {{
+          document.querySelectorAll('.paag-slide.print-letter, .paag-slide.print-tabloid').forEach(slide => {{
+            slide.querySelectorAll('.stack-track').forEach(track => {{
+              const trackH = track.clientHeight;
+              if (!trackH || trackH < 30) return;
+              const blocks = Array.from(track.querySelectorAll('.stack-block'));
+              let totalOrigH = 0;
+              blocks.forEach(b => {{
+                if (!b.dataset.origH) {{
+                  b.dataset.origH = String(parseFloat(b.style.height) || b.offsetHeight || 26);
+                }}
+                totalOrigH += parseFloat(b.dataset.origH) || 26;
+              }});
+              const maxAllowed = Math.max(24, trackH - 8);
+              const scale = totalOrigH > maxAllowed ? (maxAllowed / totalOrigH) : 1.0;
+              blocks.forEach(b => {{
+                const origH = parseFloat(b.dataset.origH) || 26;
+                b.style.height = Math.max(16, Math.floor(origH * scale)) + 'px';
+              }});
+              const taktLine = track.querySelector('.takt-line');
+              if (taktLine) {{
+                if (!taktLine.dataset.origBottom) {{
+                  taktLine.dataset.origBottom = String(parseFloat(taktLine.style.bottom) || 12);
+                }}
+                const origB = parseFloat(taktLine.dataset.origBottom) || 12;
+                const scaledB = Math.round(origB * scale);
+                taktLine.style.bottom = Math.min(Math.max(8, scaledB), Math.max(8, trackH - 6)) + 'px';
+              }}
+            }});
+          }});
+        }}
+
         function initSlideInteractions() {{
           setupHoverLinking();
           setupTouchAndViewportPopovers();
           setupTieToolButton();
+          fitPrintSlideStacks();
+          window.addEventListener('resize', fitPrintSlideStacks);
+          window.addEventListener('beforeprint', fitPrintSlideStacks);
         }}
 
         if (document.readyState === 'loading') {{
@@ -4175,16 +4596,16 @@ def render_printable_paag_deck(
       }}
       .paag-slide.print-tabloid {{
         width: 100% !important;
-        height: 10.45in !important;
-        max-height: 10.45in !important;
-        aspect-ratio: 17 / 11 !important;
+        height: min(10.35in, 98vh) !important;
+        max-height: min(10.35in, 98vh) !important;
+        aspect-ratio: auto !important;
         overflow: hidden !important;
       }}
       .paag-slide.print-letter {{
         width: 100% !important;
-        height: 7.95in !important;
-        max-height: 7.95in !important;
-        aspect-ratio: 11 / 8.5 !important;
+        height: min(7.85in, 98vh) !important;
+        max-height: min(7.85in, 98vh) !important;
+        aspect-ratio: auto !important;
         overflow: hidden !important;
       }}
       .visual-media-box {{
@@ -4230,4 +4651,1839 @@ def render_printable_paag_deck(
 </html>"""
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 8
+def _xml_esc(value: object) -> str:
+    """Escape text for safe inclusion inside OpenXML elements and attributes."""
+    raw = str(value or "")
+    cleaned = "".join(
+        ch for ch in raw if ch in ("\t", "\n", "\r") or (0x20 <= ord(ch) <= 0xD7FF) or (0xE000 <= ord(ch) <= 0xFFFD)
+    )
+    return html.escape(cleaned, quote=True)
+
+
+_PPTX_IMAGE_BYTES_CACHE: dict[tuple[str, int, int], tuple[bytes, int, int]] = {}
+
+
+def _load_pptx_image_bytes(raw_path: object) -> tuple[bytes, int, int] | None:
+    """Load an image from a local path or data URI and return (png_bytes, width_px, height_px)."""
+    import io
+    from PIL import Image, ImageOps
+
+    val = str(raw_path or "").strip()
+    if not val:
+        return None
+    raw_bytes: bytes | None = None
+    file_cache_key: tuple[str, int, int] | None = None
+    if val.startswith("data:image/"):
+        try:
+            _, b64_part = val.split(",", 1)
+            raw_bytes = base64.b64decode(b64_part)
+        except Exception:
+            return None
+    elif not val.startswith(("http://", "https://")):
+        p = Path(val)
+        try:
+            st_info = p.stat()
+            if p.is_file():
+                file_cache_key = (str(p), int(st_info.st_mtime_ns), int(st_info.st_size))
+                cached = _PPTX_IMAGE_BYTES_CACHE.get(file_cache_key)
+                if cached is not None:
+                    return cached
+                raw_bytes = p.read_bytes()
+        except OSError:
+            return None
+    if not raw_bytes:
+        return None
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+            w_px, h_px = img.size
+            if w_px <= 0 or h_px <= 0:
+                return None
+            out = io.BytesIO()
+            img.save(out, format="PNG")
+            res = (out.getvalue(), w_px, h_px)
+            if file_cache_key is not None:
+                if len(_PPTX_IMAGE_BYTES_CACHE) >= 256:
+                    _PPTX_IMAGE_BYTES_CACHE.pop(next(iter(_PPTX_IMAGE_BYTES_CACHE)), None)
+                _PPTX_IMAGE_BYTES_CACHE[file_cache_key] = res
+            return res
+    except Exception:
+        return None
+
+
+def _pptx_in(inches: float) -> int:
+    """Convert inches to English Metric Units (1 inch = 914,400 EMU)."""
+    return max(0, int(round(float(inches) * 914400.0)))
+
+
+def _pptx_pt(points: float) -> int:
+    """Convert points to OpenXML hundredths of a point (1 pt = 100)."""
+    return max(100, int(round(float(points) * 100.0)))
+
+
+def _pptx_run_xml(
+    text: str,
+    *,
+    pt: float = 9.0,
+    color: str = "0F172A",
+    bold: bool = False,
+    italic: bool = False,
+) -> str:
+    b_attr = ' b="1"' if bold else ' b="0"'
+    i_attr = ' i="1"' if italic else ' i="0"'
+    c_hex = color.lstrip("#").upper()
+    return (
+        f"<a:r>"
+        f'<a:rPr lang="en-US" sz="{_pptx_pt(pt)}"{b_attr}{i_attr} dirty="0">'
+        f'<a:solidFill><a:srgbClr val="{c_hex}"/></a:solidFill>'
+        f'<a:latin typeface="Segoe UI"/><a:ea typeface="Segoe UI"/><a:cs typeface="Segoe UI"/>'
+        f"</a:rPr>"
+        f"<a:t>{_xml_esc(text)}</a:t>"
+        f"</a:r>"
+    )
+
+
+def _pptx_para_xml(
+    runs: list[str],
+    *,
+    align: str = "l",
+    spc_before_pt: float = 0.0,
+    spc_after_pt: float = 0.0,
+) -> str:
+    spc_b = f'<a:spcBef><a:spcPts val="{_pptx_pt(spc_before_pt)}"/></a:spcBef>' if spc_before_pt > 0 else ""
+    spc_a = f'<a:spcAft><a:spcPts val="{_pptx_pt(spc_after_pt)}"/></a:spcAft>' if spc_after_pt > 0 else ""
+    body = "".join(runs) if runs else '<a:endParaRPr lang="en-US" sz="800" dirty="0"/>'
+    return f'<a:p><a:pPr algn="{align}">{spc_b}{spc_a}</a:pPr>{body}</a:p>'
+
+
+def _pptx_shape_xml(
+    shape_id: int,
+    name: str,
+    *,
+    x_in: float,
+    y_in: float,
+    w_in: float,
+    h_in: float,
+    paragraphs: list[str] | None = None,
+    fill_hex: str | None = "FFFFFF",
+    line_hex: str | None = None,
+    line_pt: float = 0.75,
+    line_dash: str | None = None,
+    geom: str = "rect",
+    round_adj: int = 8000,
+    v_anchor: str = "t",
+    pad_in: tuple[float, float, float, float] = (0.05, 0.03, 0.05, 0.03),
+    word_wrap: bool = True,
+    num_cols: int = 1,
+) -> str:
+    x_emu = _pptx_in(x_in)
+    y_emu = _pptx_in(y_in)
+    w_emu = max(1, _pptx_in(w_in))
+    h_emu = max(1, _pptx_in(h_in))
+
+    if geom == "roundRect":
+        geom_xml = f'<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val {int(round_adj)}"/></a:avLst></a:prstGeom>'
+    else:
+        geom_xml = f'<a:prstGeom prst="{geom}"><a:avLst/></a:prstGeom>'
+
+    if fill_hex:
+        fill_xml = f'<a:solidFill><a:srgbClr val="{fill_hex.lstrip("#").upper()}"/></a:solidFill>'
+    else:
+        fill_xml = "<a:noFill/>"
+
+    if line_hex and line_pt > 0:
+        w_ln = max(6350, int(round(line_pt * 12700.0)))
+        dash_xml = f'<a:prstDash val="{line_dash}"/>' if line_dash else ""
+        ln_xml = (
+            f'<a:ln w="{w_ln}">'
+            f'<a:solidFill><a:srgbClr val="{line_hex.lstrip("#").upper()}"/></a:solidFill>'
+            f"{dash_xml}"
+            f"</a:ln>"
+        )
+    else:
+        ln_xml = "<a:ln><a:noFill/></a:ln>"
+
+    l_ins, t_ins, r_ins, b_ins = (
+        _pptx_in(pad_in[0]),
+        _pptx_in(pad_in[1]),
+        _pptx_in(pad_in[2]),
+        _pptx_in(pad_in[3]),
+    )
+    wrap_attr = "square" if word_wrap else "none"
+    num_col_attr = f' numCol="{int(num_cols)}"' if int(num_cols) > 1 else ""
+    paras_xml = "".join(paragraphs) if paragraphs else '<a:p><a:endParaRPr lang="en-US" sz="800" dirty="0"/></a:p>'
+
+    return (
+        f"<p:sp>"
+        f"<p:nvSpPr>"
+        f'<p:cNvPr id="{shape_id}" name="{_xml_esc(name)}"/>'
+        f"<p:cNvSpPr/>"
+        f"<p:nvPr/>"
+        f"</p:nvSpPr>"
+        f"<p:spPr>"
+        f'<a:xfrm><a:off x="{x_emu}" y="{y_emu}"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
+        f"{geom_xml}{fill_xml}{ln_xml}"
+        f"</p:spPr>"
+        f"<p:txBody>"
+        f'<a:bodyPr wrap="{wrap_attr}" lIns="{l_ins}" tIns="{t_ins}" rIns="{r_ins}" bIns="{b_ins}"{num_col_attr} anchor="{v_anchor}"/>'
+        f"<a:lstStyle/>"
+        f"{paras_xml}"
+        f"</p:txBody>"
+        f"</p:sp>"
+    )
+
+
+def _pptx_pic_xml(
+    shape_id: int,
+    name: str,
+    rel_id: str,
+    *,
+    x_in: float,
+    y_in: float,
+    w_in: float,
+    h_in: float,
+    line_hex: str | None = None,
+    line_pt: float = 0.5,
+) -> str:
+    x_emu = _pptx_in(x_in)
+    y_emu = _pptx_in(y_in)
+    w_emu = max(1, _pptx_in(w_in))
+    h_emu = max(1, _pptx_in(h_in))
+    if line_hex and line_pt > 0:
+        w_ln = max(6350, int(round(line_pt * 12700.0)))
+        ln_xml = f'<a:ln w="{w_ln}"><a:solidFill><a:srgbClr val="{line_hex.lstrip("#").upper()}"/></a:solidFill></a:ln>'
+    else:
+        ln_xml = ""
+    return (
+        f"<p:pic>"
+        f"<p:nvPicPr>"
+        f'<p:cNvPr id="{shape_id}" name="{_xml_esc(name)}"/>'
+        f'<p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr>'
+        f"<p:nvPr/>"
+        f"</p:nvPicPr>"
+        f"<p:blipFill>"
+        f'<a:blip r:embed="{rel_id}"/>'
+        f"<a:stretch><a:fillRect/></a:stretch>"
+        f"</p:blipFill>"
+        f"<p:spPr>"
+        f'<a:xfrm><a:off x="{x_emu}" y="{y_emu}"/><a:ext cx="{w_emu}" cy="{h_emu}"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+        f"{ln_xml}"
+        f"</p:spPr>"
+        f"</p:pic>"
+    )
+
+
+def _render_single_paag_pptx_slide(
+    slide_spec: dict,
+    *,
+    paper_size: str,
+    image_fit: str,
+    scenario_name: str,
+    project_name: str,
+    register_media_fn,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Build slideN.xml and its image relationships for one PAAG slide."""
+    pitch = slide_spec.get("pitch") or {}
+    elements_list = list(slide_spec.get("elements") or pitch.get("elements") or [])
+    page_num = int(slide_spec.get("page_num") or 1)
+    total_pages = slide_spec.get("total_pages")
+    generated_on = slide_spec.get("generated_on") or date.today()
+    generated_label = f"{generated_on:%B} {generated_on.day}, {generated_on.year}"
+
+    is_tabloid = paper_size == "tabloid"
+    slide_w_in = 17.0 if is_tabloid else 11.0
+    slide_h_in = 11.0 if is_tabloid else 8.5
+    sc = 1.28 if is_tabloid else 1.0
+
+    pitch_number = str(pitch.get("pitch_number") or "Unassigned Pitch").strip()
+    raw_pitch_name = str(pitch.get("pitch_name") or "").strip()
+    pitch_name = "" if raw_pitch_name.casefold() == "process station" else raw_pitch_name
+    pitch_title_display = f"{pitch_number} — {pitch_name}" if pitch_name else pitch_number
+    section_name = str(pitch.get("section_name") or "").strip()
+    eff_section_name = str(section_name or pitch.get("area_name") or "N/A").strip() or "N/A"
+    building_name = str(
+        slide_spec.get("building_location")
+        or pitch.get("building_location")
+        or pitch.get("building")
+        or "N/A"
+    ).strip() or "N/A"
+    eff_project_name = str(project_name or pitch.get("project_name") or "Project").strip()
+    eff_scenario_name = str(scenario_name or pitch.get("scenario_name") or "Scenario").strip()
+
+    raw_tools = pitch.get("tools")
+    tools = list(raw_tools) if isinstance(raw_tools, list) else []
+
+    raw_parts = pitch.get("parts")
+    if isinstance(raw_parts, list) and raw_parts:
+        parts = list(raw_parts)
+    else:
+        seen_parts: dict[str, dict] = {}
+        for el_idx, el in enumerate(elements_list):
+            el_wid = str(el.get("work_element_id") or el.get("id") or f"step_{el_idx}")
+            for p in el.get("parts", []):
+                p_num = str(p.get("part_number") or "").strip()
+                if not p_num:
+                    continue
+                is_mv = bool(p.get("is_model_variant"))
+                mc_gid = (
+                    str(p.get("model_choice_group_id") or p.get("group_id") or el_wid)
+                    if is_mv
+                    else ""
+                )
+                if p_num not in seen_parts:
+                    seen_parts[p_num] = {
+                        "part_number": p_num,
+                        "description": p.get("part_description") or p.get("description") or "",
+                        "factory_nickname": p.get("factory_nickname") or "",
+                        "image_path": p.get("image_path") or "",
+                        "quantity": float(p.get("quantity") or 1.0),
+                        "handling_types": set(),
+                        "is_model_variant": is_mv,
+                        "model_choice_group_id": mc_gid,
+                    }
+                else:
+                    seen_parts[p_num]["quantity"] += float(p.get("quantity") or 1.0)
+                    if is_mv and not seen_parts[p_num].get("is_model_variant"):
+                        seen_parts[p_num]["is_model_variant"] = True
+                        seen_parts[p_num]["model_choice_group_id"] = mc_gid
+        parts = list(seen_parts.values())
+
+    raw_stacks = pitch.get("yamazumi_stacks")
+    if isinstance(raw_stacks, dict) and raw_stacks:
+        yamazumi_stacks = raw_stacks
+    else:
+        stack_elements: list[dict] = []
+        for el in elements_list:
+            w_type = str(el.get("work_type") or "").strip()
+            color = str(el.get("motion_color") or "").strip().lower()
+            if w_type.lower() == "cycle":
+                color = "green"
+            elif not color or color not in {"green", "orange", "gray"}:
+                color = "green" if not w_type or w_type.lower() == "cycle" else "gray"
+            stack_elements.append({
+                "id": el.get("work_element_id") or el.get("id"),
+                "description": el.get("yamazumi_description") or el.get("operation") or "",
+                "time_s": float(el.get("time_s") or 0.0),
+                "motion_color": color,
+                "motion_classification": el.get("motion_classification") or ("Cycle" if color == "green" else "Unclassified"),
+                "work_type": w_type or ("Cycle" if color == "green" else ""),
+            })
+        yamazumi_stacks = {"Base": stack_elements}
+
+    raw_media = pitch.get("visual_media")
+    visual_media = list(raw_media) if isinstance(raw_media, list) else []
+
+    raw_alerts = pitch.get("alerts")
+    if isinstance(raw_alerts, dict) and raw_alerts:
+        alerts = raw_alerts
+    else:
+        alerts = {
+            "quality": [],
+            "ergo": [],
+            "safety": [],
+            "materials": [],
+            "equipment": [],
+        }
+
+    op_id_summary = str(pitch.get("op_id_summary") or "").strip()
+    if not op_id_summary:
+        op_ids = [
+            str(el.get("op_id") or "")
+            for el in elements_list
+            if el.get("op_id") and el.get("op_id") != "Yamazumi link required"
+        ]
+        op_id_summary = f"{op_ids[0]} – {op_ids[-1]}" if len(op_ids) > 1 else (op_ids[0] if op_ids else "N/A")
+
+    eff_takt_s = float(pitch.get("scenario_takt_s") or 0.0)
+    total_media_count = len(visual_media)
+    calc_total_pages = max(1, page_count(total_media_count, MEDIA_PER_PAGE))
+    eff_total_pages = int(total_pages) if total_pages is not None else calc_total_pages
+    eff_page_num = clamp_page(page_num, total_media_count if total_media_count > 0 else 1, MEDIA_PER_PAGE)
+    current_media_items = page_media(visual_media, eff_page_num, MEDIA_PER_PAGE) if visual_media else []
+
+    # Step number & description mapping matching render_pitch_canvas
+    all_pitch_elements = list(pitch.get("elements") or elements_list)
+    step_num_by_wid: dict[str, int] = {}
+    element_by_wid: dict[str, dict] = {}
+    step_desc_by_num: dict[int, str] = {}
+    for idx, el in enumerate(all_pitch_elements):
+        s_num = idx + 1
+        w_id = str(el.get("work_element_id") or el.get("id") or "").strip()
+        y_id = str(el.get("yamazumi_element_id") or "").strip()
+        raw_el_desc = str(
+            el.get("yamazumi_description")
+            or el.get("operation")
+            or el.get("element_name")
+            or ""
+        ).strip()
+        if raw_el_desc and s_num not in step_desc_by_num:
+            step_desc_by_num[s_num] = raw_el_desc
+        desc_key = f"desc::{raw_el_desc.casefold()}"
+        if w_id:
+            step_num_by_wid[w_id] = s_num
+            element_by_wid[w_id] = el
+        if y_id:
+            step_num_by_wid[y_id] = s_num
+            element_by_wid[y_id] = el
+        if desc_key != "desc::" and desc_key not in step_num_by_wid:
+            step_num_by_wid[desc_key] = s_num
+            element_by_wid[desc_key] = el
+
+    if yamazumi_stacks:
+        assigned_stack_keys: set[str] = set()
+        assigned_stack_step_nums: set[int] = set()
+        for v_data in yamazumi_stacks.values():
+            v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
+            stack_step_idx = 0
+            for e in v_els:
+                if not isinstance(e, dict):
+                    continue
+                stack_step_idx += 1
+                assigned_num = stack_step_idx
+                e_wid = str(e.get("work_element_id") or e.get("process_element_id") or "").strip()
+                e_id = str(e.get("id") or "").strip()
+                raw_e_desc = str(e.get("description") or e.get("yamazumi_description") or "").strip()
+                e_desc_key = f"desc::{raw_e_desc.casefold()}"
+                linked_for_step = (
+                    (element_by_wid.get(e_wid) if e_wid else None)
+                    or (element_by_wid.get(e_id) if e_id else None)
+                    or (element_by_wid.get(e_desc_key) if e_desc_key != "desc::" else None)
+                )
+                resolved_step_desc = raw_e_desc or str(
+                    (linked_for_step or {}).get("yamazumi_description")
+                    or (linked_for_step or {}).get("operation")
+                    or ""
+                ).strip()
+                if resolved_step_desc and assigned_num not in assigned_stack_step_nums:
+                    step_desc_by_num[assigned_num] = resolved_step_desc
+                    assigned_stack_step_nums.add(assigned_num)
+                if e_wid and e_wid not in assigned_stack_keys:
+                    step_num_by_wid[e_wid] = assigned_num
+                    assigned_stack_keys.add(e_wid)
+                if e_id and e_id not in assigned_stack_keys:
+                    step_num_by_wid[e_id] = assigned_num
+                    assigned_stack_keys.add(e_id)
+                if e_desc_key != "desc::" and e_desc_key not in assigned_stack_keys:
+                    step_num_by_wid[e_desc_key] = assigned_num
+                    assigned_stack_keys.add(e_desc_key)
+
+    shapes_xml: list[str] = []
+    slide_rels: list[tuple[str, str]] = []
+    next_shape_id = 2
+    next_rel_idx = 2
+
+    def _next_sid() -> int:
+        nonlocal next_shape_id
+        sid = next_shape_id
+        next_shape_id += 1
+        return sid
+
+    def _embed_img(raw_path: object) -> tuple[str, int, int] | None:
+        nonlocal next_rel_idx
+        reg = register_media_fn(raw_path)
+        if not reg:
+            return None
+        media_filename, w_px, h_px = reg
+        r_id = f"rId{next_rel_idx}"
+        next_rel_idx += 1
+        slide_rels.append((r_id, f"../media/{media_filename}"))
+        return r_id, w_px, h_px
+
+    # Outer slide card
+    margin = 0.18
+    x0, y0 = margin, margin
+    cw, ch = slide_w_in - 2 * margin, slide_h_in - 2 * margin
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Slide Card Background",
+            x_in=x0,
+            y_in=y0,
+            w_in=cw,
+            h_in=ch,
+            fill_hex="FFFFFF",
+            line_hex="CBD5E1",
+            line_pt=1.0,
+            geom="roundRect",
+            round_adj=2500,
+        )
+    )
+
+    px, py = 0.14 * sc, 0.12 * sc
+    ix, iy = x0 + px, y0 + py
+    iw, ih = cw - 2 * px, ch - 2 * py
+
+    # 1. HEADER ROW
+    hdr_h = 0.72 * sc
+    meta_w = iw * 0.28
+    meta_x = ix + iw - meta_w
+
+    # Upper-left GE Appliances Logo
+    logo_path = _slide_logo_path()
+    logo_embedded = _embed_img(logo_path) if logo_path is not None else None
+    if logo_embedded is not None:
+        logo_rid, _, _ = logo_embedded
+        shapes_xml.append(
+            _pptx_pic_xml(
+                _next_sid(),
+                "GE Appliances Logo",
+                logo_rid,
+                x_in=ix,
+                y_in=iy - 0.06 * sc,
+                w_in=2.53 * sc,
+                h_in=hdr_h,
+            )
+        )
+    else:
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                "GE Appliances Logo Text",
+                x_in=ix,
+                y_in=iy,
+                w_in=2.53 * sc,
+                h_in=hdr_h,
+                paragraphs=[
+                    _pptx_para_xml(
+                        [_pptx_run_xml("GE APPLIANCES", pt=14.0 * sc, color="0B3768", bold=True)],
+                        align="l",
+                    )
+                ],
+                fill_hex=None,
+                v_anchor="ctr",
+                pad_in=(0.0, 0.01, 0.02, 0.01),
+            )
+        )
+
+    # Center Pitch Title
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Pitch Title",
+            x_in=ix + iw * 0.32,
+            y_in=iy,
+            w_in=iw * 0.39,
+            h_in=hdr_h,
+            paragraphs=[
+                _pptx_para_xml(
+                    [_pptx_run_xml(pitch_title_display, pt=14.0 * sc, color="0B3768", bold=True)],
+                    align="ctr",
+                )
+            ],
+            fill_hex=None,
+            v_anchor="ctr",
+            pad_in=(0.04, 0.02, 0.04, 0.02),
+        )
+    )
+
+    # Upper-Right Title ("Process at a Glance") above Detail Box
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Project Subtitle",
+            x_in=meta_x,
+            y_in=iy - 0.06 * sc,
+            w_in=meta_w,
+            h_in=0.22 * sc,
+            paragraphs=[
+                _pptx_para_xml(
+                    [_pptx_run_xml("Process at a Glance", pt=14.0 * sc, color="0B3768", bold=True)],
+                    align="r",
+                )
+            ],
+            fill_hex=None,
+            v_anchor="ctr",
+            pad_in=(0.0, 0.01, 0.02, 0.01),
+        )
+    )
+
+    # Upper-Right Detail Box (Project, Building, Section | Date, Scenario)
+    meta_paras = [
+        _pptx_para_xml(
+            [
+                _pptx_run_xml("Project: ", pt=7.5 * sc, color="334155", bold=True),
+                _pptx_run_xml(eff_project_name, pt=7.5 * sc, color="475569"),
+            ],
+            align="l",
+        ),
+        _pptx_para_xml(
+            [
+                _pptx_run_xml("Building: ", pt=7.5 * sc, color="334155", bold=True),
+                _pptx_run_xml(building_name, pt=7.5 * sc, color="475569"),
+            ],
+            align="l",
+        ),
+        _pptx_para_xml(
+            [
+                _pptx_run_xml("Section: ", pt=7.5 * sc, color="334155", bold=True),
+                _pptx_run_xml(eff_section_name, pt=7.5 * sc, color="475569"),
+            ],
+            align="l",
+        ),
+        _pptx_para_xml(
+            [
+                _pptx_run_xml("Date: ", pt=7.5 * sc, color="334155", bold=True),
+                _pptx_run_xml(generated_label, pt=7.5 * sc, color="475569"),
+            ],
+            align="l",
+        ),
+        _pptx_para_xml(
+            [
+                _pptx_run_xml("Scenario: ", pt=7.5 * sc, color="334155", bold=True),
+                _pptx_run_xml(eff_scenario_name, pt=7.5 * sc, color="475569"),
+            ],
+            align="l",
+        ),
+    ]
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Metadata Card",
+            x_in=meta_x,
+            y_in=iy + 0.19 * sc,
+            w_in=meta_w,
+            h_in=0.53 * sc,
+            paragraphs=meta_paras,
+            fill_hex="F8FAFC",
+            line_hex="CBD5E1",
+            line_pt=0.75,
+            geom="roundRect",
+            round_adj=10000,
+            v_anchor="ctr",
+            pad_in=(0.06, 0.03, 0.08, 0.03),
+            num_cols=2,
+        )
+    )
+
+    # 2. FUNCTIONAL ALERTS BAR
+    alerts_y = iy + hdr_h + 0.06 * sc
+    alerts_h = 0.28 * sc
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Alerts Bar Container",
+            x_in=ix,
+            y_in=alerts_y,
+            w_in=iw,
+            h_in=alerts_h,
+            fill_hex="F8FAFC",
+            line_hex="E2E8F0",
+            line_pt=0.75,
+            geom="roundRect",
+            round_adj=12000,
+        )
+    )
+
+    alert_categories = [
+        ("Quality", "quality", alerts.get("quality", [])),
+        ("Ergo", "ergo", alerts.get("ergo", [])),
+        ("Safety", "safety", alerts.get("safety", [])),
+        ("Materials", "materials", alerts.get("materials", [])),
+        ("Equipment", "equipment", alerts.get("equipment", [])),
+    ]
+    base_task_count = len(all_pitch_elements) if all_pitch_elements else len(set(step_num_by_wid.values()))
+    alert_col_w = (iw - 0.08 * sc) / 5.0
+    for idx_a, (cat_name, cat_key, cat_list) in enumerate(alert_categories):
+        ax = ix + 0.04 * sc + idx_a * alert_col_w
+        ay = alerts_y + 0.025 * sc
+        aw = alert_col_w - 0.04 * sc
+        ah = alerts_h - 0.05 * sc
+        if cat_list:
+            missing_ppe_items = [
+                item for item in cat_list
+                if str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
+            ]
+            other_items = [
+                item for item in cat_list
+                if not str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
+            ]
+            if missing_ppe_items:
+                eff_total_tasks = max(base_task_count, len(missing_ppe_items))
+                assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
+                items_str = f"No PPE assigned ({assigned_ppe_tasks}/{eff_total_tasks} tasks)"
+            elif cat_key == "safety":
+                cleaned_labels = []
+                for item in other_items:
+                    raw_lbl = str(item.get("label") or "Alert").strip()
+                    if raw_lbl.lower().startswith("safety:"):
+                        raw_lbl = raw_lbl[7:].strip() or raw_lbl
+                    cleaned_labels.append(raw_lbl)
+                if len(cleaned_labels) == 1 and len(cleaned_labels[0]) <= 28:
+                    items_str = cleaned_labels[0]
+                else:
+                    items_str = f"{len(cleaned_labels)} requirement{'s' if len(cleaned_labels) != 1 else ''}"
+            else:
+                items_str = " · ".join(str(item.get("label") or "Alert") for item in other_items)
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Alert {cat_name}",
+                    x_in=ax,
+                    y_in=ay,
+                    w_in=aw,
+                    h_in=ah,
+                    paragraphs=[
+                        _pptx_para_xml(
+                            [
+                                _pptx_run_xml(f"{cat_name}: ", pt=7.2 * sc, color="991B1B", bold=True),
+                                _pptx_run_xml(items_str, pt=7.2 * sc, color="B91C1C", bold=True),
+                            ],
+                            align="l",
+                        )
+                    ],
+                    fill_hex="FEF2F2",
+                    line_hex="FCA5A5",
+                    line_pt=0.75,
+                    geom="roundRect",
+                    round_adj=15000,
+                    v_anchor="ctr",
+                    pad_in=(0.05, 0.01, 0.05, 0.01),
+                )
+            )
+        else:
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Alert {cat_name}",
+                    x_in=ax,
+                    y_in=ay,
+                    w_in=aw,
+                    h_in=ah,
+                    paragraphs=[
+                        _pptx_para_xml(
+                            [
+                                _pptx_run_xml(f"{cat_name}: ", pt=7.2 * sc, color="334155", bold=True),
+                                _pptx_run_xml("✓ None", pt=7.2 * sc, color="15803D", bold=True),
+                            ],
+                            align="l",
+                        )
+                    ],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.05, 0.01, 0.05, 0.01),
+                )
+            )
+
+    # 3. MAIN BODY (Left Column + Right Visual Aid Grid)
+    body_y = alerts_y + alerts_h + 0.07 * sc
+    body_h = (iy + ih) - body_y
+    lw = iw * (0.33 if is_tabloid else 0.36)
+    lx = ix
+    col_gap = 0.10 * sc
+    rx = lx + lw + col_gap
+    rw = (ix + iw) - rx
+
+    # --- LEFT PANEL 1: TOOLS & PPE REQUIRED ---
+    unique_tools: list[dict] = []
+    seen_tool_ids: set[str] = set()
+    for tool in tools:
+        t_id = str(tool.get("equipment_id") or tool.get("name") or "")
+        if t_id and t_id in seen_tool_ids:
+            continue
+        seen_tool_ids.add(t_id)
+        unique_tools.append(tool)
+
+    tools_h = min(1.15 * sc, max(0.56 * sc, (0.30 + 0.20 * max(1, len(unique_tools))) * sc))
+    tools_paras: list[str] = [
+        _pptx_para_xml(
+            [_pptx_run_xml("TOOLS & PPE REQUIRED", pt=9.5 * sc, color="334155", bold=True)],
+            align="l",
+            spc_after_pt=3.0,
+        )
+    ]
+    if unique_tools:
+        for tool in unique_tools[:5]:
+            t_name = str(tool.get("name") or "Tool").strip()
+            t_type = str(tool.get("type_name") or "").strip()
+            t_tier = str(tool.get("tier") or tool.get("equipment_tier") or "").strip()
+            t_summary = str(
+                tool.get("summary_line")
+                or (f"{t_name} ({t_type})" if t_type and t_type.lower() != "tool" else t_name)
+            ).strip()
+            prefix = "[PPE] " if tool.get("is_ppe", False) else (f"[{t_tier}] " if t_tier else "• ")
+            tools_paras.append(
+                _pptx_para_xml(
+                    [
+                        _pptx_run_xml(prefix, pt=8.8 * sc, color="0284C7" if tool.get("is_ppe") else "475569", bold=True),
+                        _pptx_run_xml(t_summary, pt=9.0 * sc, color="0F172A"),
+                    ],
+                    align="l",
+                )
+            )
+    else:
+        tools_paras.append(
+            _pptx_para_xml(
+                [_pptx_run_xml("No equipment or PPE assigned", pt=8.8 * sc, color="94A3B8", italic=True)],
+                align="l",
+            )
+        )
+
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Tools Panel",
+            x_in=lx,
+            y_in=body_y,
+            w_in=lw,
+            h_in=tools_h,
+            paragraphs=tools_paras,
+            fill_hex="FFFFFF",
+            line_hex="CBD5E1",
+            line_pt=0.75,
+            geom="roundRect",
+            round_adj=6000,
+            v_anchor="t",
+            pad_in=(0.07, 0.04, 0.07, 0.04),
+        )
+    )
+
+    # --- LEFT PANEL 2: PARTS TABLE ---
+    def _part_mc_group_key(part_dict: dict) -> str:
+        if not bool(part_dict.get("is_model_variant")):
+            return ""
+        return str(
+            part_dict.get("model_choice_group_id")
+            or part_dict.get("group_id")
+            or part_dict.get("work_element_id")
+            or "__model_choice__"
+        ).strip()
+
+    ordered_parts: list[dict] = []
+    seen_mc_keys: set[str] = set()
+    for p_item in parts:
+        mc_k = _part_mc_group_key(p_item)
+        if not mc_k:
+            ordered_parts.append(p_item)
+        elif mc_k not in seen_mc_keys:
+            seen_mc_keys.add(mc_k)
+            for peer in parts:
+                if _part_mc_group_key(peer) == mc_k:
+                    ordered_parts.append(peer)
+
+    has_model_choice_parts = bool(seen_mc_keys)
+    parts_y = body_y + tools_h + 0.06 * sc
+    max_parts_rows = 8 if is_tabloid else 6
+    visible_parts = ordered_parts[:max_parts_rows]
+    row_h = 0.30 * sc
+    parts_hdr_h = 0.27 * sc
+    parts_tbl_hdr_h = 0.22 * sc
+    if visible_parts:
+        parts_h = min(
+            body_h * 0.48,
+            parts_hdr_h + parts_tbl_hdr_h + len(visible_parts) * row_h + 0.10 * sc,
+        )
+        row_h = max(0.22 * sc, (parts_h - parts_hdr_h - parts_tbl_hdr_h - 0.08 * sc) / max(1, len(visible_parts)))
+    else:
+        parts_h = 0.85 * sc
+
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Parts Panel",
+            x_in=lx,
+            y_in=parts_y,
+            w_in=lw,
+            h_in=parts_h,
+            paragraphs=[
+                _pptx_para_xml(
+                    [
+                        _pptx_run_xml("PARTS", pt=9.5 * sc, color="334155", bold=True),
+                        *(
+                            [
+                                _pptx_run_xml("   ", pt=8.0 * sc),
+                                _pptx_run_xml("[MODEL CHOICE]", pt=8.0 * sc, color="7E22CE", bold=True),
+                            ]
+                            if has_model_choice_parts
+                            else []
+                        ),
+                    ],
+                    align="l",
+                )
+            ],
+            fill_hex="FFFFFF",
+            line_hex="CBD5E1",
+            line_pt=0.75,
+            geom="roundRect",
+            round_adj=5000,
+            v_anchor="t",
+            pad_in=(0.07, 0.04, 0.07, 0.04),
+        )
+    )
+
+    if not visible_parts:
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                "No Parts Placeholder",
+                x_in=lx + 0.07 * sc,
+                y_in=parts_y + parts_hdr_h,
+                w_in=lw - 0.14 * sc,
+                h_in=parts_h - parts_hdr_h - 0.06 * sc,
+                paragraphs=[
+                    _pptx_para_xml(
+                        [_pptx_run_xml("No Parts Paired", pt=9.0 * sc, color="94A3B8", bold=True)],
+                        align="ctr",
+                    )
+                ],
+                fill_hex="F8FAFC",
+                line_hex="CBD5E1",
+                line_pt=0.5,
+                line_dash="dash",
+                geom="roundRect",
+                round_adj=8000,
+                v_anchor="ctr",
+            )
+        )
+    else:
+        tbl_x = lx + 0.05 * sc
+        tbl_w = lw - 0.10 * sc
+        tbl_y = parts_y + parts_hdr_h
+        # Table column widths: Img (11%), Part # (29%), Description (37%), Qty (9%), C/H (14%)
+        c_img_w = tbl_w * 0.11
+        c_pnum_w = tbl_w * 0.29
+        c_desc_w = tbl_w * 0.37
+        c_qty_w = tbl_w * 0.09
+        c_ch_w = tbl_w * 0.14
+
+        # Header background
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                "Parts Table Header",
+                x_in=tbl_x,
+                y_in=tbl_y,
+                w_in=tbl_w,
+                h_in=parts_tbl_hdr_h,
+                fill_hex="F1F5F9",
+                line_hex="E2E8F0",
+                line_pt=0.5,
+            )
+        )
+        hdr_cols = [
+            ("IMG", tbl_x, c_img_w, "ctr"),
+            ("PART #", tbl_x + c_img_w, c_pnum_w, "l"),
+            ("DESCRIPTION", tbl_x + c_img_w + c_pnum_w, c_desc_w, "l"),
+            ("QTY", tbl_x + c_img_w + c_pnum_w + c_desc_w, c_qty_w, "ctr"),
+            ("C / H", tbl_x + c_img_w + c_pnum_w + c_desc_w + c_qty_w, c_ch_w, "ctr"),
+        ]
+        for h_lbl, hx, hw, h_algn in hdr_cols:
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Parts Col {h_lbl}",
+                    x_in=hx,
+                    y_in=tbl_y,
+                    w_in=hw,
+                    h_in=parts_tbl_hdr_h,
+                    paragraphs=[
+                        _pptx_para_xml([_pptx_run_xml(h_lbl, pt=7.8 * sc, color="64748B", bold=True)], align=h_algn)
+                    ],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.02, 0.0, 0.02, 0.0),
+                )
+            )
+
+        rows_start_y = tbl_y + parts_tbl_hdr_h
+        for idx_p, part in enumerate(visible_parts):
+            ry_p = rows_start_y + idx_p * row_h
+            mc_key = _part_mc_group_key(part)
+            is_mc = bool(mc_key)
+            row_fill = "FAF5FF" if is_mc else ("FFFFFF" if idx_p % 2 == 0 else "F8FAFC")
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Part Row {idx_p + 1}",
+                    x_in=tbl_x,
+                    y_in=ry_p,
+                    w_in=tbl_w,
+                    h_in=row_h,
+                    fill_hex=row_fill,
+                    line_hex="E2E8F0",
+                    line_pt=0.4,
+                )
+            )
+
+            p_num = str(part.get("part_number") or "Part").strip()
+            p_desc = str(part.get("description") or part.get("part_name") or "—").strip()
+            p_qty = _part_display_qty(part)
+            h_types = part.get("handling_types") or ([part.get("handling_type")] if part.get("handling_type") else [])
+            h_codes: list[str] = []
+            for ht in h_types:
+                ht_c = str(ht).strip().casefold()
+                if ht_c in {"consume", "c"}:
+                    h_codes.append("C")
+                elif ht_c in {"handle", "h"}:
+                    h_codes.append("H")
+                elif ht_c:
+                    h_codes.append(str(ht).strip().upper()[:1])
+            h_str = "/".join(h_codes) if h_codes else "—"
+            h_color = "166534" if "C" in h_codes else ("92400E" if "H" in h_codes else "64748B")
+
+            # Part thumbnail or IMG box
+            emb_thumb = _embed_img(part.get("image_path") or part.get("thumbnail_path"))
+            thumb_pad = 0.02 * sc
+            thumb_box_w = max(0.08, c_img_w - 2 * thumb_pad)
+            thumb_box_h = max(0.08, row_h - 2 * thumb_pad)
+            if emb_thumb:
+                r_id_th, tw_px, th_px = emb_thumb
+                aspect = tw_px / max(1, th_px)
+                if thumb_box_w / thumb_box_h > aspect:
+                    draw_h = thumb_box_h
+                    draw_w = draw_h * aspect
+                else:
+                    draw_w = thumb_box_w
+                    draw_h = draw_w / aspect
+                shapes_xml.append(
+                    _pptx_pic_xml(
+                        _next_sid(),
+                        f"Thumb {p_num}",
+                        r_id_th,
+                        x_in=tbl_x + thumb_pad + (thumb_box_w - draw_w) / 2.0,
+                        y_in=ry_p + thumb_pad + (thumb_box_h - draw_h) / 2.0,
+                        w_in=draw_w,
+                        h_in=draw_h,
+                    )
+                )
+            else:
+                shapes_xml.append(
+                    _pptx_shape_xml(
+                        _next_sid(),
+                        f"Thumb Placeholder {p_num}",
+                        x_in=tbl_x + thumb_pad,
+                        y_in=ry_p + thumb_pad,
+                        w_in=thumb_box_w,
+                        h_in=thumb_box_h,
+                        paragraphs=[_pptx_para_xml([_pptx_run_xml("IMG", pt=6.5 * sc, color="94A3B8", bold=True)], align="ctr")],
+                        fill_hex="F1F5F9",
+                        line_hex="CBD5E1",
+                        line_pt=0.4,
+                        v_anchor="ctr",
+                        pad_in=(0.0, 0.0, 0.0, 0.0),
+                    )
+                )
+
+            # Part #
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Part Num {p_num}",
+                    x_in=tbl_x + c_img_w,
+                    y_in=ry_p,
+                    w_in=c_pnum_w,
+                    h_in=row_h,
+                    paragraphs=[_pptx_para_xml([_pptx_run_xml(p_num, pt=8.2 * sc, color="0F172A", bold=True)], align="l")],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.02, 0.0, 0.02, 0.0),
+                )
+            )
+            # Description
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Part Desc {p_num}",
+                    x_in=tbl_x + c_img_w + c_pnum_w,
+                    y_in=ry_p,
+                    w_in=c_desc_w,
+                    h_in=row_h,
+                    paragraphs=[_pptx_para_xml([_pptx_run_xml(p_desc, pt=8.0 * sc, color="334155")], align="l")],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.02, 0.0, 0.02, 0.0),
+                )
+            )
+            # Qty
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Part Qty {p_num}",
+                    x_in=tbl_x + c_img_w + c_pnum_w + c_desc_w,
+                    y_in=ry_p,
+                    w_in=c_qty_w,
+                    h_in=row_h,
+                    paragraphs=[_pptx_para_xml([_pptx_run_xml(p_qty, pt=8.2 * sc, color="0F172A", bold=True)], align="ctr")],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.01, 0.0, 0.01, 0.0),
+                )
+            )
+            # Consume / Handle
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Part Handling {p_num}",
+                    x_in=tbl_x + c_img_w + c_pnum_w + c_desc_w + c_qty_w,
+                    y_in=ry_p,
+                    w_in=c_ch_w,
+                    h_in=row_h,
+                    paragraphs=[_pptx_para_xml([_pptx_run_xml(h_str, pt=8.2 * sc, color=h_color, bold=True)], align="ctr")],
+                    fill_hex=None,
+                    v_anchor="ctr",
+                    pad_in=(0.01, 0.0, 0.01, 0.0),
+                )
+            )
+
+        # Draw a single dark purple outline frame around each contiguous group of tied model variant rows
+        mc_spans: list[tuple[int, int, str]] = []
+        for idx_p, part in enumerate(visible_parts):
+            mc_k = _part_mc_group_key(part)
+            if not mc_k:
+                continue
+            if mc_spans and mc_spans[-1][2] == mc_k and mc_spans[-1][1] == idx_p - 1:
+                mc_spans[-1] = (mc_spans[-1][0], idx_p, mc_k)
+            else:
+                mc_spans.append((idx_p, idx_p, mc_k))
+        for grp_idx, (start_idx, end_idx, _) in enumerate(mc_spans, start=1):
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Model Choice Frame {grp_idx}",
+                    x_in=tbl_x,
+                    y_in=rows_start_y + start_idx * row_h,
+                    w_in=tbl_w,
+                    h_in=(end_idx - start_idx + 1) * row_h,
+                    fill_hex=None,
+                    line_hex="6D28D9",
+                    line_pt=1.8,
+                )
+            )
+
+    # --- LEFT PANEL 3: YAMAZUMI STACK ---
+    stack_y = parts_y + parts_h + 0.06 * sc
+    stack_h = max(1.2 * sc, (body_y + body_h) - stack_y)
+    shapes_xml.append(
+        _pptx_shape_xml(
+            _next_sid(),
+            "Yamazumi Panel",
+            x_in=lx,
+            y_in=stack_y,
+            w_in=lw,
+            h_in=stack_h,
+            paragraphs=[
+                _pptx_para_xml(
+                    [
+                        _pptx_run_xml("YAMAZUMI  ", pt=9.5 * sc, color="334155", bold=True),
+                        _pptx_run_xml("■ Cycle  ", pt=7.8 * sc, color="16A34A", bold=True),
+                        _pptx_run_xml("■ Periodic  ", pt=7.8 * sc, color="D97706", bold=True),
+                        _pptx_run_xml("■ Fluctuation  ", pt=7.8 * sc, color="64748B", bold=True),
+                        _pptx_run_xml("— Takt", pt=7.8 * sc, color="DC2626", bold=True),
+                    ],
+                    align="l",
+                )
+            ],
+            fill_hex="FFFFFF",
+            line_hex="CBD5E1",
+            line_pt=0.75,
+            geom="roundRect",
+            round_adj=4000,
+            v_anchor="t",
+            pad_in=(0.07, 0.04, 0.07, 0.04),
+        )
+    )
+
+    variant_items = list(yamazumi_stacks.items())
+    num_vars = max(1, len(variant_items))
+    var_area_x = lx + 0.06 * sc
+    var_area_w = lw - 0.12 * sc
+    var_col_w = (var_area_w - 0.05 * sc * (num_vars - 1)) / num_vars
+    var_hdr_y = stack_y + 0.28 * sc
+    var_hdr_h = 0.24 * sc
+    track_y = var_hdr_y + var_hdr_h + 0.02 * sc
+    track_h = max(0.6 * sc, (stack_y + stack_h - 0.06 * sc) - track_y)
+
+    max_var_time = 0.0
+    for _, v_data in variant_items:
+        v_els = v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else [])
+        vt = sum(float(e.get("time_s") or 0.0) for e in v_els if isinstance(e, dict))
+        if vt > max_var_time:
+            max_var_time = vt
+    ref_time_s = max(max_var_time * 1.08, eff_takt_s * 1.12, 1.0)
+
+    for idx_v, (v_name, v_data) in enumerate(variant_items):
+        vx = var_area_x + idx_v * (var_col_w + 0.05 * sc)
+        v_els = [
+            e for e in (v_data.get("elements", []) if isinstance(v_data, dict) else (v_data if isinstance(v_data, list) else []))
+            if isinstance(e, dict)
+        ]
+        v_total_s = sum(float(e.get("time_s") or 0.0) for e in v_els)
+        hdr_runs = [
+            _pptx_run_xml(f"{v_name}: ", pt=8.5 * sc, color="0F172A", bold=True),
+            _pptx_run_xml(f"{_clean_number(v_total_s)}s", pt=8.5 * sc, color="0F172A", bold=True),
+        ]
+        if eff_takt_s > 0:
+            util_pct = (v_total_s / eff_takt_s) * 100.0
+            u_color = "DC2626" if util_pct > 100.0 else "16A34A"
+            hdr_runs.append(_pptx_run_xml(f" / Takt {_clean_number(eff_takt_s)}s ", pt=8.0 * sc, color="64748B"))
+            hdr_runs.append(_pptx_run_xml(f"({util_pct:.0f}% util)", pt=8.2 * sc, color=u_color, bold=True))
+
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                f"Variant Header {v_name}",
+                x_in=vx,
+                y_in=var_hdr_y,
+                w_in=var_col_w,
+                h_in=var_hdr_h,
+                paragraphs=[_pptx_para_xml(hdr_runs, align="l")],
+                fill_hex=None,
+                v_anchor="ctr",
+                pad_in=(0.01, 0.0, 0.01, 0.0),
+            )
+        )
+
+        # Stack Track Box
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                f"Stack Track {v_name}",
+                x_in=vx,
+                y_in=track_y,
+                w_in=var_col_w,
+                h_in=track_h,
+                fill_hex="F8FAFC",
+                line_hex="E2E8F0",
+                line_pt=0.6,
+                geom="roundRect",
+                round_adj=4000,
+            )
+        )
+
+        if v_els:
+            usable_track_h = track_h - 0.04 * sc
+            min_blk_h = min(0.28 * sc, usable_track_h / max(1, len(v_els)))
+            raw_heights = [
+                max(min_blk_h, (float(e.get("time_s") or 0.0) / ref_time_s) * usable_track_h)
+                for e in v_els
+            ]
+            sum_h = sum(raw_heights)
+            if sum_h > usable_track_h and sum_h > 0:
+                scale_h = usable_track_h / sum_h
+                raw_heights = [h * scale_h for h in raw_heights]
+
+            curr_bottom_y = track_y + track_h - 0.02 * sc
+            for idx_e, e in enumerate(v_els):
+                bh = raw_heights[idx_e]
+                by = curr_bottom_y - bh
+                curr_bottom_y = by
+                step_num = idx_e + 1
+                e_desc = str(e.get("description") or e.get("yamazumi_description") or f"Step {step_num}").strip()
+                e_time = float(e.get("time_s") or 0.0)
+                w_type = str(e.get("work_type") or "").strip().lower()
+                e_color = str(e.get("motion_color") or "green").strip().lower()
+                if w_type == "periodic" or e_color == "orange":
+                    b_fill, b_line, b_txt = "FEF3C7", "F59E0B", "78350F"
+                elif w_type == "fluctuation" or e_color == "gray":
+                    b_fill, b_line, b_txt = "F1F5F9", "94A3B8", "334155"
+                else:
+                    b_fill, b_line, b_txt = "DCFCE7", "22C55E", "14532D"
+
+                shapes_xml.append(
+                    _pptx_shape_xml(
+                        _next_sid(),
+                        f"Stack Step {step_num}",
+                        x_in=vx + 0.02 * sc,
+                        y_in=by,
+                        w_in=var_col_w - 0.04 * sc,
+                        h_in=max(0.12, bh - 0.01 * sc),
+                        paragraphs=[
+                            _pptx_para_xml(
+                                [
+                                    _pptx_run_xml(f"{step_num}. ", pt=8.8 * sc, color=b_txt, bold=True),
+                                    _pptx_run_xml(f"{e_desc} ", pt=8.5 * sc, color=b_txt),
+                                    _pptx_run_xml(f"({_clean_number(e_time)}s)", pt=8.5 * sc, color=b_txt, bold=True),
+                                ],
+                                align="l",
+                            )
+                        ],
+                        fill_hex=b_fill,
+                        line_hex=b_line,
+                        line_pt=0.6,
+                        v_anchor="ctr",
+                        pad_in=(0.04, 0.01, 0.04, 0.01),
+                    )
+                )
+
+        if eff_takt_s > 0:
+            takt_ratio = min(0.95, max(0.08, eff_takt_s / ref_time_s))
+            takt_line_y = (track_y + track_h) - takt_ratio * (track_h - 0.04 * sc)
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Takt Line {v_name}",
+                    x_in=vx + 0.01 * sc,
+                    y_in=takt_line_y,
+                    w_in=var_col_w - 0.02 * sc,
+                    h_in=0.015,
+                    fill_hex="EF4444",
+                    line_hex="EF4444",
+                    line_pt=1.0,
+                )
+            )
+
+    # --- 4. RIGHT COLUMN: VISUAL AID GRID ---
+    grid_count = len(current_media_items)
+    if grid_count == 0:
+        shapes_xml.append(
+            _pptx_shape_xml(
+                _next_sid(),
+                "Empty Visual Aid Card",
+                x_in=rx,
+                y_in=body_y,
+                w_in=rw,
+                h_in=body_h,
+                paragraphs=[
+                    _pptx_para_xml(
+                        [_pptx_run_xml("No Visual Step Guides Added", pt=12.0 * sc, color="64748B", bold=True)],
+                        align="ctr",
+                        spc_after_pt=4.0,
+                    ),
+                    _pptx_para_xml(
+                        [
+                            _pptx_run_xml(
+                                "Upload photos or videos in Process Visual Aids and tag them to work elements.",
+                                pt=8.5 * sc,
+                                color="94A3B8",
+                            )
+                        ],
+                        align="ctr",
+                    ),
+                ],
+                fill_hex="F8FAFC",
+                line_hex="CBD5E1",
+                line_pt=0.75,
+                line_dash="dash",
+                geom="roundRect",
+                round_adj=4000,
+                v_anchor="ctr",
+            )
+        )
+    else:
+        if grid_count == 1:
+            g_cols, g_rows = 1, 1
+        elif grid_count == 2:
+            g_cols, g_rows = 2, 1
+        elif grid_count in {3, 4}:
+            g_cols, g_rows = 2, 2
+        else:
+            g_cols, g_rows = 3, 2
+
+        g_gap = 0.08 * sc
+        card_w = (rw - g_gap * (g_cols - 1)) / g_cols
+        card_h = (body_h - g_gap * (g_rows - 1)) / g_rows
+        total_pitch_elements_count = len(all_pitch_elements)
+
+        for idx_m, item in enumerate(current_media_items):
+            c_idx = idx_m % g_cols
+            r_idx = idx_m // g_cols
+            cx = rx + c_idx * (card_w + g_gap)
+            cy = body_y + r_idx * (card_h + g_gap)
+
+            # Card Frame
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Visual Card {idx_m + 1}",
+                    x_in=cx,
+                    y_in=cy,
+                    w_in=card_w,
+                    h_in=card_h,
+                    fill_hex="FFFFFF",
+                    line_hex="CBD5E1",
+                    line_pt=0.75,
+                    geom="roundRect",
+                    round_adj=3000,
+                )
+            )
+
+            # Resolve tagged steps and step lines
+            tagged_steps: list[int] = []
+            tagged_op_by_num: dict[int, str] = {}
+            for t in item.get("tagged_work_elements", []):
+                t_wid = str(t.get("work_element_id") or "").strip()
+                t_op = str(t.get("operation") or "").strip()
+                if t_wid in step_num_by_wid:
+                    sn = step_num_by_wid[t_wid]
+                    tagged_steps.append(sn)
+                    if t_op and sn not in tagged_op_by_num:
+                        tagged_op_by_num[sn] = t_op
+            if not tagged_steps:
+                for t_wid in item.get("tagged_work_element_ids", []):
+                    t_clean = str(t_wid).strip()
+                    if t_clean in step_num_by_wid:
+                        tagged_steps.append(step_num_by_wid[t_clean])
+            tagged_steps = sorted(list(set(tagged_steps)))
+
+            step_paras: list[str] = []
+            if tagged_steps:
+                for sn in tagged_steps[:4]:
+                    s_title = step_desc_by_num.get(sn) or tagged_op_by_num.get(sn) or f"Step {sn}"
+                    step_paras.append(
+                        _pptx_para_xml(
+                            [
+                                _pptx_run_xml(f"[{sn}] ", pt=8.0 * sc, color="38BDF8", bold=True),
+                                _pptx_run_xml(s_title, pt=8.0 * sc, color="FFFFFF", bold=True),
+                            ],
+                            align="l",
+                        )
+                    )
+                if len(tagged_steps) > 4:
+                    step_paras.append(
+                        _pptx_para_xml(
+                            [_pptx_run_xml(f"+{len(tagged_steps) - 4} more steps", pt=7.0 * sc, color="94A3B8", italic=True)],
+                            align="l",
+                        )
+                    )
+            elif total_pitch_elements_count > 0:
+                nums_str = ", ".join(str(sn) for sn in range(1, total_pitch_elements_count + 1))
+                step_paras.append(
+                    _pptx_para_xml(
+                        [_pptx_run_xml(f"All elements ({nums_str})", pt=8.0 * sc, color="FFFFFF", bold=True)],
+                        align="l",
+                    )
+                )
+            else:
+                step_paras.append(
+                    _pptx_para_xml(
+                        [_pptx_run_xml("General Pitch Visual", pt=8.0 * sc, color="FFFFFF", bold=True)],
+                        align="l",
+                    )
+                )
+
+            banner_lines = max(1, len(step_paras))
+            banner_h = min(card_h * 0.28, (0.24 + (banner_lines - 1) * 0.16) * sc)
+            shapes_xml.append(
+                _pptx_shape_xml(
+                    _next_sid(),
+                    f"Visual Step Banner {idx_m + 1}",
+                    x_in=cx,
+                    y_in=cy,
+                    w_in=card_w,
+                    h_in=banner_h,
+                    paragraphs=step_paras,
+                    fill_hex="0F172A",
+                    v_anchor="ctr",
+                    pad_in=(0.08, 0.03, 0.08, 0.03),
+                )
+            )
+
+            raw_caption = str(item.get("caption") or "").strip()
+            has_custom_caption = bool(
+                raw_caption and raw_caption.casefold() not in {"visual aid", "step visual aid"}
+            )
+            callout_h = 0.26 * sc if has_custom_caption else 0.0
+
+            media_box_x = cx + 0.04 * sc
+            media_box_y = cy + banner_h + 0.04 * sc
+            media_box_w = max(0.2, card_w - 0.08 * sc)
+            media_box_h = max(0.2, card_h - banner_h - callout_h - 0.08 * sc)
+
+            f_path = item.get("file_path") or ""
+            emb_media = _embed_img(f_path)
+            if emb_media:
+                r_id_m, mw_px, mh_px = emb_media
+                if image_fit == "fill":
+                    draw_x, draw_y, draw_w, draw_h = media_box_x, media_box_y, media_box_w, media_box_h
+                else:
+                    m_aspect = mw_px / max(1, mh_px)
+                    if media_box_w / media_box_h > m_aspect:
+                        draw_h = media_box_h
+                        draw_w = draw_h * m_aspect
+                    else:
+                        draw_w = media_box_w
+                        draw_h = draw_w / m_aspect
+                    draw_x = media_box_x + (media_box_w - draw_w) / 2.0
+                    draw_y = media_box_y + (media_box_h - draw_h) / 2.0
+
+                shapes_xml.append(
+                    _pptx_pic_xml(
+                        _next_sid(),
+                        f"Visual Aid Image {idx_m + 1}",
+                        r_id_m,
+                        x_in=draw_x,
+                        y_in=draw_y,
+                        w_in=draw_w,
+                        h_in=draw_h,
+                    )
+                )
+            else:
+                m_type = str(item.get("media_type") or "image").strip().lower()
+                fallback_lbl = raw_caption or Path(str(f_path)).name or f"{m_type.upper()} Media"
+                shapes_xml.append(
+                    _pptx_shape_xml(
+                        _next_sid(),
+                        f"Visual Media Placeholder {idx_m + 1}",
+                        x_in=media_box_x,
+                        y_in=media_box_y,
+                        w_in=media_box_w,
+                        h_in=media_box_h,
+                        paragraphs=[
+                            _pptx_para_xml(
+                                [_pptx_run_xml(fallback_lbl, pt=9.0 * sc, color="475569", bold=True)],
+                                align="ctr",
+                            )
+                        ],
+                        fill_hex="F8FAFC",
+                        line_hex="E2E8F0",
+                        line_pt=0.5,
+                        v_anchor="ctr",
+                    )
+                )
+
+            if has_custom_caption:
+                shapes_xml.append(
+                    _pptx_shape_xml(
+                        _next_sid(),
+                        f"Visual Callout {idx_m + 1}",
+                        x_in=cx,
+                        y_in=cy + card_h - callout_h,
+                        w_in=card_w,
+                        h_in=callout_h,
+                        paragraphs=[
+                            _pptx_para_xml(
+                                [
+                                    _pptx_run_xml("📍 ", pt=7.5 * sc, color="854D0E", bold=True),
+                                    _pptx_run_xml(raw_caption, pt=7.5 * sc, color="713F12", bold=True),
+                                ],
+                                align="l",
+                            )
+                        ],
+                        fill_hex="FEF9C3",
+                        line_hex="FDE047",
+                        line_pt=0.6,
+                        v_anchor="ctr",
+                        pad_in=(0.06, 0.02, 0.06, 0.02),
+                    )
+                )
+
+    slide_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        "<p:cSld>"
+        "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"E2E8F0\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"
+        "<p:spTree>"
+        "<p:nvGrpSpPr>"
+        '<p:cNvPr id="1" name=""/>'
+        "<p:cNvGrpSpPr/>"
+        "<p:nvPr/>"
+        "</p:nvGrpSpPr>"
+        "<p:grpSpPr>"
+        "<a:xfrm>"
+        '<a:off x="0" y="0"/><a:ext cx="0" cy="0"/>'
+        '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/>'
+        "</a:xfrm>"
+        "</p:grpSpPr>"
+        f"{''.join(shapes_xml)}"
+        "</p:spTree>"
+        "</p:cSld>"
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>"
+        "</p:sld>"
+    )
+    return slide_xml, slide_rels
+
+
+def render_paag_pptx_deck(
+    slides_data: list[dict],
+    *,
+    paper_size: str = "letter",
+    image_fit: str = "contain",
+    scenario_name: str = "",
+    project_name: str = "",
+    title: str = "Process at a Glance",
+) -> bytes:
+    """Build a standalone, native OpenXML PowerPoint (.pptx) deck for the selected PAAG slides."""
+    import hashlib
+    import io
+    import zipfile
+
+    is_tabloid = paper_size == "tabloid"
+    slide_w_emu = _pptx_in(17.0 if is_tabloid else 11.0)
+    slide_h_emu = _pptx_in(11.0 if is_tabloid else 8.5)
+
+    media_by_hash: dict[str, tuple[str, bytes, int, int]] = {}
+    path_cache: dict[str, tuple[str, int, int] | None] = {}
+
+    def _register_media(raw_path: object) -> tuple[str, int, int] | None:
+        key = str(raw_path or "").strip()
+        if not key:
+            return None
+        if key in path_cache:
+            return path_cache[key]
+        loaded = _load_pptx_image_bytes(key)
+        if not loaded:
+            path_cache[key] = None
+            return None
+        png_bytes, w_px, h_px = loaded
+        digest = hashlib.sha1(png_bytes).hexdigest()[:16]
+        if digest not in media_by_hash:
+            fname = f"image_{len(media_by_hash) + 1}_{digest}.png"
+            media_by_hash[digest] = (fname, png_bytes, w_px, h_px)
+        fname, _, w_px, h_px = media_by_hash[digest]
+        path_cache[key] = (fname, w_px, h_px)
+        return fname, w_px, h_px
+
+    effective_slides = slides_data if slides_data else [{"pitch": {}, "elements": [], "page_num": 1, "total_pages": 1}]
+    compiled_slides: list[tuple[str, list[tuple[str, str]]]] = []
+    for s_spec in effective_slides:
+        s_xml, s_rels = _render_single_paag_pptx_slide(
+            s_spec,
+            paper_size=paper_size,
+            image_fit=image_fit,
+            scenario_name=scenario_name,
+            project_name=project_name,
+            register_media_fn=_register_media,
+        )
+        compiled_slides.append((s_xml, s_rels))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 1. [Content_Types].xml
+        slide_ct_overrides = "".join(
+            f'<Override PartName="/ppt/slides/slide{i}.xml" '
+            f'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+            for i in range(1, len(compiled_slides) + 1)
+        )
+        content_types_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="png" ContentType="image/png"/>'
+            '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+            '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>'
+            '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+            '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.theme+xml"/>'
+            '<Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>'
+            '<Override PartName="/ppt/viewProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"/>'
+            '<Override PartName="/ppt/tableStyles.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+            f"{slide_ct_overrides}"
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", content_types_xml)
+
+        # 2. _rels/.rels
+        root_rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            "</Relationships>"
+        )
+        zf.writestr("_rels/.rels", root_rels_xml)
+
+        # 3. docProps/core.xml & docProps/app.xml
+        iso_now = f"{date.today().isoformat()}T00:00:00Z"
+        core_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+            'xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:dcmitype="http://purl.org/dc/dcmitype/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            f"<dc:title>{_xml_esc(title)}</dc:title>"
+            "<dc:creator>Process at a Glance</dc:creator>"
+            f'<dcterms:created xsi:type="dcterms:W3CDTF">{iso_now}</dcterms:created>'
+            f'<dcterms:modified xsi:type="dcterms:W3CDTF">{iso_now}</dcterms:modified>'
+            "</cp:coreProperties>"
+        )
+        zf.writestr("docProps/core.xml", core_xml)
+
+        app_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            "<Application>Process at a Glance</Application>"
+            f"<Slides>{len(compiled_slides)}</Slides>"
+            "<ScaleCrop>false</ScaleCrop>"
+            "<LinksUpToDate>false</LinksUpToDate>"
+            "<SharedDoc>false</SharedDoc>"
+            "<HyperlinksChanged>false</HyperlinksChanged>"
+            "<AppVersion>16.0000</AppVersion>"
+            "</Properties>"
+        )
+        zf.writestr("docProps/app.xml", app_xml)
+
+        # 4. ppt/presentation.xml & ppt/_rels/presentation.xml.rels
+        sld_id_entries = "".join(
+            f'<p:sldId id="{255 + i}" r:id="rId{5 + i}"/>'
+            for i in range(1, len(compiled_slides) + 1)
+        )
+        presentation_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" saveSubsetFonts="1">'
+            '<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst>'
+            f"<p:sldIdLst>{sld_id_entries}</p:sldIdLst>"
+            f'<p:sldSz cx="{slide_w_emu}" cy="{slide_h_emu}"/>'
+            '<p:notesSz cx="6858000" cy="9144000"/>'
+            "<p:defaultTextStyle>"
+            "<a:defPPr><a:defRPr lang=\"en-US\"/></a:defPPr>"
+            "</p:defaultTextStyle>"
+            "</p:presentation>"
+        )
+        zf.writestr("ppt/presentation.xml", presentation_xml)
+
+        pres_slide_rels = "".join(
+            f'<Relationship Id="rId{5 + i}" '
+            f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
+            f'Target="slides/slide{i}.xml"/>'
+            for i in range(1, len(compiled_slides) + 1)
+        )
+        pres_rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps" Target="presProps.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps" Target="viewProps.xml"/>'
+            '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>'
+            '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles" Target="tableStyles.xml"/>'
+            f"{pres_slide_rels}"
+            "</Relationships>"
+        )
+        zf.writestr("ppt/_rels/presentation.xml.rels", pres_rels_xml)
+
+        # 5. Supporting presentation parts
+        zf.writestr(
+            "ppt/presProps.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<p:presentationPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+        )
+        zf.writestr(
+            "ppt/viewProps.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<p:viewPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            '<p:normalViewPr><p:restoredLeft sz="15620"/><p:restoredTop sz="94660"/></p:normalViewPr>'
+            "</p:viewPr>",
+        )
+        zf.writestr(
+            "ppt/tableStyles.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>',
+        )
+
+        # 6. Theme, Slide Master, Slide Layout
+        theme_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="PAAG Theme">'
+            "<a:themeElements>"
+            '<a:clrScheme name="PAAG">'
+            '<a:dk1><a:srgbClr val="0F172A"/></a:dk1>'
+            '<a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>'
+            '<a:dk2><a:srgbClr val="334155"/></a:dk2>'
+            '<a:lt2><a:srgbClr val="F8FAFC"/></a:lt2>'
+            '<a:accent1><a:srgbClr val="0284C7"/></a:accent1>'
+            '<a:accent2><a:srgbClr val="16A34A"/></a:accent2>'
+            '<a:accent3><a:srgbClr val="F59E0B"/></a:accent3>'
+            '<a:accent4><a:srgbClr val="EF4444"/></a:accent4>'
+            '<a:accent5><a:srgbClr val="7E22CE"/></a:accent5>'
+            '<a:accent6><a:srgbClr val="64748B"/></a:accent6>'
+            '<a:hlink><a:srgbClr val="0284C7"/></a:hlink>'
+            '<a:folHlink><a:srgbClr val="0369A1"/></a:folHlink>'
+            "</a:clrScheme>"
+            '<a:fontScheme name="PAAG">'
+            '<a:majorFont><a:latin typeface="Segoe UI"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>'
+            '<a:minorFont><a:latin typeface="Segoe UI"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>'
+            "</a:fontScheme>"
+            '<a:fmtScheme name="PAAG">'
+            "<a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst>"
+            '<a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>'
+            "<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>"
+            "<a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst>"
+            "</a:fmtScheme>"
+            "</a:themeElements>"
+            "<a:objectDefaults/>"
+            "<a:extraClrSchemeLst/>"
+            "</a:theme>"
+        )
+        zf.writestr("ppt/theme/theme1.xml", theme_xml)
+
+        slide_master_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            "<p:cSld>"
+            "<p:bg><p:bgRef idx=\"1001\"><a:schemeClr val=\"bg1\"/></p:bgRef></p:bg>"
+            "<p:spTree>"
+            "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
+            "<p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>"
+            "</p:spTree>"
+            "</p:cSld>"
+            '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>'
+            '<p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>'
+            "<p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles>"
+            "</p:sldMaster>"
+        )
+        zf.writestr("ppt/slideMasters/slideMaster1.xml", slide_master_xml)
+        zf.writestr(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>'
+            "</Relationships>",
+        )
+
+        slide_layout_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1">'
+            '<p:cSld name="Blank">'
+            "<p:spTree>"
+            "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
+            "<p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>"
+            "</p:spTree>"
+            "</p:cSld>"
+            "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>"
+            "</p:sldLayout>"
+        )
+        zf.writestr("ppt/slideLayouts/slideLayout1.xml", slide_layout_xml)
+        zf.writestr(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>'
+            "</Relationships>",
+        )
+
+        # 7. Write slides & slide relationships
+        for idx_s, (s_xml, s_rels) in enumerate(compiled_slides, start=1):
+            zf.writestr(f"ppt/slides/slide{idx_s}.xml", s_xml)
+            img_rel_tags = "".join(
+                f'<Relationship Id="{r_id}" '
+                f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+                f'Target="{target}"/>'
+                for r_id, target in s_rels
+            )
+            s_rels_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+                f"{img_rel_tags}"
+                "</Relationships>"
+            )
+            zf.writestr(f"ppt/slides/_rels/slide{idx_s}.xml.rels", s_rels_xml)
+
+        # 8. Write deduplicated media files
+        for fname, png_bytes, _, _ in media_by_hash.values():
+            zf.writestr(f"ppt/media/{fname}", png_bytes)
+
+    return buf.getvalue()
+
+
+_PROCESS_PITCH_VISUAL_REV_20261102 = 13

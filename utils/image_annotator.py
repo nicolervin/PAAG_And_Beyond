@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-_IMAGE_ANNOTATOR_REV_20261103 = 5
+_IMAGE_ANNOTATOR_REV_20261103 = 6
 
 
 _HTML = """
@@ -831,7 +831,7 @@ export default function(component) {
     canvas.style.cursor = "default";
   }
 
-  function insertImageOverlay(rawSrcUrl, labelText, sourceTag) {
+  function insertImageOverlay(rawSrcUrl, labelText, sourceTag, partMeta) {
     if (!imgLoaded || !rawSrcUrl) return;
     statusEl.textContent = "Loading photo into annotation canvas...";
     const loader = new Image();
@@ -871,7 +871,13 @@ export default function(component) {
       const targetMaxDim = Math.max(96, Math.min(Math.round(baseRef * 0.34), Math.round(workW * 0.45), Math.round(workH * 0.45)));
       const aspect = natW / Math.max(1, natH);
       let boxW = aspect >= 1 ? targetMaxDim : Math.max(64, Math.round(targetMaxDim * aspect));
-      let boxH = aspect >= 1 ? Math.max(64, Math.round(targetMaxDim / aspect)) : targetMaxDim;
+      let photoH = aspect >= 1 ? Math.max(64, Math.round(targetMaxDim / aspect)) : targetMaxDim;
+      const cleanLabel = String(labelText || "").trim();
+      const normFactor = getVisualNormFactor();
+      const extraFooterH = cleanLabel
+        ? Math.max(18, Math.round(Math.min(photoH * 0.28, Math.max(11 * normFactor, Math.min(18 * normFactor, photoH * 0.14)) + 8 * normFactor)))
+        : 0;
+      let boxH = photoH + extraFooterH;
       boxW = Math.min(workW - 16, boxW);
       boxH = Math.min(workH - 16, boxH);
 
@@ -893,6 +899,11 @@ export default function(component) {
         color: currentColor,
         strokeWidth: currentStrokeWidth,
       };
+      if (partMeta && typeof partMeta === "object") {
+        if (partMeta.partId) newShape.partId = String(partMeta.partId);
+        if (partMeta.partNumber) newShape.partNumber = String(partMeta.partNumber);
+        if (partMeta.viewId) newShape.viewId = String(partMeta.viewId);
+      }
       shapes.push(newShape);
       selectedShapeId = newShape.id;
       activateSelectTool();
@@ -1345,7 +1356,7 @@ export default function(component) {
         insertImageOverlay(
           item.data_url,
           labelTxt,
-          `part photo (${item.part_number || "Catalog"})`
+          `part photo (${item.part_number || "Catalog"})`, { partId: item.part_id || "", partNumber: item.part_number || "", viewId: item.view_id || "" }
         );
       };
       partPhotoGrid.appendChild(card);
@@ -1699,6 +1710,30 @@ export default function(component) {
       }
       if (data.initial_badge_number) {
         nextBadgeInput.value = data.initial_badge_number;
+      }
+      if (Array.isArray(catalogPhotos) && catalogPhotos.length > 0) {
+        shapes.forEach(s => {
+          if (!s || s.type !== "image") return;
+          let matched = null;
+          if (s.partId && s.viewId) {
+            matched = catalogPhotos.find(cp => cp && cp.part_id === s.partId && cp.view_id === s.viewId);
+          }
+          if (!matched && s.partId) {
+            matched = catalogPhotos.find(cp => cp && cp.part_id === s.partId);
+          }
+          if (!matched) {
+            const pKey = String(s.partNumber || s.label || "").trim().toLowerCase();
+            if (pKey) {
+              matched = catalogPhotos.find(cp => cp && String(cp.part_number || "").trim().toLowerCase() === pKey);
+            }
+          }
+          if (matched && matched.data_url) {
+            s.dataUrl = matched.data_url;
+            if (!s.partId && matched.part_id) s.partId = matched.part_id;
+            if (!s.partNumber && matched.part_number) s.partNumber = matched.part_number;
+            if (!s.viewId && matched.view_id) s.viewId = matched.view_id;
+          }
+        });
       }
       warmShapeImages();
       rebuildWorkingImage();
@@ -2362,7 +2397,18 @@ export default function(component) {
       targetCtx.shadowBlur = 0;
 
       if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
-        targetCtx.drawImage(cachedImg, rx, ry, rw, rh);
+        const labelTxtForPhoto = String(s.label || "").trim();
+        const lblFontForPhoto = Math.max(11 * visScale, Math.min(18 * visScale, Math.round(rh * 0.14)));
+        const bannerHForPhoto = labelTxtForPhoto ? Math.min(rh * 0.36, lblFontForPhoto + 8 * visScale) : 0;
+        const photoH = Math.max(1, rh - bannerHForPhoto);
+        const iw = cachedImg.naturalWidth;
+        const ih = cachedImg.naturalHeight;
+        const scaleFit = Math.min(rw / Math.max(1, iw), photoH / Math.max(1, ih));
+        const dw = Math.max(1, iw * scaleFit);
+        const dh = Math.max(1, ih * scaleFit);
+        const dx = rx + (rw - dw) / 2;
+        const dy = ry + (photoH - dh) / 2;
+        targetCtx.drawImage(cachedImg, dx, dy, dw, dh);
       } else {
         targetCtx.fillStyle = "#f8fafc";
         targetCtx.fillRect(rx, ry, rw, rh);
@@ -2372,7 +2418,7 @@ export default function(component) {
         const lblFontSize = Math.max(11 * visScale, Math.min(18 * visScale, Math.round(rh * 0.14)));
         const bannerH = Math.min(rh * 0.36, lblFontSize + 8 * visScale);
         const by = ry + rh - bannerH;
-        targetCtx.fillStyle = "rgba(15, 23, 42, 0.86)";
+        targetCtx.fillStyle = "#0f172a";
         targetCtx.fillRect(rx, by, rw, bannerH);
         targetCtx.fillStyle = "#ffffff";
         targetCtx.font = `700 ${Math.round(lblFontSize)}px sans-serif`;
@@ -2449,7 +2495,7 @@ export default function(component) {
 """
 
 _IMAGE_ANNOTATOR = st.components.v2.component(
-    "paag_image_annotator_v11",
+    "paag_image_annotator_v13",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -2509,3 +2555,394 @@ def decode_data_url(data_url: str) -> bytes:
         raise ValueError("Invalid data URL format.")
     _, encoded = data_url.split(";base64,", 1)
     return base64.b64decode(encoded)
+
+
+def _parse_hex_color(
+    color_str: str, default: tuple[int, int, int] = (239, 68, 68)
+) -> tuple[int, int, int]:
+    cleaned = str(color_str or "").strip().lstrip("#")
+    if len(cleaned) == 3:
+        cleaned = "".join(ch * 2 for ch in cleaned)
+    if len(cleaned) >= 6:
+        try:
+            return (
+                int(cleaned[0:2], 16),
+                int(cleaned[2:4], 16),
+                int(cleaned[4:6], 16),
+            )
+        except ValueError:
+            pass
+    return default
+
+
+def _load_annotator_font(size_px: int, bold: bool = True):
+    from PIL import ImageFont
+
+    px = max(8, int(round(size_px)))
+    candidates = (
+        ("arialbd.ttf", "segoeuib.ttf", "DejaVuSans-Bold.ttf", "arial.ttf", "segoeui.ttf")
+        if bold
+        else ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf")
+    )
+    for name in candidates:
+        try:
+            return ImageFont.truetype(name, px)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=px)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _compute_working_canvas_image(base_img, transform_ops: list[dict]):
+    from PIL import Image
+
+    work = base_img.convert("RGBA")
+    for op in transform_ops:
+        if not isinstance(op, dict):
+            continue
+        kind = str(op.get("kind") or "")
+        if kind == "rotate":
+            angle = int(round(float(op.get("angle") or 0)))
+            if angle == 90:
+                work = work.transpose(Image.Transpose.ROTATE_270)
+            elif angle == -90:
+                work = work.transpose(Image.Transpose.ROTATE_90)
+        elif kind == "crop":
+            cx = max(0, min(work.width - 1, int(round(float(op.get("x") or 0)))))
+            cy = max(0, min(work.height - 1, int(round(float(op.get("y") or 0)))))
+            cw = max(1, min(work.width - cx, int(round(float(op.get("w") or work.width)))))
+            ch = max(1, min(work.height - cy, int(round(float(op.get("h") or work.height)))))
+            work = work.crop((cx, cy, cx + cw, cy + ch))
+    return work
+
+
+def _draw_annotator_shape_pil(
+    canvas,
+    shape: dict[str, Any],
+    sc: float,
+    vis_scale: float,
+) -> None:
+    import math
+    from pathlib import Path
+    from PIL import Image, ImageDraw, ImageOps
+
+    s_type = str(shape.get("type") or "").strip()
+    if not s_type or s_type == "__transform__":
+        return
+    sw = float(shape.get("strokeWidth") or 4.0)
+    rgb = _parse_hex_color(str(shape.get("color") or "#ef4444"))
+    line_w = max(2, int(round(max(1.5, sw * vis_scale))))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    if s_type == "arrow":
+        x1 = float(shape.get("x1") or 0.0) * sc
+        y1 = float(shape.get("y1") or 0.0) * sc
+        x2 = float(shape.get("x2") or 0.0) * sc
+        y2 = float(shape.get("y2") or 0.0) * sc
+        draw.line([(x1, y1), (x2, y2)], fill=(*rgb, 255), width=line_w)
+        angle = math.atan2(y2 - y1, x2 - x1)
+        head_len = max(14.0 * vis_scale, line_w * 3.8)
+        p1 = (x2, y2)
+        p2 = (
+            x2 - head_len * math.cos(angle - math.pi / 6.0),
+            y2 - head_len * math.sin(angle - math.pi / 6.0),
+        )
+        p3 = (
+            x2 - head_len * math.cos(angle + math.pi / 6.0),
+            y2 - head_len * math.sin(angle + math.pi / 6.0),
+        )
+        draw.polygon([p1, p2, p3], fill=(*rgb, 255))
+
+    elif s_type == "rect":
+        rx = min(float(shape.get("x") or 0.0), float(shape.get("x") or 0.0) + float(shape.get("w") or 0.0)) * sc
+        ry = min(float(shape.get("y") or 0.0), float(shape.get("y") or 0.0) + float(shape.get("h") or 0.0)) * sc
+        rw = abs(float(shape.get("w") or 0.0)) * sc
+        rh = abs(float(shape.get("h") or 0.0)) * sc
+        draw.rectangle(
+            [rx, ry, rx + rw, ry + rh],
+            fill=(*rgb, 34),
+            outline=(*rgb, 255),
+            width=line_w,
+        )
+
+    elif s_type == "circle":
+        rx = min(float(shape.get("x") or 0.0), float(shape.get("x") or 0.0) + float(shape.get("w") or 0.0)) * sc
+        ry = min(float(shape.get("y") or 0.0), float(shape.get("y") or 0.0) + float(shape.get("h") or 0.0)) * sc
+        rw = max(2.0, abs(float(shape.get("w") or 0.0)) * sc)
+        rh = max(2.0, abs(float(shape.get("h") or 0.0)) * sc)
+        draw.ellipse(
+            [rx, ry, rx + rw, ry + rh],
+            fill=(*rgb, 34),
+            outline=(*rgb, 255),
+            width=line_w,
+        )
+
+    elif s_type == "badge":
+        bx = float(shape.get("x") or 0.0) * sc
+        by = float(shape.get("y") or 0.0) * sc
+        r = max(13.0 * vis_scale, sw * 3.6 * vis_scale)
+        border_w = max(2, int(round(2.5 * vis_scale)))
+        draw.ellipse(
+            [bx - r, by - r, bx + r, by + r],
+            fill=(15, 23, 42, 255),
+            outline=(*rgb, 255),
+            width=border_w,
+        )
+        font = _load_annotator_font(int(round(r * 1.15)), bold=True)
+        draw.text(
+            (bx, by + 1),
+            str(shape.get("badgeNum") or 1),
+            fill=(255, 255, 255, 255),
+            font=font,
+            anchor="mm",
+        )
+
+    elif s_type == "text":
+        tx = float(shape.get("x") or 0.0) * sc
+        ty = float(shape.get("y") or 0.0) * sc
+        base_font_px = float(shape.get("fontSize") or 18.0)
+        font_size = max(10.0 * vis_scale, base_font_px * vis_scale)
+        font = _load_annotator_font(int(round(font_size)), bold=True)
+        txt = str(shape.get("text") or "")
+        pad_x = max(6.0, round(base_font_px * 0.45)) * vis_scale
+        pad_y = max(4.0, round(base_font_px * 0.28)) * vis_scale
+        try:
+            bbox = draw.textbbox((0, 0), txt, font=font)
+            text_w = float(bbox[2] - bbox[0])
+        except Exception:
+            text_w = float(len(txt)) * font_size * 0.58
+        box_w = text_w + pad_x * 2.0
+        box_h = font_size + pad_y * 2.0
+        border_w = max(2, int(round(2.0 * vis_scale)))
+        draw.rectangle(
+            [tx, ty, tx + box_w, ty + box_h],
+            fill=(15, 23, 42, 255),
+            outline=(*rgb, 255),
+            width=border_w,
+        )
+        draw.text(
+            (tx + pad_x, ty + pad_y),
+            txt,
+            fill=(255, 255, 255, 255),
+            font=font,
+        )
+
+    elif s_type == "pen":
+        pts = shape.get("points") or []
+        if isinstance(pts, list) and len(pts) > 1:
+            coords = [
+                (float(p.get("x") or 0.0) * sc, float(p.get("y") or 0.0) * sc)
+                for p in pts
+                if isinstance(p, dict)
+            ]
+            if len(coords) > 1:
+                draw.line(coords, fill=(*rgb, 255), width=line_w, joint="curve")
+
+    elif s_type == "image":
+        x_val = float(shape.get("x") or 0.0)
+        y_val = float(shape.get("y") or 0.0)
+        w_val = float(shape.get("w") or 1.0)
+        h_val = float(shape.get("h") or 1.0)
+        rx = int(round(min(x_val, x_val + w_val) * sc))
+        ry = int(round(min(y_val, y_val + h_val) * sc))
+        rw = max(1, int(round(abs(w_val) * sc)))
+        rh = max(1, int(round(abs(h_val) * sc)))
+
+        tile = Image.new("RGBA", (rw, rh), (255, 255, 255, 255))
+        part_img_bytes: bytes | None = None
+        local_img_path = str(shape.get("_resolved_image_path") or "").strip()
+        if local_img_path:
+            try:
+                p_obj = Path(local_img_path)
+                if p_obj.exists() and p_obj.is_file():
+                    part_img_bytes = p_obj.read_bytes()
+            except Exception:
+                part_img_bytes = None
+        if part_img_bytes is None:
+            d_url = str(shape.get("dataUrl") or shape.get("data_url") or "").strip()
+            if d_url.startswith("data:") and ";base64," in d_url:
+                try:
+                    part_img_bytes = decode_data_url(d_url)
+                except Exception:
+                    part_img_bytes = None
+        if part_img_bytes:
+            try:
+                with Image.open(BytesIO(part_img_bytes)) as pim:
+                    pim_rgba = ImageOps.exif_transpose(pim).convert("RGBA")
+                    label_txt_pre = str(shape.get("label") or "").strip()
+                    lbl_fs_pre = max(11.0 * vis_scale, min(18.0 * vis_scale, round(rh * 0.14)))
+                    banner_h_pre = max(1, int(round(min(rh * 0.36, lbl_fs_pre + 8.0 * vis_scale)))) if label_txt_pre else 0
+                    photo_h = max(1, rh - banner_h_pre)
+                    iw, ih = max(1, pim_rgba.width), max(1, pim_rgba.height)
+                    scale_fit = min(rw / float(iw), photo_h / float(ih))
+                    dw = max(1, int(round(iw * scale_fit)))
+                    dh = max(1, int(round(ih * scale_fit)))
+                    dx = max(0, int(round((rw - dw) / 2.0)))
+                    dy = max(0, int(round((photo_h - dh) / 2.0)))
+                    pim_resized = pim_rgba.resize((dw, dh), Image.Resampling.LANCZOS)
+                    tile.alpha_composite(pim_resized, (dx, dy))
+                    pim_resized = None
+                    if pim_resized is not None:
+                        tile.alpha_composite(pim_resized, (0, 0))
+            except Exception:
+                pass
+
+        label_txt = str(shape.get("label") or "").strip()
+        if label_txt:
+            lbl_font_size = max(11.0 * vis_scale, min(18.0 * vis_scale, round(rh * 0.14)))
+            banner_h = max(1, int(round(min(rh * 0.36, lbl_font_size + 8.0 * vis_scale))))
+            by_local = max(0, rh - banner_h)
+            banner_overlay = Image.new("RGBA", (rw, rh - by_local), (15, 23, 42, 219))
+            tile.alpha_composite(banner_overlay, (0, by_local))
+            tile_draw = ImageDraw.Draw(tile, "RGBA")
+            border_w_approx = max(2, int(round(float(shape.get("strokeWidth") or 3.0) * 0.75 * vis_scale)))
+            max_txt_w = max(8.0, float(rw - border_w_approx * 2 - max(6.0, 8.0 * vis_scale)))
+            cur_font_px = max(8, int(round(lbl_font_size)))
+            lbl_font = _load_annotator_font(cur_font_px, bold=True)
+            while cur_font_px > 7:
+                bbox = tile_draw.textbbox((0, 0), label_txt, font=lbl_font)
+                if float(bbox[2] - bbox[0]) <= max_txt_w:
+                    break
+                cur_font_px -= 1
+                lbl_font = _load_annotator_font(cur_font_px, bold=True)
+            tile_draw.text(
+                (rw / 2.0, by_local + (rh - by_local) / 2.0),
+                label_txt,
+                fill=(255, 255, 255, 255),
+                font=lbl_font,
+                anchor="mm",
+            )
+
+        canvas.alpha_composite(tile, (max(0, rx), max(0, ry)))
+        border_rgb = _parse_hex_color(str(shape.get("color") or "#38bdf8"), (56, 189, 248))
+        border_w = max(2, int(round(float(shape.get("strokeWidth") or 3.0) * 0.75 * vis_scale)))
+        draw.rectangle(
+            [rx, ry, rx + rw, ry + rh],
+            outline=(*border_rgb, 255),
+            width=border_w,
+        )
+
+
+def patch_visual_media_composite_image_shapes(
+    original_file_path: str | Any,
+    composite_file_path: str | Any,
+    annotations_json: str,
+    updated_shape_ids: set[str] | None = None,
+    resolved_paths_by_shape_id: dict[str, str] | None = None,
+) -> bool:
+    """Update or re-render a visual aid composite file when catalog part photos change."""
+    import json
+    from pathlib import Path
+    from PIL import Image, ImageOps
+
+    comp_path = Path(str(composite_file_path or ""))
+    orig_path = Path(str(original_file_path or "")) if original_file_path else comp_path
+    if not orig_path.exists() or not orig_path.is_file():
+        orig_path = comp_path
+    if not orig_path.exists() or not orig_path.is_file():
+        return False
+
+    try:
+        raw_list = json.loads(annotations_json or "[]")
+        if not isinstance(raw_list, list):
+            raw_list = []
+    except Exception:
+        raw_list = []
+
+    transform_ops: list[dict] = []
+    shapes: list[dict] = []
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "__transform__" and isinstance(item.get("ops"), list):
+            transform_ops = item["ops"]
+        elif item.get("type"):
+            s_copy = dict(item)
+            sid = str(s_copy.get("id") or "")
+            if resolved_paths_by_shape_id and sid in resolved_paths_by_shape_id:
+                s_copy["_resolved_image_path"] = resolved_paths_by_shape_id[sid]
+            shapes.append(s_copy)
+
+    try:
+        with Image.open(orig_path) as raw_orig:
+            orig_transposed = ImageOps.exif_transpose(raw_orig)
+            work_img = _compute_working_canvas_image(orig_transposed, transform_ops)
+            work_w, work_h = max(1, work_img.width), max(1, work_img.height)
+    except Exception:
+        return False
+
+    base_fit_scale = max(0.02, min(784.0 / work_w, 524.0 / work_h, 4.0))
+    norm_factor = 1.0 / base_fit_scale
+
+    can_patch = (
+        updated_shape_ids is not None
+        and len(updated_shape_ids) > 0
+        and comp_path.exists()
+        and comp_path.is_file()
+    )
+    if can_patch:
+        try:
+            with Image.open(comp_path) as existing_comp:
+                comp_rgba = ImageOps.exif_transpose(existing_comp).convert("RGBA")
+            export_w, export_h = comp_rgba.width, comp_rgba.height
+            export_scale = export_w / float(work_w)
+            vis_scale = export_scale * norm_factor
+
+            for idx, s in enumerate(shapes):
+                sid = str(s.get("id") or "")
+                if s.get("type") != "image" or sid not in updated_shape_ids:
+                    continue
+                _draw_annotator_shape_pil(comp_rgba, s, export_scale, vis_scale)
+                subsequent = shapes[idx + 1 :]
+                if subsequent:
+                    x_val = float(s.get("x") or 0.0)
+                    y_val = float(s.get("y") or 0.0)
+                    w_val = float(s.get("w") or 1.0)
+                    h_val = float(s.get("h") or 1.0)
+                    rx = max(0, int(round(min(x_val, x_val + w_val) * export_scale)))
+                    ry = max(0, int(round(min(y_val, y_val + h_val) * export_scale)))
+                    rw = max(1, int(round(abs(w_val) * export_scale)))
+                    rh = max(1, int(round(abs(h_val) * export_scale)))
+                    cx2 = min(export_w, rx + rw)
+                    cy2 = min(export_h, ry + rh)
+                    if cx2 > rx and cy2 > ry:
+                        over = Image.new("RGBA", (export_w, export_h), (0, 0, 0, 0))
+                        for sub_s in subsequent:
+                            _draw_annotator_shape_pil(over, sub_s, export_scale, vis_scale)
+                        cropped_over = over.crop((rx, ry, cx2, cy2))
+                        comp_rgba.alpha_composite(cropped_over, (rx, ry))
+
+            _save_composite_pil_image(comp_rgba, comp_path)
+            return True
+        except Exception:
+            pass
+
+    try:
+        export_scale = min(1.0, 1920.0 / max(1, work_w, work_h))
+        export_w = max(1, int(round(work_w * export_scale)))
+        export_h = max(1, int(round(work_h * export_scale)))
+        vis_scale = export_scale * norm_factor
+        comp_rgba = work_img.resize((export_w, export_h), Image.Resampling.LANCZOS).convert("RGBA")
+        for s in shapes:
+            _draw_annotator_shape_pil(comp_rgba, s, export_scale, vis_scale)
+        _save_composite_pil_image(comp_rgba, comp_path)
+        return True
+    except Exception:
+        return False
+
+
+def _save_composite_pil_image(comp_rgba, target_path) -> None:
+    from pathlib import Path
+
+    p = Path(target_path)
+    suffix = p.suffix.lower()
+    buf = BytesIO()
+    if suffix in (".jpg", ".jpeg"):
+        comp_rgba.convert("RGB").save(buf, format="JPEG", quality=92)
+    elif suffix == ".webp":
+        comp_rgba.save(buf, format="WEBP", quality=90)
+    else:
+        comp_rgba.save(buf, format="PNG")
+    p.write_bytes(buf.getvalue())

@@ -6,6 +6,8 @@ from typing import Any
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
+_SPLIT_WORKSPACE_REV_20261106 = 1
+
 
 _NAV_HTML = """<div class="split-nav-root"></div>"""
 
@@ -562,6 +564,7 @@ _SYNC_HTML = """<div class="paag-cross-tab-sync-root"></div>"""
 
 _SYNC_CSS = """
 .paag-cross-tab-sync-root {
+  display: none;
   font-family: var(--font);
 }
 .paag-cross-tab-banner {
@@ -640,7 +643,8 @@ export default function(component) {
 
   const renderStaleBanner = () => {
     root.innerHTML = ''
-    if (!window.__paagPendingRemote || !isRemoteNewer(window.__paagPendingRemote)) return
+    root.innerHTML = ''
+    return
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = 'paag-cross-tab-banner'
@@ -748,7 +752,7 @@ export default function(component) {
 """
 
 _WORKSPACE_CROSS_TAB_SYNC = st.components.v2.component(
-    "paag_workspace_cross_tab_sync_v1",
+    "paag_workspace_cross_tab_sync_v2",
     html=_SYNC_HTML,
     css=_SYNC_CSS,
     js=_SYNC_JS,

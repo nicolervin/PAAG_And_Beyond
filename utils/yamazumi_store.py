@@ -2227,9 +2227,365 @@ def duplicate_yamazumi_elements(
     scenario_id: str,
     element_ids: list[str],
     *,
+    target_pitch_id: str | None = None,
     editor_name: str = "",
 ) -> dict[str, object]:
-    """Duplicate selected scenario-owned work elements immediately beneath each source element."""
+    """Duplicate selected scenario-owned work elements into a destination pitch (or immediately beneath each source element)."""
+    normalized_target_pitch_id = str(target_pitch_id or "").strip() or None
+    normalized_ids = list(
+        dict.fromkeys(
+            str(value).strip() for value in (element_ids or []) if str(value).strip()
+        )
+    )
+    if not normalized_ids:
+        raise ValueError("Select at least one Yamazumi work element to copy.")
+    normalized_editor = str(editor_name or "").strip()
+    placeholders = ",".join("?" for _ in normalized_ids)
+    timestamp = now_iso()
+    selected_id_set = set(normalized_ids)
+    element_id_map: dict[str, str] = {}
+    copied_elements: list[dict[str, object]] = []
+    enabled_variants: list[str] = []
+    target_pitch_number = ""
+    target_pitch_name = ""
+    target_area_id_out = ""
+    target_area_name_out = ""
+
+    def _vkey(value: object) -> str:
+        key = str(value or "").strip().casefold()
+        return "all models" if key in {"base", "all", "all models"} else key
+
+    with connection() as conn:
+        targets = conn.execute(
+            f"""SELECT element.id, element.area_id, element.pitch_id,
+                        element.model_variant, element.model_variants,
+                        element.work_type, element.description,
+                        element.time_s, element.work_region, element.sequence
+                 FROM yamazumi_elements element
+                 JOIN yamazumi_areas area ON area.id=element.area_id
+                 WHERE element.project_id=? AND area.scenario_id=?
+                   AND element.id IN ({placeholders})
+                 ORDER BY element.sequence, element.model_variant COLLATE NOCASE,
+                          element.description COLLATE NOCASE, element.id""",
+            (project_id, scenario_id, *normalized_ids),
+        ).fetchall()
+        target_by_id = {str(row["id"]): row for row in targets}
+        missing_ids = [
+            element_id for element_id in normalized_ids if element_id not in target_by_id
+        ]
+        if missing_ids:
+            raise ValueError(
+                "One or more selected Yamazumi work elements no longer exist in "
+                "this planning scenario. No work elements were copied."
+            )
+
+        if normalized_target_pitch_id is not None:
+            destination = conn.execute(
+                """SELECT pitch.id, pitch.area_id, pitch.pitch_number, pitch.pitch_name,
+                          pitch.status, pitch.pitch_type, pitch.feeds_into_pitch_id,
+                          pitch.model_variants, area.name AS area_name
+                   FROM yamazumi_pitches pitch
+                   JOIN yamazumi_areas area ON area.id=pitch.area_id
+                   WHERE pitch.id=? AND pitch.project_id=? AND area.scenario_id=?""",
+                (normalized_target_pitch_id, project_id, scenario_id),
+            ).fetchone()
+            if not destination:
+                raise ValueError(
+                    "The destination pitch no longer exists in this planning scenario."
+                )
+            if str(destination["status"] or "Active").title() != "Active":
+                label = yamazumi_pitch_label(
+                    destination["pitch_number"], destination["pitch_name"]
+                )
+                raise ValueError(
+                    f"Work can only be copied into an Active pitch; {label} is not Active."
+                )
+            destination_area_id = str(destination["area_id"])
+            target_pitch_number = str(destination["pitch_number"] or "")
+            target_pitch_name = str(destination["pitch_name"] or "")
+            target_area_id_out = destination_area_id
+            target_area_name_out = str(destination["area_name"] or "")
+            destination_variants = parse_yamazumi_model_variants(
+                destination["model_variants"], fallback=None
+            )
+            dest_by_key = {_vkey(v): v for v in destination_variants}
+            ordered_targets = [target_by_id[eid] for eid in normalized_ids]
+            required_variants = parse_yamazumi_model_variants(
+                [
+                    variant
+                    for row in ordered_targets
+                    for variant in parse_yamazumi_model_variants(
+                        row["model_variants"], row["model_variant"]
+                    )
+                ],
+                fallback=None,
+            )
+            enabled_variants = [
+                variant
+                for variant in required_variants
+                if _vkey(variant) not in dest_by_key
+            ]
+            if enabled_variants:
+                _require_yamazumi_feed_target_for_pitch_write(
+                    conn, project_id, destination
+                )
+                conn.execute(
+                    """UPDATE yamazumi_pitches SET model_variants=?, updated_at=?
+                       WHERE id=? AND project_id=? AND area_id=?""",
+                    (
+                        json.dumps([*destination_variants, *enabled_variants]),
+                        timestamp,
+                        normalized_target_pitch_id,
+                        project_id,
+                        destination_area_id,
+                    ),
+                )
+                for variant in enabled_variants:
+                    dest_by_key[_vkey(variant)] = variant
+
+            stack_rows = conn.execute(
+                """SELECT id, area_id, pitch_id, model_variant, model_variants,
+                          work_type, description, time_s, work_region, sequence
+                   FROM yamazumi_elements
+                   WHERE project_id=? AND area_id=? AND pitch_id=?
+                   ORDER BY sequence, model_variant COLLATE NOCASE,
+                            description COLLATE NOCASE, id""",
+                (project_id, destination_area_id, normalized_target_pitch_id),
+            ).fetchall()
+            next_sequence = 10
+            for row in stack_rows:
+                row_id = str(row["id"])
+                if int(row["sequence"] or 0) != next_sequence:
+                    conn.execute(
+                        """UPDATE yamazumi_elements
+                           SET sequence=?, updated_at=?
+                           WHERE id=? AND project_id=? AND area_id=?""",
+                        (
+                            next_sequence,
+                            timestamp,
+                            row_id,
+                            project_id,
+                            destination_area_id,
+                        ),
+                    )
+                next_sequence += 10
+                if row_id in selected_id_set:
+                    new_element_id = str(uuid4())
+                    element_id_map[row_id] = new_element_id
+                    raw_variants = parse_yamazumi_model_variants(
+                        row["model_variants"], row["model_variant"]
+                    )
+                    variants = [
+                        dest_by_key.get(_vkey(v), v) for v in (raw_variants or ["Base"])
+                    ]
+                    conn.execute(
+                        """INSERT INTO yamazumi_elements
+                           (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                            work_type, description, time_s, work_region, sequence,
+                            source, process_element_id, process_sync_status, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                   'Yamazumi copy', NULL, 'Needs IE review', ?)""",
+                        (
+                            new_element_id,
+                            project_id,
+                            destination_area_id,
+                            normalized_target_pitch_id,
+                            variants[0] if variants else "Base",
+                            json.dumps(variants or ["Base"]),
+                            str(row["work_type"] or "Cycle"),
+                            str(row["description"] or "").strip(),
+                            float(row["time_s"] or 0),
+                            str(row["work_region"] or "None").strip(),
+                            next_sequence,
+                            timestamp,
+                        ),
+                    )
+                    copied_elements.append(
+                        {
+                            "source_element_id": row_id,
+                            "new_element_id": new_element_id,
+                            "area_id": destination_area_id,
+                            "pitch_id": normalized_target_pitch_id,
+                            "description": str(row["description"] or "").strip(),
+                            "sequence": next_sequence,
+                        }
+                    )
+                    next_sequence += 10
+
+            for row in targets:
+                row_id = str(row["id"])
+                if row_id in element_id_map:
+                    continue
+                new_element_id = str(uuid4())
+                element_id_map[row_id] = new_element_id
+                raw_variants = parse_yamazumi_model_variants(
+                    row["model_variants"], row["model_variant"]
+                )
+                variants = [
+                    dest_by_key.get(_vkey(v), v) for v in (raw_variants or ["Base"])
+                ]
+                conn.execute(
+                    """INSERT INTO yamazumi_elements
+                       (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                        work_type, description, time_s, work_region, sequence,
+                        source, process_element_id, process_sync_status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               'Yamazumi copy', NULL, 'Needs IE review', ?)""",
+                    (
+                        new_element_id,
+                        project_id,
+                        destination_area_id,
+                        normalized_target_pitch_id,
+                        variants[0] if variants else "Base",
+                        json.dumps(variants or ["Base"]),
+                        str(row["work_type"] or "Cycle"),
+                        str(row["description"] or "").strip(),
+                        float(row["time_s"] or 0),
+                        str(row["work_region"] or "None").strip(),
+                        next_sequence,
+                        timestamp,
+                    ),
+                )
+                copied_elements.append(
+                    {
+                        "source_element_id": row_id,
+                        "new_element_id": new_element_id,
+                        "area_id": destination_area_id,
+                        "pitch_id": normalized_target_pitch_id,
+                        "description": str(row["description"] or "").strip(),
+                        "sequence": next_sequence,
+                    }
+                )
+                next_sequence += 10
+        else:
+            affected_stacks: list[tuple[str, str | None]] = []
+            seen_stacks: set[tuple[str, str | None]] = set()
+            for element_id in normalized_ids:
+                target = target_by_id[element_id]
+                stack_key = (
+                    str(target["area_id"]),
+                    str(target["pitch_id"] or "").strip() or None,
+                )
+                if stack_key not in seen_stacks:
+                    seen_stacks.add(stack_key)
+                    affected_stacks.append(stack_key)
+
+            for stack_area_id, stack_pitch_id in affected_stacks:
+                if stack_pitch_id is None:
+                    stack_rows = conn.execute(
+                        """SELECT id, area_id, pitch_id, model_variant, model_variants,
+                                  work_type, description, time_s, work_region, sequence
+                           FROM yamazumi_elements
+                           WHERE project_id=? AND area_id=? AND pitch_id IS NULL
+                           ORDER BY sequence, model_variant COLLATE NOCASE,
+                                    description COLLATE NOCASE, id""",
+                        (project_id, stack_area_id),
+                    ).fetchall()
+                else:
+                    stack_rows = conn.execute(
+                        """SELECT id, area_id, pitch_id, model_variant, model_variants,
+                                  work_type, description, time_s, work_region, sequence
+                           FROM yamazumi_elements
+                           WHERE project_id=? AND area_id=? AND pitch_id=?
+                           ORDER BY sequence, model_variant COLLATE NOCASE,
+                                    description COLLATE NOCASE, id""",
+                        (project_id, stack_area_id, stack_pitch_id),
+                    ).fetchall()
+                next_sequence = 10
+                for row in stack_rows:
+                    row_id = str(row["id"])
+                    if int(row["sequence"] or 0) != next_sequence:
+                        conn.execute(
+                            """UPDATE yamazumi_elements
+                               SET sequence=?, updated_at=?
+                               WHERE id=? AND project_id=? AND area_id=?""",
+                            (next_sequence, timestamp, row_id, project_id, stack_area_id),
+                        )
+                    next_sequence += 10
+                    if row_id in selected_id_set:
+                        new_element_id = str(uuid4())
+                        element_id_map[row_id] = new_element_id
+                        variants = parse_yamazumi_model_variants(
+                            row["model_variants"], row["model_variant"]
+                        )
+                        conn.execute(
+                            """INSERT INTO yamazumi_elements
+                               (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                                work_type, description, time_s, work_region, sequence,
+                                source, process_element_id, process_sync_status, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                       'Yamazumi copy', NULL, 'Needs IE review', ?)""",
+                            (
+                                new_element_id,
+                                project_id,
+                                stack_area_id,
+                                stack_pitch_id,
+                                variants[0] if variants else "Base",
+                                json.dumps(variants or ["Base"]),
+                                str(row["work_type"] or "Cycle"),
+                                str(row["description"] or "").strip(),
+                                float(row["time_s"] or 0),
+                                str(row["work_region"] or "None").strip(),
+                                next_sequence,
+                                timestamp,
+                            ),
+                        )
+                        copied_elements.append(
+                            {
+                                "source_element_id": row_id,
+                                "new_element_id": new_element_id,
+                                "area_id": stack_area_id,
+                                "pitch_id": stack_pitch_id,
+                                "description": str(row["description"] or "").strip(),
+                                "sequence": next_sequence,
+                            }
+                        )
+                        next_sequence += 10
+
+        audit_details: dict[str, object] = {
+            "scenario_id": scenario_id,
+            "element_id_map": element_id_map,
+            "copied_elements": copied_elements,
+        }
+        if normalized_target_pitch_id is not None:
+            audit_details["target_pitch_id"] = normalized_target_pitch_id
+            audit_details["target_pitch_number"] = target_pitch_number
+            audit_details["target_area_id"] = target_area_id_out
+            if enabled_variants:
+                audit_details["enabled_variants"] = enabled_variants
+        record_audit_event(
+            project_id,
+            "Yamazumi elements",
+            "Copy work elements",
+            len(copied_elements),
+            normalized_editor,
+            audit_details,
+            _conn=conn,
+        )
+    return {
+        "copied_count": len(copied_elements),
+        "element_id_map": element_id_map,
+        "copied_elements": copied_elements,
+        "target_pitch_id": normalized_target_pitch_id,
+        "target_pitch_number": target_pitch_number,
+        "target_pitch_name": target_pitch_name,
+        "target_area_id": target_area_id_out,
+        "target_area_name": target_area_name_out,
+        "enabled_variants": enabled_variants,
+    }
+
+
+
+def _duplicate_yamazumi_elements_old(
+    project_id: str,
+    scenario_id: str,
+    element_ids: list[str],
+    *,
+    editor_name: str = "",
+) -> dict[str, object]:
+    """Duplicate selected scenario-owned work elements into a destination pitch (or immediately beneath each source element)."""
+    normalized_target_pitch_id = str(target_pitch_id or "").strip() or None
+    normalized_target_pitch_id = str(target_pitch_id or "").strip() or None
     normalized_ids = list(
         dict.fromkeys(
             str(value).strip() for value in (element_ids or []) if str(value).strip()
@@ -4737,7 +5093,7 @@ def import_yamazumi_rows(
         )
     return len(area_ids), len(pitch_ids), elements_added
 
-_YAMAZUMI_STORE_HOT_RELOAD_REV = 14
+_YAMAZUMI_STORE_HOT_RELOAD_REV = 15
 __domain_exports__ = ['yamazumi_areas', 'yamazumi_area_link_status', 'yamazumi_pitches', 'yamazumi_elements', 'yamazumi_pitches_for_scenario', 'yamazumi_elements_for_scenario', 'yamazumi_work_regions', 'replace_yamazumi_work_regions', 'migrate_legacy_yamazumi_flags', 'rename_yamazumi_variants', 'clear_yamazumi_data', 'upsert_yamazumi_area', '_validate_yamazumi_area_link', 'update_yamazumi_settings', 'update_yamazumi_areas_table', 'sync_yamazumi_areas_from_fishbone', 'yamazumi_pitch_label', '_yamazumi_pitch_address_conflict_rows', 'yamazumi_pitch_address_conflicts', '_yamazumi_pitch_address_owner', '_validate_yamazumi_pitch_address_available', '_validate_yamazumi_scenario_pitch_addresses', '_validate_yamazumi_pitch_conflict_progress', 'yamazumi_pitch_feed_target_status', '_normalize_yamazumi_pitch_type', '_normalize_yamazumi_feed_target', '_validate_yamazumi_pitch_feeds', '_validate_yamazumi_feed_target_context', '_require_yamazumi_feed_target_for_pitch_write', '_yamazumi_pitch_reference_blockers', 'yamazumi_pitch_delete_blockers', '_raise_yamazumi_pitch_reference_blockers', 'add_yamazumi_pitch', 'add_yamazumi_element', '_prepare_yamazumi_copy', 'preview_yamazumi_copy', 'copy_yamazumi_records', 'duplicate_yamazumi_elements', 'update_yamazumi_pitch', 'update_yamazumi_element', '_yamazumi_element_delete_impact', 'yamazumi_element_delete_impact', 'delete_yamazumi_element', 'delete_yamazumi_elements', 'delete_yamazumi_pitch', '_prepare_yamazumi_pitch_move', 'preview_yamazumi_pitch_move', 'move_yamazumi_pitches', 'replace_yamazumi_pitches', 'yamazumi_pitch_address_suggestion', 'generate_yamazumi_pitch_range', 'replace_yamazumi_elements', 'move_yamazumi_element', 'save_yamazumi_stack_draft', 'import_yamazumi_rows']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

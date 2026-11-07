@@ -13,6 +13,7 @@ from utils.media_cache import prewarm_image_cache
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
 PART_SOURCE_CODES = ("1", "+1", "2", "2.4", "3", "4", "5", "6", "7", "8")
+_MODEL_PART_STORE_REV_20261106 = 2
 
 PART_MAKE_BUY_VALUES = ("Make", "Buy")
 PART_CODE_VALUES = ("NP", "NPNT", "ASM", "CP", "CP Other")
@@ -334,6 +335,8 @@ def project_table(
     scenario_id: str | None = None,
 ) -> pd.DataFrame:
     allowed = {"parts", "work_elements", "concerns", "fishbone_nodes", "assembly_sections", "fishbone_part_assignments"}
+    if table not in allowed and project_id in allowed:
+        table, project_id = project_id, table
     if table not in allowed:
         raise ValueError("Unsupported table")
     if table == "work_elements":
@@ -1422,6 +1425,8 @@ def set_part_image(
             ),
         )
     prewarm_image_cache(target)
+    with connection() as conn:
+        _db_core._sync_part_sourced_visual_media(conn, part_id=part_id, timestamp=timestamp)
     return str(target)
 
 
@@ -1437,6 +1442,9 @@ def set_part_image_url(part_id: str, url: str, *, caption: str = "") -> str:
                SET image_path = ?, original_image_path = '', annotations_json = '', image_caption = ?, updated_at = ?
                WHERE id = ?""",
             (clean_url, str(caption or "").strip(), timestamp, part_id),
+        )
+        _db_core._sync_part_sourced_visual_media(conn, part_id=part_id, timestamp=timestamp)
+        (lambda *a: None)(
         )
     return clean_url
 
@@ -1533,6 +1541,9 @@ def update_part_primary_image_annotations(
                WHERE id=? AND project_id=?""",
             (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_part_id, project_id),
         )
+        _db_core._sync_part_sourced_visual_media(conn, project_id=project_id, part_id=normalized_part_id, timestamp=timestamp)
+        (lambda *a: None)(
+        )
 
     record_audit_event(
         project_id,
@@ -1604,6 +1615,8 @@ def add_part_image(
     )
     if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         prewarm_image_cache(target)
+    with connection() as conn:
+        _db_core._sync_part_sourced_visual_media(conn, part_id=part_id, timestamp=timestamp)
     return str(target)
 
 
@@ -1669,6 +1682,9 @@ def update_part_supplemental_image_annotations(
                SET original_image_path=?, annotations_json=?, updated_at=?
                WHERE id=?""",
             (orig_path_str, str(annotations_json or "").strip(), timestamp, normalized_image_id),
+        )
+        _db_core._sync_part_sourced_visual_media(conn, project_id=project_id, part_id=part_id, timestamp=timestamp)
+        (lambda *a: None)(
         )
 
     record_audit_event(
@@ -1801,6 +1817,7 @@ def promote_part_image_to_primary(part_id: str, image_id: str) -> dict:
                     to_unlink.append(p)
 
         conn.execute("DELETE FROM part_images WHERE id=?", (normalized_image_id,))
+        _db_core._sync_part_sourced_visual_media(conn, part_id=normalized_part_id, timestamp=timestamp)
 
     for raw_p in to_unlink:
         _unlink_part_upload_path(raw_p)

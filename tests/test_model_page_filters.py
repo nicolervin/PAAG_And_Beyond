@@ -201,6 +201,19 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertIn("Model 2<br>MOD-2", combined_markdown)
         self.assertIn("Yes<br><span style=\"font-weight:400;\">PN-DISP-01<br>PN-DISP-02</span>", combined_markdown)
 
+        # Verify Print button opens Print Complexity Tree Visual dialog cleanly
+        print_btns = [
+            b for b in app.button
+            if b.key == f"btn_print_complexity_tree_visual_{self.project_id}"
+        ]
+        self.assertEqual(len(print_btns), 1)
+        print_btns[0].click()
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertTrue(
+            app.session_state[f"complexity_tree_print_active_{self.project_id}"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import re
@@ -23,7 +24,7 @@ import utils.store as _store_mod
 import utils.yamazumi_store as _yamazumi_store_mod
 
 if (
-    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 14
+    getattr(_yamazumi_store_mod, "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 15
     or "source_variant" not in _inspect.signature(_yamazumi_store_mod.delete_yamazumi_element).parameters
     or "delete_elements" not in _inspect.signature(_yamazumi_store_mod.delete_yamazumi_pitch).parameters
     or not hasattr(_db_core_mod, "YAMAZUMI_CONVEYOR_TYPES")
@@ -120,16 +121,20 @@ if (
     _importlib.reload(_table_ui_mod)
 
 from utils.table_ui import (
+    check_standalone_conflict_resolution,
     compare_record_field_conflicts,
     dataframe_to_excel,
+    detect_table_cell_conflicts,
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
     guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
+    register_unsaved_source,
     render_inline_conflict_resolution,
     render_select_all_control,
+    render_standalone_conflict_dialog,
     required_field_errors,
     resolve_editor_selected_rows,
     count_table_create_and_edit_rows,
@@ -140,10 +145,11 @@ from utils.table_ui import (
     stage_native_delete_confirmation,
     direct_entry_editor_rows,
     table_has_unsaved_changes,
+    trigger_standalone_conflict_dialog,
 )
 import utils.yamazumi_board as _yamazumi_board_mod
 
-if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 21:
+if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 23:
     _importlib.reload(_yamazumi_board_mod)
 
 from utils.yamazumi_board import merge_yamazumi_pitch_variants, yamazumi_board
@@ -2909,6 +2915,12 @@ board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
 board_clean_baseline_key = f"yamazumi_board_clean_baseline_{project_id}_{scenario_id}_{area_id}"
 board_moved_ids_key = f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{area_id}"
+board_undo_stack_key = f"yamazumi_board_undo_stack_{project_id}_{scenario_id}_{area_id}"
+board_redo_stack_key = f"yamazumi_board_redo_stack_{project_id}_{scenario_id}_{area_id}"
+board_pending_undo_key = f"yamazumi_board_pending_undo_{project_id}_{scenario_id}_{area_id}"
+board_pending_redo_key = f"yamazumi_board_pending_redo_{project_id}_{scenario_id}_{area_id}"
+board_pending_discard_key = f"yamazumi_board_pending_discard_{project_id}_{scenario_id}_{area_id}"
+board_pending_save_key = f"yamazumi_board_pending_save_{project_id}_{scenario_id}_{area_id}"
 board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"
 add_pitch_dialog_key = f"yamazumi_show_add_pitch_{project_id}_{area_id}"
 add_pitch_gen_key = f"yamazumi_add_pitch_gen_{project_id}_{scenario_id}_{area_id}"
@@ -2930,6 +2942,9 @@ move_pitch_dialog_key = (
 copy_pitch_dialog_key = (
     f"yamazumi_copy_pitches_{project_id}_{scenario_id}_{area_id}"
 )
+copy_element_dialog_key = (
+    f"yamazumi_copy_elements_{project_id}_{scenario_id}_{area_id}"
+)
 
 
 def close_other_yamazumi_dialogs(keep: str) -> None:
@@ -2943,6 +2958,7 @@ def close_other_yamazumi_dialogs(keep: str) -> None:
         delete_unassigned_dialog_key,
         move_pitch_dialog_key,
         copy_pitch_dialog_key,
+        copy_element_dialog_key,
     ):
         if dialog_key != keep:
             st.session_state.pop(dialog_key, None)
@@ -2996,6 +3012,10 @@ def handle_yamazumi_move() -> None:
             current_draft, baseline_elements, valid_pitch_ids=valid_p_ids
         )
     try:
+        pre_move_snapshot = {
+            "draft": copy.deepcopy(current_draft),
+            "moved_ids": list(st.session_state.get(board_moved_ids_key) or []),
+        }
         moved_eid = str(move.get("element_id") or "").strip()
         updated_draft = apply_stack_drop(
             current_draft,
@@ -3006,6 +3026,11 @@ def handle_yamazumi_move() -> None:
             insert_index=move.get("insert_index"),
         )
         st.session_state.pop(board_draft_error_key, None)
+        if updated_draft != current_draft:
+            undo_stack = list(st.session_state.get(board_undo_stack_key) or [])
+            undo_stack.append(pre_move_snapshot)
+            st.session_state[board_undo_stack_key] = undo_stack[-50:]
+            st.session_state[board_redo_stack_key] = []
         moved_ids = list(st.session_state.get(board_moved_ids_key) or [])
         if moved_eid and moved_eid not in moved_ids:
             moved_ids.append(moved_eid)
@@ -3158,6 +3183,26 @@ def handle_delete_unassigned_request() -> None:
     if request.get("requested"):
         close_other_yamazumi_dialogs(delete_unassigned_dialog_key)
         st.session_state[delete_unassigned_dialog_key] = True
+
+
+def handle_board_undo_last_request() -> None:
+    if _board_trigger("undo_last_edit").get("requested"):
+        st.session_state[board_pending_undo_key] = True
+
+
+def handle_board_redo_last_request() -> None:
+    if _board_trigger("redo_last_edit").get("requested"):
+        st.session_state[board_pending_redo_key] = True
+
+
+def handle_board_discard_all_request() -> None:
+    if _board_trigger("discard_all_edits").get("requested"):
+        st.session_state[board_pending_discard_key] = True
+
+
+def handle_board_save_request() -> None:
+    if _board_trigger("save_and_refresh").get("requested"):
+        st.session_state[board_pending_save_key] = True
 
 
 @st.dialog("Add Pitch", on_dismiss=close_add_pitch_dialog)
@@ -3966,6 +4011,161 @@ def copy_pitch_dialog() -> None:
             st.error(str(exc))
 
 
+def close_copy_element_dialog() -> None:
+    st.session_state.pop(copy_element_dialog_key, None)
+
+
+@st.dialog("Copy Work Element to Pitch", on_dismiss=close_copy_element_dialog)
+def copy_element_dialog() -> None:
+    raw_selected = st.session_state.get(copy_element_dialog_key)
+    selected_ids = (
+        [str(eid).strip() for eid in raw_selected if str(eid).strip()]
+        if isinstance(raw_selected, list)
+        else []
+    )
+    scenario_elements = yamazumi_elements_for_scenario(project_id, scenario_id)
+    selected_rows = (
+        scenario_elements.loc[scenario_elements["id"].astype(str).isin(selected_ids)].copy()
+        if not scenario_elements.empty and selected_ids
+        else pd.DataFrame()
+    )
+    if selected_rows.empty:
+        st.info("Select one or more work elements in the Yamazumi Work Elements table before clicking Copy Work Element.")
+        if st.button("Close", key=f"close_empty_element_copy_{scenario_id}"):
+            close_copy_element_dialog()
+            st.rerun()
+        return
+
+    selected_ids = selected_rows["id"].astype(str).tolist()
+    scenario_pitches = order_yamazumi_pitches_for_board(
+        yamazumi_pitches_for_scenario(project_id, scenario_id)
+    )
+    active_scenario_pitches = (
+        scenario_pitches.loc[scenario_pitches["status"] == "Active"].copy()
+        if not scenario_pitches.empty
+        else pd.DataFrame()
+    )
+    if active_scenario_pitches.empty:
+        st.info("Create at least one Active pitch in this planning scenario before copying work elements.")
+        if st.button("Close", key=f"close_no_pitches_element_copy_{scenario_id}"):
+            close_copy_element_dialog()
+            st.rerun()
+        return
+
+    pitch_option_ids = active_scenario_pitches["id"].astype(str).tolist()
+    pitch_row_by_id = {
+        str(row["id"]): row for _, row in active_scenario_pitches.iterrows()
+    }
+    pitch_label_map = {
+        pid: (
+            f"{yamazumi_pitch_label(row.get('pitch_number'), row.get('pitch_name'))}"
+            + (
+                f" · {area_labels[str(row.get('area_id'))]}"
+                if len(area_labels) > 1 and str(row.get("area_id") or "") in area_labels
+                else ""
+            )
+        )
+        for pid, row in pitch_row_by_id.items()
+    }
+    source_pitch_ids = [
+        str(pid).strip()
+        for pid in selected_rows["pitch_id"].dropna().astype(str).tolist()
+        if str(pid).strip() and str(pid).strip() in pitch_label_map
+    ]
+    default_pitch_id = (
+        source_pitch_ids[0]
+        if len(set(source_pitch_ids)) == 1
+        else pitch_option_ids[0]
+    )
+    default_index = (
+        pitch_option_ids.index(default_pitch_id)
+        if default_pitch_id in pitch_option_ids
+        else 0
+    )
+
+    st.caption(
+        f"Copying {len(selected_ids)} work element(s) within the active planning scenario."
+    )
+    target_pitch_id = st.selectbox(
+        "Destination Pitch",
+        options=pitch_option_ids,
+        index=default_index,
+        format_func=lambda value: pitch_label_map.get(str(value), str(value)),
+        key=f"yamazumi_copy_element_target_pitch_{scenario_id}_{area_id}",
+        help="Choose any Active pitch address in the current planning scenario as the destination.",
+    )
+
+    if target_pitch_id and str(target_pitch_id) in pitch_row_by_id:
+        target_pitch_row = pitch_row_by_id[str(target_pitch_id)]
+        target_pitch_variants = list(
+            target_pitch_row.get("model_variants") or ["All models"]
+        )
+        target_variant_keys = {
+            "all models" if str(v).strip().casefold() in {"base", "all", "all models"} else str(v).strip().casefold()
+            for v in target_pitch_variants
+        }
+        copied_variants: list[str] = []
+        seen_copied_keys: set[str] = set()
+        for _, elem_row in selected_rows.iterrows():
+            for variant in (elem_row.get("model_variants") or ["All models"]):
+                v_str = str(variant or "").strip()
+                if not v_str:
+                    continue
+                v_key = "all models" if v_str.casefold() in {"base", "all", "all models"} else v_str.casefold()
+                if v_key not in target_variant_keys and v_key not in seen_copied_keys:
+                    seen_copied_keys.add(v_key)
+                    copied_variants.append(v_str)
+        if copied_variants:
+            st.caption(
+                f"{', '.join(copied_variants)} will also be added to pitch "
+                f"{target_pitch_row.get('pitch_number') or ''} as a new Yamazumi stack."
+            )
+
+    editor_name = str(st.session_state.get("current_editor") or "").strip()
+    actions = st.container(horizontal=True, horizontal_alignment="right")
+    if actions.button("Cancel", key=f"cancel_copy_elements_{scenario_id}_{area_id}"):
+        close_copy_element_dialog()
+        st.rerun()
+    if actions.button(
+        "Copy Work Element",
+        type="primary",
+        icon=":material/content_copy:",
+        key=f"confirm_copy_elements_{scenario_id}_{area_id}",
+        disabled=not selected_ids or not target_pitch_id,
+    ):
+        try:
+            copy_result = duplicate_yamazumi_elements(
+                project_id,
+                scenario_id,
+                selected_ids,
+                target_pitch_id=str(target_pitch_id),
+                editor_name=editor_name,
+            )
+            target_area_out = str(copy_result.get("target_area_id") or area_id)
+            st.session_state.pop(board_draft_key, None)
+            st.session_state.pop(board_clean_baseline_key, None)
+            request_table_editor_reset(element_editor_key)
+            request_table_editor_reset(pitch_editor_key)
+            if target_area_out and target_area_out != str(area_id):
+                request_table_editor_reset(
+                    f"yamazumi_element_editor_{scenario_id}_{target_area_out}"
+                )
+                request_table_editor_reset(
+                    f"yamazumi_pitch_editor_{scenario_id}_{target_area_out}"
+                )
+            request_table_editor_reset(combined_element_editor_key)
+            close_copy_element_dialog()
+            dest_label = str(copy_result.get("target_pitch_number") or "").strip()
+            st.toast(
+                f"Copied {copy_result['copied_count']} Yamazumi work element(s)"
+                + (f" to {dest_label}" if dest_label else ""),
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
 @st.dialog("Edit Yamazumi Work Element", on_dismiss=close_edit_element_dialog)
 def edit_element_dialog(
     element_id: str,
@@ -4753,17 +4953,83 @@ with interactive_yamazumi_tab:
         ),
     )
     persisted_board_elements = elements.to_dict("records")
-    raw_board_draft = st.session_state.get(board_draft_key)
     baseline_board_elements = st.session_state.get(board_clean_baseline_key)
-    if (
-        not isinstance(raw_board_draft, dict)
-        or not isinstance(baseline_board_elements, list)
-        or not baseline_board_elements
-    ):
+    if not isinstance(baseline_board_elements, list) or not baseline_board_elements:
         baseline_board_elements = [dict(e) for e in persisted_board_elements]
         st.session_state[board_clean_baseline_key] = baseline_board_elements
-        if not isinstance(raw_board_draft, dict):
-            st.session_state.pop(board_moved_ids_key, None)
+    if st.session_state.pop(board_pending_undo_key, False):
+        undo_stack = list(st.session_state.get(board_undo_stack_key) or [])
+        if undo_stack:
+            current_snap_draft = st.session_state.get(board_draft_key)
+            if not isinstance(current_snap_draft, dict):
+                current_snap_draft = build_stack_draft(baseline_board_elements)
+            redo_stack = list(st.session_state.get(board_redo_stack_key) or [])
+            redo_stack.append(
+                {
+                    "draft": copy.deepcopy(current_snap_draft),
+                    "moved_ids": list(st.session_state.get(board_moved_ids_key) or []),
+                }
+            )
+            st.session_state[board_redo_stack_key] = redo_stack[-50:]
+            prev_snap = undo_stack.pop()
+            st.session_state[board_undo_stack_key] = undo_stack
+            restored_draft = prev_snap.get("draft")
+            restored_moved = list(prev_snap.get("moved_ids") or [])
+            if isinstance(restored_draft, dict) and (
+                draft_differs(baseline_board_elements, restored_draft)
+                or draft_differs(persisted_board_elements, restored_draft)
+            ):
+                st.session_state[board_draft_key] = restored_draft
+                st.session_state[board_moved_ids_key] = restored_moved
+            else:
+                st.session_state.pop(board_draft_key, None)
+                st.session_state.pop(board_moved_ids_key, None)
+            st.session_state.pop(board_draft_error_key, None)
+            st.toast("Undid last board move", icon=":material/undo:")
+    if st.session_state.pop(board_pending_redo_key, False):
+        redo_stack = list(st.session_state.get(board_redo_stack_key) or [])
+        if redo_stack:
+            current_snap_draft = st.session_state.get(board_draft_key)
+            if not isinstance(current_snap_draft, dict):
+                current_snap_draft = build_stack_draft(baseline_board_elements)
+            undo_stack = list(st.session_state.get(board_undo_stack_key) or [])
+            undo_stack.append(
+                {
+                    "draft": copy.deepcopy(current_snap_draft),
+                    "moved_ids": list(st.session_state.get(board_moved_ids_key) or []),
+                }
+            )
+            st.session_state[board_undo_stack_key] = undo_stack[-50:]
+            next_snap = redo_stack.pop()
+            st.session_state[board_redo_stack_key] = redo_stack
+            restored_draft = next_snap.get("draft")
+            restored_moved = list(next_snap.get("moved_ids") or [])
+            if isinstance(restored_draft, dict) and (
+                draft_differs(baseline_board_elements, restored_draft)
+                or draft_differs(persisted_board_elements, restored_draft)
+            ):
+                st.session_state[board_draft_key] = restored_draft
+                st.session_state[board_moved_ids_key] = restored_moved
+            else:
+                st.session_state.pop(board_draft_key, None)
+                st.session_state.pop(board_moved_ids_key, None)
+            st.session_state.pop(board_draft_error_key, None)
+            st.toast("Redid board move", icon=":material/redo:")
+    if st.session_state.pop(board_pending_discard_key, False):
+        st.session_state.pop(board_draft_key, None)
+        st.session_state.pop(board_clean_baseline_key, None)
+        st.session_state.pop(board_moved_ids_key, None)
+        st.session_state.pop(board_undo_stack_key, None)
+        st.session_state.pop(board_redo_stack_key, None)
+        st.session_state.pop(board_draft_error_key, None)
+        baseline_board_elements = [dict(e) for e in persisted_board_elements]
+        st.session_state[board_clean_baseline_key] = baseline_board_elements
+        st.toast("Restored the last-saved Yamazumi stack order", icon=":material/undo:")
+    raw_board_draft = st.session_state.get(board_draft_key)
+    if not isinstance(raw_board_draft, dict):
+        baseline_board_elements = [dict(e) for e in persisted_board_elements]
+        st.session_state[board_clean_baseline_key] = baseline_board_elements
+        st.session_state.pop(board_moved_ids_key, None)
     if isinstance(raw_board_draft, dict):
         valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
         board_draft = reconcile_stack_draft(
@@ -4805,26 +5071,6 @@ with interactive_yamazumi_tab:
         board_pitches.to_dict("records"),
         board_elements,
     )
-    yamazumi_board(
-        board_pitches_records,
-        board_elements,
-        variants,
-        takt,
-        time_unit=yamazumi_time_unit,
-        takt_time_unit=takt_time_unit,
-        scale_mode="readable" if board_readable_mode else "to_scale",
-        print_request_token=board_print_token,
-        key=board_key,
-        on_move=handle_yamazumi_move,
-        on_add_pitch=handle_add_pitch_request,
-        on_add_element=handle_add_element_request,
-        on_edit_pitch=handle_edit_pitch_request,
-        on_edit_element=handle_edit_element_request,
-        on_scale_mode=handle_scale_mode_change,
-        on_delete_unassigned=handle_delete_unassigned_request,
-    )
-    if draft_error := st.session_state.pop(board_draft_error_key, None):
-        st.error(str(draft_error))
     board_footer_editor_key = f"yamazumi_board_footer_{project_id}_{scenario_id}_{area_id}"
     board_pitch_label_by_id = (
         {
@@ -4898,27 +5144,64 @@ with interactive_yamazumi_tab:
             if row_patch:
                 board_id_draft[d_eid] = row_patch
     st.session_state[f"_table_id_draft_{board_footer_editor_key}"] = board_id_draft
-
-    board_actions = editable_table_footer(
-        editor_key=board_footer_editor_key,
-        key_prefix=f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
-        additional_unsaved_changes=has_board_draft,
-        additional_action_label="Print",
-        additional_action_icon=":material/print:",
-        additional_action_key=board_print_btn_key,
-        additional_action_help="Choose whether to print all pitches or only pitches containing work elements across pages in readable mode.",
+    board_unsaved_count = len(board_id_draft) or (1 if has_board_draft else 0)
+    yamazumi_board(
+        board_pitches_records,
+        board_elements,
+        variants,
+        takt,
+        time_unit=yamazumi_time_unit,
+        takt_time_unit=takt_time_unit,
+        scale_mode="readable" if board_readable_mode else "to_scale",
+        print_request_token=board_print_token,
+        unsaved_count=board_unsaved_count,
+        can_undo_last=bool(st.session_state.get(board_undo_stack_key)),
+        can_redo_last=bool(st.session_state.get(board_redo_stack_key)),
+        can_discard_all=bool(has_board_draft),
+        key=board_key,
+        on_move=handle_yamazumi_move,
+        on_add_pitch=handle_add_pitch_request,
+        on_add_element=handle_add_element_request,
+        on_edit_pitch=handle_edit_pitch_request,
+        on_edit_element=handle_edit_element_request,
+        on_scale_mode=handle_scale_mode_change,
+        on_delete_unassigned=handle_delete_unassigned_request,
+        on_undo_last=handle_board_undo_last_request,
+        on_redo_last=handle_board_redo_last_request,
+        on_discard_all=handle_board_discard_all_request,
+        on_save=handle_board_save_request,
     )
-    if board_actions.additional_action and not board_print_requested:
-        st.session_state[board_print_pending_key] = True
-        st.rerun()
-    if board_actions.undo:
+    if draft_error := st.session_state.pop(board_draft_error_key, None):
+        st.error(str(draft_error))
+    trigger_board_save, trigger_board_discard = register_unsaved_source(
+        f"yamazumi_board_{project_id}_{scenario_id}_{area_id}",
+        editor_key=board_footer_editor_key,
+        additional_unsaved=bool(has_board_draft),
+    )
+    conflict_resolution, _ = check_standalone_conflict_resolution(board_footer_editor_key)
+    if conflict_resolution == "discard" or trigger_board_discard:
         st.session_state.pop(board_draft_key, None)
         st.session_state.pop(board_clean_baseline_key, None)
         st.session_state.pop(board_moved_ids_key, None)
+        st.session_state.pop(board_undo_stack_key, None)
+        st.session_state.pop(board_redo_stack_key, None)
         st.session_state.pop(board_draft_error_key, None)
         st.toast("Restored the last-saved Yamazumi stack order", icon=":material/undo:")
         st.rerun()
-    if board_actions.save_and_refresh:
+    save_requested = (
+        bool(st.session_state.pop(board_pending_save_key, False)) or trigger_board_save
+    )
+    force_overwrite = conflict_resolution is True or conflict_resolution == "overwrite"
+    if save_requested and not force_overwrite and has_board_draft:
+        conflicts = detect_table_cell_conflicts(board_footer_editor_key)
+        if conflicts:
+            trigger_standalone_conflict_dialog(
+                board_footer_editor_key,
+                conflicts,
+            )
+            save_requested = False
+    render_standalone_conflict_dialog(board_footer_editor_key)
+    if save_requested or force_overwrite:
         try:
             if not has_board_draft:
                 raise ValueError("There are no unsaved Yamazumi stack changes to save.")
@@ -4984,6 +5267,8 @@ with interactive_yamazumi_tab:
             st.session_state.pop(board_draft_key, None)
             st.session_state.pop(board_clean_baseline_key, None)
             st.session_state.pop(board_moved_ids_key, None)
+            st.session_state.pop(board_undo_stack_key, None)
+            st.session_state.pop(board_redo_stack_key, None)
             if result["enabled_variants"]:
                 request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
@@ -5026,6 +5311,8 @@ elif st.session_state.get(move_pitch_dialog_key):
     move_pitch_dialog()
 elif st.session_state.get(copy_pitch_dialog_key):
     copy_pitch_dialog()
+elif st.session_state.get(copy_element_dialog_key):
+    copy_element_dialog()
 elif edit_element_target := st.session_state.get(edit_element_dialog_key):
     if isinstance(edit_element_target, dict):
         edit_element_dialog(
@@ -5914,7 +6201,7 @@ with yamazumi_tables_tab:
             default=False,
             pinned=True,
             width="small",
-            help="Select one or more work elements to delete or copy immediately beneath each selected work element.",
+            help="Select one or more work elements to delete or copy to a destination pitch in the active scenario.",
         ),
         "area_name": st.column_config.SelectboxColumn(
             "Yamazumi Area",
@@ -6060,7 +6347,7 @@ with yamazumi_tables_tab:
             else (
                 "Save or undo other Yamazumi changes first."
                 if copy_element_disabled
-                else "Select one or more work elements in the Select column and click Copy Work Element to duplicate each selected work element immediately beneath itself."
+                else "Select one or more work elements in the Select column and click Copy Work Element to choose a destination pitch in the active scenario."
             )
         ),
     )
@@ -6074,22 +6361,9 @@ with yamazumi_tables_tab:
                 "Select one or more work elements in the Select column before clicking Copy Work Element."
             )
         else:
-            try:
-                copy_result = duplicate_yamazumi_elements(
-                    project_id,
-                    scenario_id,
-                    copy_selected_element_ids,
-                    editor_name=st.session_state.get("current_editor", ""),
-                )
-                st.session_state.pop(board_draft_key, None)
-                request_table_editor_reset(element_editor_key)
-                st.toast(
-                    f"Copied {copy_result['copied_count']} Yamazumi work element(s)",
-                    icon=":material/check_circle:",
-                )
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
+            close_other_yamazumi_dialogs(copy_element_dialog_key)
+            st.session_state[copy_element_dialog_key] = copy_selected_element_ids
+            st.rerun()
     if element_actions.undo:
         st.toast("Discarded the unsaved work-element edits", icon=":material/undo:")
         request_table_editor_reset(element_editor_key)

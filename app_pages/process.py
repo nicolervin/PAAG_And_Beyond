@@ -15,7 +15,13 @@ if "utils.table_ui" in _sys.modules and getattr(_sys.modules["utils.table_ui"], 
     if "utils.table_filters" in _sys.modules:
         _importlib.reload(_sys.modules["utils.table_filters"])
     _importlib.reload(_sys.modules["utils.table_ui"])
-if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 12:
+if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 20:
+    if "utils.image_annotator" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.image_annotator"])
+    if "utils.db_core" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.db_core"])
+    if "utils.model_part_store" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.model_part_store"])
     if "utils.assembly_store" in _sys.modules:
         _importlib.reload(_sys.modules["utils.assembly_store"])
     _importlib.reload(_sys.modules["utils.process_store"])
@@ -23,9 +29,9 @@ if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 8:
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 13:
     _importlib.reload(_sys.modules["utils.process_pitch_visual"])
-if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 4:
+if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
     _importlib.reload(_sys.modules["utils.image_annotator"])
 if "utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_REV_20261103", 0) < 1:
     _importlib.reload(_sys.modules["utils.yamazumi_store"])
@@ -49,6 +55,8 @@ from utils.store import (
     get_pitch_unclassified_part_options,
     move_fishbone_part_assignment,
     parse_yamazumi_model_variants,
+    part_has_model_variants,
+    sync_model_variant_placement_selections,
     process_element_id_for_yamazumi,
     process_ergonomics_risk_work_element_ids,
     work_element_criticality,
@@ -105,6 +113,7 @@ from utils.process_pitch_visual import (
     page_media,
     render_pitch_canvas,
     render_presentation_deck,
+    render_paag_pptx_deck,
     render_printable_paag_deck,
 )
 from utils.table_filters import (
@@ -341,6 +350,54 @@ def _inject_disabled_consumed_placement_options_script() -> None:
                 }
             }
 
+            if (!window.__paagQuantityAutoSelectInstalled) {
+                window.__paagQuantityAutoSelectInstalled = true;
+
+                const isQuantityInput = function(el) {
+                    if (!el || el.tagName !== "INPUT" || el.disabled || el.readOnly) {
+                        return false;
+                    }
+                    const aria = (el.getAttribute("aria-label") || "").trim();
+                    if (aria === "Quantity" || aria.indexOf("Quantity") === 0) {
+                        return true;
+                    }
+                    const numContainer = el.closest ? el.closest('[data-testid="stNumberInput"]') : null;
+                    if (numContainer) {
+                        const lbl = numContainer.querySelector('[data-testid="stWidgetLabel"]');
+                        if (lbl && (lbl.textContent || "").trim().indexOf("Quantity") === 0) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const selectAllQuantityValue = function(target) {
+                    if (!isQuantityInput(target)) {
+                        return;
+                    }
+                    try {
+                        target.select();
+                    } catch (e) {}
+                    setTimeout(function() {
+                        try {
+                            if (document.activeElement === target) {
+                                target.select();
+                            }
+                        } catch (e) {}
+                    }, 0);
+                };
+
+                ["focusin", "mouseup", "click"].forEach(function(evtName) {
+                    window.addEventListener(
+                        evtName,
+                        function(event) {
+                            selectAllQuantityValue(event.target);
+                        },
+                        true
+                    );
+                });
+            }
+
             syncDisabledPlacementOptions();
         })();
         </script>
@@ -350,6 +407,23 @@ def _inject_disabled_consumed_placement_options_script() -> None:
 
 
 def _part_has_model_variants(
+    part_id: str,
+    placements_df: pd.DataFrame,
+    *,
+    section_id: str | None = None,
+    fallback_model_applicability: object = None,
+    feature_rule_part_ids: set[str] | None = None,
+) -> bool:
+    return part_has_model_variants(
+        part_id,
+        placements_df,
+        section_id=section_id,
+        fallback_model_applicability=fallback_model_applicability,
+        feature_rule_part_ids=feature_rule_part_ids,
+    )
+
+
+def _unused_part_has_model_variants(
     part_id: str,
     placements_df: pd.DataFrame,
     *,
@@ -648,7 +722,7 @@ def presentation_mode_dialog(
         curr_summary = {"pitch_number": "", "pitch_name": "", "elements": []}
 
     curr_elements = curr_summary.get("elements", [])
-    total_pages = max(page_count(len(curr_elements)), curr_summary.get("slide_count", 1), 1)
+    total_pages = max(int(curr_summary.get("slide_count", 1) or 1), 1)
     curr_page = min(max(1, curr_page), total_pages)
     st.session_state[f"pres_page_num_{scenario_id}"] = curr_page
 
@@ -700,7 +774,7 @@ def presentation_mode_dialog(
                 st.session_state[f"pres_pitch_id_{scenario_id}"] = prev_pid
                 try:
                     prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
-                    prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
+                    prev_tot = max(int(prev_sum.get("slide_count", 1) or 1), 1)
                 except Exception:
                     prev_tot = 1
                 st.session_state[f"pres_page_num_{scenario_id}"] = prev_tot
@@ -745,7 +819,7 @@ def presentation_mode_dialog(
             st.session_state["pitch_page_num"] = curr_page
             st.rerun()
 
-    active_page_rows = page_elements(curr_elements, curr_page)
+    active_page_rows = list(curr_elements)
     for row in active_page_rows:
         row["models"] = [
             "All models" if model.casefold() in {"all", "all models"}
@@ -877,6 +951,7 @@ def print_slide_dialog(
     with top_col2:
         if st.button("✕ Close", key=f"print_dialog_exit_top_{scenario_id}", help="Close print window"):
             st.session_state[f"paag_print_active_{scenario_id}"] = False
+            st.session_state.pop(f"_paag_print_cache_{scenario_id}", None)
             st.rerun()
 
     st.markdown("#### Export and Print Settings")
@@ -886,7 +961,7 @@ def print_slide_dialog(
     with col_scope:
         if all_pitch_ids:
             scope_choices = [
-                f"Current slide only (Pitch {curr_pitch_idx + 1}, Slide {current_page}/{total_pages})",
+                f"Current slide only (Slide {current_page}/{total_pages})",
                 f"Current pitch (All {total_pages} slide{'s' if total_pages > 1 else ''})",
             ]
             if target_sec_id and target_sec_pitch_count > 0:
@@ -947,7 +1022,7 @@ def print_slide_dialog(
                 "Choose Pitches to Include",
                 options=all_pitch_ids,
                 default=[selected_pitch_id] if selected_pitch_id in all_pitch_ids else all_pitch_ids[:1],
-                format_func=lambda pid: f"Pitch {all_pitch_ids.index(pid) + 1}: {all_pitch_dict.get(pid, pid)}",
+                format_func=lambda pid: all_pitch_dict.get(pid, pid),
                 key=f"paag_print_multiselect_{scenario_id}",
                 help="Select one or more pitches to include in this print job.",
             )
@@ -965,9 +1040,9 @@ def print_slide_dialog(
         fit_choice = st.radio(
             "Image Fit in Print",
             ["Stretch to Fill Box", "Preserve Aspect Ratio"],
-            index=0,
+            index=1,
             key=f"paag_print_fit_{scenario_id}",
-            help="Stretch to Fill Box expands step photos to fill the page aspect ratio with zero letterbox bars.",
+            help="Preserve Aspect Ratio keeps the original image proportions without distortion. Stretch to Fill Box expands step photos to fill the page aspect ratio with zero letterbox bars.",
         )
         image_fit = "fill" if "Stretch" in fit_choice else "contain"
 
@@ -993,40 +1068,65 @@ def print_slide_dialog(
         effective_pids = selected_pids if selected_pids else ([selected_pitch_id] if selected_pitch_id else all_pitch_ids[:1])
         targets = [(pid, None) for pid in effective_pids]
 
+    print_cache = st.session_state.setdefault(
+        f"_paag_print_cache_{scenario_id}",
+        {"summaries": {}, "slides": {}},
+    )
+    cached_summaries: dict[str, dict] = print_cache.setdefault("summaries", {})
+    cached_slides: dict[tuple, tuple[str, list[dict], int]] = print_cache.setdefault("slides", {})
     slides_html: list[str] = []
+    slides_pptx_data: list[dict] = []
     with st.spinner("Compiling print slides..."):
         for pid, page_filter in targets:
             if pid == selected_pitch_id and pitch_summary:
                 p_sum = pitch_summary
+                cached_summaries[pid] = p_sum
+            elif pid in cached_summaries:
+                p_sum = cached_summaries[pid]
             else:
                 try:
                     p_sum = process_pitch_visual_summary(project_id, scenario_id, pid)
+                    cached_summaries[pid] = p_sum
                 except Exception:
                     continue
 
             p_elements = p_sum.get("elements", [])
-            p_tot_pages = max(page_count(len(p_elements)), p_sum.get("slide_count", 1), 1)
+            p_tot_pages = max(int(p_sum.get("slide_count", 1) or 1), 1)
             pages_to_render = page_filter if page_filter is not None else list(range(1, p_tot_pages + 1))
 
             for pg in pages_to_render:
-                p_rows = page_elements(p_elements, pg)
-                for row in p_rows:
-                    row["models"] = [
-                        "All models" if model.casefold() in {"all", "all models"}
-                        else labels_map.get(model, model)
-                        for model in (split_filter_values(row.get("model_applicability")) or ["All"])
-                    ]
-                s_html = render_pitch_canvas(
-                    p_sum,
-                    p_rows,
-                    scenario_name=scenario_name,
-                    project_name=project_name,
-                    page_num=pg,
-                    total_pages=p_tot_pages,
-                    print_format=paper_size,
-                    image_fit=image_fit,
-                )
+                slide_cache_key = (str(pid), int(pg), int(p_tot_pages), str(paper_size), str(image_fit))
+                cached_entry = cached_slides.get(slide_cache_key)
+                if cached_entry is not None:
+                    s_html, p_rows, _ = cached_entry
+                else:
+                    p_rows = list(p_elements)
+                    for row in p_rows:
+                        row["models"] = [
+                            "All models" if model.casefold() in {"all", "all models"}
+                            else labels_map.get(model, model)
+                            for model in (split_filter_values(row.get("model_applicability")) or ["All"])
+                        ]
+                    s_html = render_pitch_canvas(
+                        p_sum,
+                        p_rows,
+                        scenario_name=scenario_name,
+                        project_name=project_name,
+                        page_num=pg,
+                        total_pages=p_tot_pages,
+                        print_format=paper_size,
+                        image_fit=image_fit,
+                    )
+                    cached_slides[slide_cache_key] = (s_html, p_rows, p_tot_pages)
                 slides_html.append(s_html)
+                slides_pptx_data.append(
+                    {
+                        "pitch": p_sum,
+                        "elements": p_rows,
+                        "page_num": pg,
+                        "total_pages": p_tot_pages,
+                    }
+                )
 
     if not slides_html:
         st.warning("No slides were selected for printing.")
@@ -1045,11 +1145,11 @@ def print_slide_dialog(
     st.info(f"Ready to print **{total_deck_slides} slide{'s' if total_deck_slides > 1 else ''}** on **{paper_label}** · Image Fit: **{fit_choice}**")
 
     # Scope signature hash to ensure all buttons and download buffers update immediately on every setting change
-    scope_sig = f"{chosen_scope}_{paper_size}_{image_fit}_{total_deck_slides}_{len(targets)}"
+    scope_sig = f"{chosen_scope}_{paper_size}_{image_fit}_{total_deck_slides}_{len(targets)}_{[(str(pid), tuple(pf or ())) for pid, pf in targets]}"
     scope_slug = hashlib.md5(scope_sig.encode()).hexdigest()[:8]
 
     # Action Toolbar
-    act_col1, act_col2 = st.columns([1.6, 1.4], vertical_alignment="center")
+    act_col1, act_col2, act_col3 = st.columns([1.3, 1.0, 1.0], vertical_alignment="center")
     with act_col1:
         escaped_deck_html = json.dumps(full_deck_html).replace("</script>", "<\\/script>").replace("</Script>", "<\\/Script>")
         action_btn_html = f"""<!DOCTYPE html>
@@ -1135,10 +1235,29 @@ def print_slide_dialog(
         components.html(action_btn_html, height=45)
 
     with act_col2:
+        safe_pptx_fn = f"PAAG_{scenario_name}_{paper_size}_{total_deck_slides}_slides.pptx".replace(" ", "_")
+        st.download_button(
+            f"Download PowerPoint ({total_deck_slides} Slide{'s' if total_deck_slides != 1 else ''})",
+            data=lambda: render_paag_pptx_deck(
+                slides_pptx_data,
+                paper_size=paper_size,
+                image_fit=image_fit,
+                scenario_name=scenario_name,
+                project_name=project_name,
+                title=deck_title,
+            ),
+            file_name=safe_pptx_fn,
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            icon=":material/slideshow:",
+            type="secondary",
+            key=f"dl_pptx_btn_{scenario_id}_{scope_slug}",
+        )
+
+    with act_col3:
         safe_fn = f"PAAG_{scenario_name}_{paper_size}_{total_deck_slides}_slides.html".replace(" ", "_")
         st.download_button(
             f"Download HTML Deck ({total_deck_slides} Slide{'s' if total_deck_slides != 1 else ''})",
-            data=full_deck_html,
+            data=lambda: full_deck_html,
             file_name=safe_fn,
             mime="text/html",
             icon=":material/download:",
@@ -1154,6 +1273,7 @@ def print_slide_dialog(
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
     if st.button("✕ Close Print Window", key=f"print_dialog_exit_bottom_{scenario_id}"):
         st.session_state[f"paag_print_active_{scenario_id}"] = False
+        st.session_state.pop(f"_paag_print_cache_{scenario_id}", None)
         st.rerun()
 
 
@@ -1815,8 +1935,195 @@ def edit_visual_media_dialog(
         st.rerun()
 
 
-@st.dialog("Copy Visual Aid", width="medium")
+def _clear_paag_copy_media_dialog(media_id: str = "") -> None:
+    scen_id = str(st.session_state.get("scenario_id") or "")
+    if scen_id:
+        st.session_state.pop(f"paag_copy_media_{scen_id}", None)
+    for k in [
+        k
+        for k in list(st.session_state.keys())
+        if str(k).startswith("paag_copy_media_")
+        or (
+            media_id
+            and (
+                str(k).startswith(f"copy_media_dest_pitch_{media_id}")
+                or str(k).startswith(f"copy_media_caption_{media_id}")
+                or str(k).startswith(f"copy_media_seq_{media_id}")
+                or str(k).startswith(f"copy_media_tags_{media_id}_")
+                or str(k).startswith(f"copy_media_open_ann_{media_id}")
+            )
+        )
+    ]:
+        st.session_state.pop(k, None)
+
+
+@st.dialog("Copy Visual Aid", width="medium", on_dismiss=_clear_paag_copy_media_dialog)
 def copy_visual_media_dialog(
+    media_id: str,
+    current_pitch_id: str,
+    current_caption: str,
+    current_sequence: int,
+    current_tags: list[str],
+    element_options: list[tuple[str, str]],
+    pitch_options: list[tuple[str, str]],
+    project_id: str,
+    scenario_id: str,
+    media_type: str = "image",
+    file_path: str = "",
+) -> None:
+    st.markdown("#### Copy Visual Aid")
+    st.caption(
+        "Duplicate this visual aid on the current pitch or copy it to another pitch in this scenario. "
+        "Annotations, original photo layers, and media files are copied independently so you can freely edit or annotate the copy on the destination pitch."
+    )
+    pitch_dict = dict(pitch_options)
+    pitch_ids = list(pitch_dict.keys()) if pitch_dict else [current_pitch_id]
+    default_pitch_idx = (
+        pitch_ids.index(current_pitch_id) if current_pitch_id in pitch_ids else 0
+    )
+
+    dest_pitch_id = st.selectbox(
+        "Destination Pitch",
+        options=pitch_ids,
+        index=default_pitch_idx,
+        format_func=lambda pid: (
+            f"{pitch_dict.get(pid, pid)} (Current pitch)"
+            if pid == current_pitch_id
+            else pitch_dict.get(pid, pid)
+        ),
+        key=f"copy_media_dest_pitch_{media_id}",
+        help="Keep the current pitch selected to duplicate this visual aid in place, or choose another pitch to copy it there.",
+    )
+
+    if dest_pitch_id == current_pitch_id:
+        dest_element_options = element_options
+    else:
+        try:
+            dest_summary = process_pitch_visual_summary(
+                project_id, scenario_id, dest_pitch_id
+            )
+            dest_rows = dest_summary.get("elements") or []
+        except Exception:
+            dest_rows = []
+        dest_element_options = [
+            (
+                str(el.get("work_element_id") or el.get("id")),
+                f"{idx + 1} · {el.get('op_id') + ' — ' if el.get('op_id') and el.get('op_id') != 'Yamazumi link required' else ''}{el.get('yamazumi_description') or el.get('operation') or 'Work Step'}",
+            )
+            for idx, el in enumerate(dest_rows)
+            if el.get("work_element_id") or el.get("id")
+        ]
+
+    tag_dict = dict(dest_element_options)
+    default_tags = [t for t in current_tags if t in tag_dict]
+    tags_widget_key = f"copy_media_tags_{media_id}_{dest_pitch_id}"
+    if tags_widget_key in st.session_state and isinstance(
+        st.session_state[tags_widget_key], list
+    ):
+        st.session_state[tags_widget_key] = [
+            v for v in st.session_state[tags_widget_key] if v in tag_dict
+        ]
+
+    new_caption = st.text_input(
+        "Caption / Yellow Callout Note",
+        value=current_caption,
+        key=f"copy_media_caption_{media_id}",
+    )
+    new_sequence = st.number_input(
+        "Sequence Order",
+        min_value=1,
+        value=max(int(current_sequence or 10), 1),
+        step=5,
+        key=f"copy_media_seq_{media_id}",
+    )
+    new_tags = st.multiselect(
+        "Tag to PAAG Work Elements (Destination Pitch)",
+        options=list(tag_dict.keys()),
+        default=default_tags,
+        format_func=lambda tid: tag_dict.get(tid, tid),
+        key=tags_widget_key,
+        help="Select which work elements on the destination pitch this copied visual aid illustrates. Leave empty to show across all elements on that pitch.",
+    )
+
+    can_annotate = (
+        str(media_type or "image") == "image"
+        and not str(file_path or "").startswith(("http://", "https://"))
+    )
+    open_annotator_after_copy = False
+    if can_annotate:
+        open_annotator_after_copy = st.checkbox(
+            "Open Annotate editor immediately after Copy & Go to Pitch",
+            value=False,
+            key=f"copy_media_open_ann_{media_id}",
+            help="Check to immediately open the vector Annotate editor on the new copy after switching to the destination pitch.",
+        )
+
+    btn_col1, btn_col2, btn_col3 = st.columns([1.35, 1.15, 0.75])
+    copy_and_go_clicked = btn_col1.button(
+        "Copy & Go to Pitch",
+        icon=":material/arrow_forward:",
+        type="primary",
+        key=f"btn_copy_and_go_{media_id}",
+        width="stretch",
+        help="Copy this visual aid to the destination pitch and switch the PAAG Slides view to that pitch.",
+    )
+    copy_stay_clicked = btn_col2.button(
+        "Copy Visual Aid",
+        icon=":material/content_copy:",
+        type="secondary",
+        key=f"btn_copy_stay_{media_id}",
+        width="stretch",
+        help="Copy this visual aid to the destination pitch while staying on your current pitch.",
+    )
+    cancel_clicked = btn_col3.button(
+        "Cancel",
+        key=f"btn_copy_cancel_{media_id}",
+        width="stretch",
+    )
+
+    if copy_and_go_clicked or copy_stay_clicked:
+        try:
+            copied = copy_pitch_visual_media(
+                project_id=project_id,
+                scenario_id=scenario_id,
+                media_id=media_id,
+                target_pitch_id=dest_pitch_id,
+                caption=new_caption,
+                tagged_work_element_ids=new_tags,
+                sequence=int(new_sequence),
+                current_editor=st.session_state.get("current_editor", ""),
+            )
+            dest_label = pitch_dict.get(dest_pitch_id, dest_pitch_id)
+            _clear_paag_copy_media_dialog(media_id)
+            if copy_and_go_clicked:
+                st.session_state["selected_pitch_id"] = dest_pitch_id
+                st.session_state[f"pitch_active_select_{scenario_id}"] = dest_pitch_id
+                st.session_state.pop(f"sec_active_select_{scenario_id}", None)
+                st.session_state["pitch_page_num"] = 1
+                st.session_state[f"pitch_visual_scroll_{scenario_id}"] = True
+                if open_annotator_after_copy and copied.get("id"):
+                    st.session_state[f"paag_annotate_media_{scenario_id}"] = {
+                        "media_id": str(copied["id"]),
+                        "pitch_id": dest_pitch_id,
+                    }
+                st.toast(
+                    f"Visual aid copied — switched to {dest_label}",
+                    icon=":material/check_circle:",
+                )
+            else:
+                st.toast(
+                    f"Visual aid copied to {dest_label}",
+                    icon=":material/check_circle:",
+                )
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    elif cancel_clicked:
+        _clear_paag_copy_media_dialog(media_id)
+        st.rerun()
+
+
+def _unused_copy_visual_media_dialog(
     media_id: str,
     current_pitch_id: str,
     current_caption: str,
@@ -3527,6 +3834,41 @@ if tab_plan.open:
                 )
                 if st.session_state.get(pairing_rule_key) == "Choose one":
                     st.session_state[pairing_rule_key] = "Model choice"
+                _pfr_df = part_feature_rules(project_id)
+                feature_rule_pids = (
+                    set(_pfr_df["part_id"].astype(str))
+                    if not _pfr_df.empty and "part_id" in _pfr_df.columns
+                    else set()
+                )
+                current_selected_pids = (
+                    tuple(sorted(selected_parts["part_id"].astype(str).tolist()))
+                    if not selected_parts.empty and "part_id" in selected_parts.columns
+                    else ()
+                )
+                has_variant_selected_parts = False
+                if not selected_parts.empty:
+                    for _, _sp_row in selected_parts.iterrows():
+                        if _part_has_model_variants(
+                            str(_sp_row.get("part_id") or ""),
+                            all_placements,
+                            section_id=section_id,
+                            fallback_model_applicability=_sp_row.get("model_applicability"),
+                            feature_rule_part_ids=feature_rule_pids,
+                        ):
+                            has_variant_selected_parts = True
+                            break
+                auto_rule_sig_key = f"{pairing_rule_key}__auto_mv_sig_v2"
+                auto_rule_switched_key = f"{pairing_rule_key}__auto_mv_switched"
+                if st.session_state.get(auto_rule_sig_key) != current_selected_pids:
+                    st.session_state[auto_rule_sig_key] = current_selected_pids
+                    if has_variant_selected_parts:
+                        if st.session_state.get(pairing_rule_key, "Use all") == "Use all":
+                            st.session_state[pairing_rule_key] = "Model choice"
+                            st.session_state[auto_rule_switched_key] = True
+                    else:
+                        st.session_state.pop(auto_rule_switched_key, None)
+                        if st.session_state.get(pairing_rule_key) == "Model choice":
+                            st.session_state[pairing_rule_key] = "Use all"
                 selection_rule = pair_controls.selectbox(
                     "Selection rule",
                     ["Use all", "Model choice", "Optional"],
@@ -3543,11 +3885,74 @@ if tab_plan.open:
                         "Each selected part needs a handling type (and a "
                         "Use / installation location when Consumed) before it can be paired."
                     )
-                    _pfr_df = part_feature_rules(project_id)
-                    feature_rule_pids = (
-                        set(_pfr_df["part_id"].astype(str))
-                        if not _pfr_df.empty and "part_id" in _pfr_df.columns
-                        else set()
+                    _preloaded_placement_opts_by_pid: dict[str, pd.DataFrame] = {}
+                    _pre_mv_entries: list[dict] = []
+                    for _, _pre_part in selected_parts.iterrows():
+                        _pre_pid = str(_pre_part["part_id"])
+                        _pre_pnum = str(_pre_part["part_number"])
+                        _pre_opts = process_part_placement_options(
+                            project_id,
+                            scenario_id,
+                            section_id,
+                            _pre_pid,
+                            work_element_id=selected_process_id,
+                            yamazumi_element_id=selected_yamazumi_id,
+                        )
+                        _preloaded_placement_opts_by_pid[_pre_pid] = _pre_opts
+                        _pre_in_sec = (
+                            not section_placements.empty
+                            and _pre_pid in set(section_placements["part_id"].astype(str))
+                        )
+                        _pre_can_consume = (
+                            not _pre_opts.empty
+                            and "can_consume" in _pre_opts.columns
+                            and bool(_pre_opts["can_consume"].any())
+                        )
+                        _pre_default_ht = (
+                            "Consume" if (_pre_in_sec and _pre_can_consume) else "Handle"
+                        )
+                        _pre_ht_key = (
+                            f"process_pairing_handling_{scenario_id}_{section_id}_"
+                            f"{selected_yamazumi_id}_{_pre_pid}"
+                        )
+                        _pre_ht = str(st.session_state.get(_pre_ht_key) or _pre_default_ht)
+                        _pre_mv_key = (
+                            f"process_pairing_model_variant_v2_{scenario_id}_{section_id}_"
+                            f"{selected_yamazumi_id}_{_pre_pid}"
+                        )
+                        if selection_rule == "Model choice":
+                            if _pre_mv_key in st.session_state:
+                                _pre_is_mv = bool(st.session_state.get(_pre_mv_key))
+                            else:
+                                _pre_is_mv = _part_has_model_variants(
+                                    _pre_pid,
+                                    all_placements,
+                                    section_id=section_id,
+                                    fallback_model_applicability=_pre_part.get(
+                                        "model_applicability"
+                                    ),
+                                    feature_rule_part_ids=feature_rule_pids,
+                                )
+                        else:
+                            _pre_is_mv = False
+                        _pre_loc_key = (
+                            f"process_pairing_location_{scenario_id}_{section_id}_"
+                            f"{selected_yamazumi_id}_{_pre_pid}"
+                        )
+                        _pre_mv_entries.append(
+                            {
+                                "part_id": _pre_pid,
+                                "part_number": _pre_pnum,
+                                "is_model_variant": _pre_is_mv,
+                                "handling_type": _pre_ht,
+                                "placement_key": _pre_loc_key,
+                                "placement_options": _pre_opts,
+                            }
+                        )
+                    sync_model_variant_placement_selections(
+                        _pre_mv_entries,
+                        all_placements,
+                        st.session_state,
                     )
                     for _, selected_part in selected_parts.iterrows():
                         selected_part_id = str(selected_part["part_id"])
@@ -3556,7 +3961,7 @@ if tab_plan.open:
                         selected_part_name = (
                             "" if pd.isna(raw_part_name) else str(raw_part_name or "")
                         )
-                        placement_options = process_part_placement_options(
+                        placement_options = _preloaded_placement_opts_by_pid.get(selected_part_id) if selected_part_id in _preloaded_placement_opts_by_pid else process_part_placement_options(
                             project_id,
                             scenario_id,
                             section_id,
@@ -3583,13 +3988,14 @@ if tab_plan.open:
                                 + (f" — {selected_part_name}" if selected_part_name else "")
                             )
                             mv_key = (
-                                f"process_pairing_model_variant_{scenario_id}_{section_id}_"
+                                f"process_pairing_model_variant_v2_{scenario_id}_{section_id}_"
                                 f"{selected_yamazumi_id}_{selected_part_id}"
                             )
                             if selection_rule == "Model choice":
                                 default_is_mv = _part_has_model_variants(
                                     selected_part_id,
                                     all_placements,
+                                    section_id=section_id,
                                     fallback_model_applicability=selected_part.get(
                                         "model_applicability"
                                     ),
@@ -3650,24 +4056,24 @@ if tab_plan.open:
                             for _, placement in placement_options.iterrows():
                                 assignment_id = str(placement["fishbone_assignment_id"])
                                 raw_use_description = placement.get("use_description")
-                                use_description = (
-                                    "No location recorded"
+                                clean_use_description = (
+                                    ""
                                     if pd.isna(raw_use_description)
-                                    or not str(raw_use_description or "").strip()
-                                    else str(raw_use_description).strip()
+                                    else str(raw_use_description or "").strip()
                                 )
-                                placement_sec_id = str(placement.get("section_id") or "")
                                 placement_sec_name = str(
                                     placement.get("section_name") or ""
                                 ).strip()
-                                if (
-                                    placement_sec_id
-                                    and placement_sec_id != str(section_id)
-                                    and placement_sec_name
-                                ):
+                                if placement_sec_name and clean_use_description:
                                     use_description = (
-                                        f"{placement_sec_name} ({use_description})"
+                                        f"{placement_sec_name} ({clean_use_description})"
                                     )
+                                elif placement_sec_name:
+                                    use_description = placement_sec_name
+                                elif clean_use_description:
+                                    use_description = clean_use_description
+                                else:
+                                    use_description = "No location recorded"
                                 quantity_label = format_clean_number(
                                     placement["fishbone_quantity"]
                                 )
@@ -4309,6 +4715,8 @@ if tab_plan.open:
                                 f"{_we_prefix}_{scenario_id}_{section_id}_{selected_yamazumi_id}",
                                 None,
                             )
+                        _pop_paag_tab_state(f"{pairing_rule_key}__auto_mv_sig", None)
+                        _pop_paag_tab_state(f"{pairing_rule_key}__auto_mv_switched", None)
                         _pop_paag_tab_state(selected_part_ids_key, None)
                         request_table_editor_reset(work_source_key)
                         request_table_editor_reset(not_consumed_part_source_key)
@@ -4721,7 +5129,26 @@ if tab_plan.open:
                 dtype="object",
             )
             elements = elements.reindex(columns=columns)
+            elements["tool"] = pd.Series(
+                [
+                    None
+                    if val is None
+                    or pd.isna(val)
+                    or not str(val).strip()
+                    or str(val).strip().casefold() == "(no tool required)"
+                    else str(val).strip()
+                    for val in elements["tool"]
+                ],
+                index=elements.index,
+                dtype="string",
+            )
 
+        if not elements.empty and "tool" in elements.columns:
+            elements["tool"] = pd.Series(
+                [None if v is None or pd.isna(v) else str(v) for v in elements["tool"]],
+                index=elements.index,
+                dtype="object",
+            )
         elements["selected"] = pd.Series(False, index=elements.index, dtype="bool")
 
         editable_table_heading("Process at a Glance by Pitch")
@@ -4747,6 +5174,35 @@ if tab_plan.open:
 
 
         prior_editor_state = dict(st.session_state.get(process_editor_key, {}) or {})
+
+        _proc_types_df = equipment_types(project_id)
+        _proc_type_labels = [
+            str(lbl).strip()
+            for lbl in _proc_types_df["label"].dropna().unique()
+            if str(lbl).strip()
+        ]
+        for _std_tool in [
+            "Handheld equipment",
+            "Torque tool",
+            "Scan/Compare equipment",
+            "Poka-Yoke / Fixture equipment",
+            "Test equipment",
+            "Tape machine",
+            "Platform",
+            "Pit",
+            "Operator Lift",
+            "Ergo Hand Tools",
+            "Ergo Lift Assists",
+        ]:
+            if _std_tool not in _proc_type_labels:
+                _proc_type_labels.append(_std_tool)
+        _proc_type_labels.sort()
+        process_tool_options = ["(No tool required)", *_proc_type_labels, "Other tool"]
+        if not elements.empty and "tool" in elements.columns:
+            for _val in elements["tool"].dropna().astype(str):
+                _cleaned_tool = _val.strip()
+                if _cleaned_tool and _cleaned_tool not in process_tool_options:
+                    process_tool_options.append(_cleaned_tool)
 
         edited = st.data_editor(
             visible_elements,
@@ -4817,9 +5273,10 @@ if tab_plan.open:
                     disabled=True,
                     width="medium",
                 ),
-                "tool": st.column_config.TextColumn(
+                "tool": st.column_config.SelectboxColumn(
                     "Tool",
-                    help="Handheld equipment or tool used for this work element",
+                    options=process_tool_options,
+                    help="Select tool category from the handheld equipment catalog, or '(No tool required)'.",
                     width="medium",
                 ),
                 "assigned_parts": st.column_config.TextColumn(
@@ -5459,17 +5916,22 @@ if tab_plan.open:
                 st.rerun()
             line_row = match_rows.iloc[0]
             baseline_line_key = f"edit_process_line_baseline_{scenario_id}_{target_id}"
+            def _line_str(val: object, default: str = "") -> str:
+                if val is None or (not isinstance(val, (list, tuple, set, dict)) and pd.isna(val)):
+                    return default
+                cleaned = str(val).strip()
+                return cleaned if cleaned else default
             conflict_line_key = f"edit_process_line_conflict_{scenario_id}_{target_id}"
             live_line_fields = {
-                "tool": str(line_row.get("tool") or "").strip(),
-                "resource_type": str(line_row.get("resource_type") or "Operator").strip() or "Operator",
-                "resource_detail": str(line_row.get("resource_detail") or "").strip(),
+                "tool": _line_str(line_row.get("tool")),
+                "resource_type": _line_str(line_row.get("resource_type"), "Operator"),
+                "resource_detail": _line_str(line_row.get("resource_detail")),
                 "cycle_time_s": round(
                     0.0 if pd.isna(line_row.get("cycle_time_s")) else float(line_row.get("cycle_time_s") or 0.0),
                     2,
                 ),
                 "sequence": 0 if pd.isna(line_row.get("sequence")) else int(line_row.get("sequence") or 0),
-                "status": str(line_row.get("status") or "Draft").strip() or "Draft",
+                "status": _line_str(line_row.get("status"), "Draft"),
                 "model_applicability": ", ".join(
                     str(m)
                     for m in (
@@ -5482,12 +5944,12 @@ if tab_plan.open:
             if baseline_line_key not in st.session_state:
                 st.session_state[baseline_line_key] = dict(live_line_fields)
 
-            line_op_id = str(line_row.get("op_id") or "").strip()
+            line_op_id = _line_str(line_row.get("op_id"))
             line_pitch_name = str(
-                line_row.get("pitch_name") or line_row.get("station") or ""
+                _line_str(line_row.get("pitch_name")) or _line_str(line_row.get("station"))
             ).strip()
             line_work_element = str(
-                line_row.get("work_element") or line_row.get("operation") or ""
+                _line_str(line_row.get("work_element")) or _line_str(line_row.get("operation"))
             ).strip()
             header_parts = [p for p in [line_op_id, line_pitch_name] if p]
             header_prefix = " · ".join(header_parts)
@@ -5507,8 +5969,10 @@ if tab_plan.open:
                 ctx_row = yamazumi_context.loc[target_id]
                 if isinstance(ctx_row, pd.DataFrame):
                     ctx_row = ctx_row.iloc[0]
-                default_line_sec_id = str(ctx_row.get("section_id") or "").strip()
-                line_pitch_id = str(ctx_row.get("pitch_id") or "").strip()
+                default_line_sec_id = _line_str(ctx_row.get("section_id"))
+                line_pitch_id = _line_str(ctx_row.get("pitch_id"))
+
+
 
             saved_line_groups = process_part_groups(
                 project_id, scenario_id, target_id, active_only=True
@@ -5711,9 +6175,42 @@ if tab_plan.open:
                         if orig_rule in rule_options
                         else 0
                     )
+                    _edit_pfr_df = part_feature_rules(project_id)
+                    edit_feature_rule_pids = (
+                        set(_edit_pfr_df["part_id"].astype(str))
+                        if not _edit_pfr_df.empty and "part_id" in _edit_pfr_df.columns
+                        else set()
+                    )
+                    edit_has_variant_parts = any(
+                        _part_has_model_variants(
+                            pid,
+                            all_fb_placements,
+                            section_id=edit_sec_id,
+                            fallback_model_applicability=existing_options_by_part.get(
+                                pid, {}
+                            ).get("model_applicability"),
+                            feature_rule_part_ids=edit_feature_rule_pids,
+                        )
+                        for pid in selected_edit_part_ids
+                    )
                     edit_rule_key = f"edit_line_rule_{scenario_id}_{target_id}_{req_mode}"
                     if st.session_state.get(edit_rule_key) == "Choose one":
                         st.session_state[edit_rule_key] = "Model choice"
+                    edit_rule_sig_key = f"{edit_rule_key}__auto_mv_sig_v2"
+                    edit_rule_switched_key = f"{edit_rule_key}__auto_mv_switched"
+                    current_edit_pids = tuple(sorted(str(p) for p in selected_edit_part_ids))
+                    if st.session_state.get(edit_rule_sig_key) != current_edit_pids:
+                        prev_edit_sig = st.session_state.get(edit_rule_sig_key)
+                        st.session_state[edit_rule_sig_key] = current_edit_pids
+                        if prev_edit_sig is not None or not active_group:
+                            if edit_has_variant_parts:
+                                if st.session_state.get(edit_rule_key, orig_rule) == "Use all":
+                                    st.session_state[edit_rule_key] = "Model choice"
+                                    st.session_state[edit_rule_switched_key] = True
+                            else:
+                                st.session_state.pop(edit_rule_switched_key, None)
+                                if st.session_state.get(edit_rule_key) == "Model choice":
+                                    st.session_state[edit_rule_key] = "Use all"
                     edit_selection_rule = st.selectbox(
                         "Selection rule",
                         options=rule_options,
@@ -5729,17 +6226,87 @@ if tab_plan.open:
                         if isinstance(preview_edit_models, list) and preview_edit_models
                         else None
                     )
-                    _edit_pfr_df = part_feature_rules(project_id)
-                    edit_feature_rule_pids = (
-                        set(_edit_pfr_df["part_id"].astype(str))
-                        if not _edit_pfr_df.empty and "part_id" in _edit_pfr_df.columns
-                        else set()
+                    _edit_preloaded_p_options_by_pid: dict[str, pd.DataFrame] = {}
+                    _edit_pre_mv_entries: list[dict] = []
+                    for _pre_pid in selected_edit_part_ids:
+                        _pre_pnum = part_number_map.get(_pre_pid, _pre_pid)
+                        _pre_existing_opt = existing_options_by_part.get(_pre_pid, {})
+                        _pre_p_options = process_part_placement_options(
+                            project_id,
+                            scenario_id,
+                            edit_sec_id,
+                            _pre_pid,
+                            exclude_group_id=editing_group_id,
+                            work_element_id=target_id,
+                            target_variants=preview_target_variants,
+                        )
+                        _edit_preloaded_p_options_by_pid[_pre_pid] = _pre_p_options
+                        _pre_mv_key = (
+                            f"edit_line_mv_v2_{scenario_id}_{target_id}_"
+                            f"{req_mode}_{edit_sec_id}_{_pre_pid}"
+                        )
+                        if edit_selection_rule == "Model choice":
+                            if _pre_mv_key in st.session_state:
+                                _pre_is_mv = bool(st.session_state.get(_pre_mv_key))
+                            elif _pre_existing_opt and orig_rule == "Model choice":
+                                _pre_is_mv = bool(_pre_existing_opt.get("is_model_variant"))
+                            else:
+                                _pre_is_mv = _part_has_model_variants(
+                                    _pre_pid,
+                                    all_fb_placements,
+                                    section_id=edit_sec_id,
+                                    fallback_model_applicability=_pre_existing_opt.get(
+                                        "model_applicability"
+                                    ),
+                                    feature_rule_part_ids=edit_feature_rule_pids,
+                                )
+                        else:
+                            _pre_is_mv = False
+                        _pre_existing_ht = str(
+                            _pre_existing_opt.get("handling_type")
+                            or (
+                                "Consume"
+                                if (
+                                    _pre_pid in in_edit_sec_part_ids
+                                    and not _pre_p_options.empty
+                                    and "can_consume" in _pre_p_options.columns
+                                    and bool(_pre_p_options["can_consume"].any())
+                                )
+                                else "Handle"
+                            )
+                        ).strip()
+                        _pre_ht_key = (
+                            f"edit_line_ht_{scenario_id}_{target_id}_"
+                            f"{req_mode}_{edit_sec_id}_{_pre_pid}"
+                        )
+                        _pre_ht = str(st.session_state.get(_pre_ht_key) or _pre_existing_ht)
+                        _pre_pl_key = (
+                            f"edit_line_loc_{scenario_id}_{target_id}_"
+                            f"{req_mode}_{edit_sec_id}_{_pre_pid}"
+                        )
+                        _edit_pre_mv_entries.append(
+                            {
+                                "part_id": _pre_pid,
+                                "part_number": _pre_pnum,
+                                "is_model_variant": _pre_is_mv,
+                                "handling_type": _pre_ht,
+                                "placement_key": _pre_pl_key,
+                                "placement_options": _pre_p_options,
+                                "default_aid": str(
+                                    _pre_existing_opt.get("fishbone_assignment_id") or ""
+                                ).strip(),
+                            }
+                        )
+                    sync_model_variant_placement_selections(
+                        _edit_pre_mv_entries,
+                        all_fb_placements,
+                        st.session_state,
                     )
                     for pid in selected_edit_part_ids:
                         pnum = part_number_map.get(pid, pid)
                         pdesc = part_desc_map.get(pid, "")
                         existing_opt = existing_options_by_part.get(pid, {})
-                        p_options = process_part_placement_options(
+                        p_options = _edit_preloaded_p_options_by_pid.get(pid) if pid in _edit_preloaded_p_options_by_pid else process_part_placement_options(
                             project_id,
                             scenario_id,
                             edit_sec_id,
@@ -5753,7 +6320,7 @@ if tab_plan.open:
                                 f"**{pnum}**" + (f" — {pdesc}" if pdesc else "")
                             )
                             mv_key = (
-                                f"edit_line_mv_{scenario_id}_{target_id}_"
+                                f"edit_line_mv_v2_{scenario_id}_{target_id}_"
                                 f"{req_mode}_{edit_sec_id}_{pid}"
                             )
                             if edit_selection_rule == "Model choice":
@@ -5765,6 +6332,7 @@ if tab_plan.open:
                                     default_is_mv = _part_has_model_variants(
                                         pid,
                                         all_fb_placements,
+                                        section_id=edit_sec_id,
                                         fallback_model_applicability=existing_opt.get(
                                             "model_applicability"
                                         ),
@@ -5839,19 +6407,20 @@ if tab_plan.open:
                             for _, pl_row in p_options.iterrows():
                                 aid = str(pl_row["fishbone_assignment_id"])
                                 raw_use = pl_row.get("use_description")
-                                use_desc = (
-                                    "No location recorded"
-                                    if pd.isna(raw_use) or not str(raw_use or "").strip()
-                                    else str(raw_use).strip()
+                                clean_use = (
+                                    ""
+                                    if pd.isna(raw_use)
+                                    else str(raw_use or "").strip()
                                 )
-                                pl_sec_id = str(pl_row.get("section_id") or "")
                                 pl_sec_name = str(pl_row.get("section_name") or "").strip()
-                                if (
-                                    pl_sec_id
-                                    and pl_sec_id != str(edit_sec_id)
-                                    and pl_sec_name
-                                ):
-                                    use_desc = f"{pl_sec_name} ({use_desc})"
+                                if pl_sec_name and clean_use:
+                                    use_desc = f"{pl_sec_name} ({clean_use})"
+                                elif pl_sec_name:
+                                    use_desc = pl_sec_name
+                                elif clean_use:
+                                    use_desc = clean_use
+                                else:
+                                    use_desc = "No location recorded"
                                 qty_lbl = format_clean_number(pl_row["fishbone_quantity"])
                                 rem_lbl = format_clean_number(
                                     pl_row["remaining_consume_allowance"]
@@ -6131,9 +6700,9 @@ if tab_plan.open:
             type_labels.sort()
             tool_categories = ["(No tool required)", *type_labels, "Other tool"]
 
-            existing_tool = str(line_row.get("tool") or "").strip()
-            existing_res_type = str(line_row.get("resource_type") or "Human").strip()
-            existing_res_detail = str(line_row.get("resource_detail") or "").strip()
+            existing_tool = _line_str(line_row.get("tool"))
+            existing_res_type = _line_str(line_row.get("resource_type"), "Human")
+            existing_res_detail = _line_str(line_row.get("resource_detail"))
 
             all_assets_df = equipment_assets(project_id, scenario_id)
             default_cat_idx = 0
@@ -6289,7 +6858,7 @@ if tab_plan.open:
                 else int(line_row.get("sequence") or 0)
             )
             status_options = ["Draft", "Review", "Validated"]
-            current_status = str(line_row.get("status") or "Draft").strip()
+            current_status = _line_str(line_row.get("status"), "Draft")
             if current_status not in status_options:
                 current_status = "Draft"
             edit_cycle_time = time_col.number_input(
@@ -6736,6 +7305,7 @@ elif tab_slides.open:
                     else:
                         current_sec_filter = "__ALL__"
                     st.session_state[sec_filter_key] = current_sec_filter
+                    st.session_state[f"sec_active_select_{scenario_id}"] = current_sec_filter
 
                     if current_sec_filter == "__ALL__":
                         visible_pitches_df = scenario_pitches_df
@@ -6784,11 +7354,9 @@ elif tab_slides.open:
                 st.warning(str(exc))
             else:
                 pitch_rows = pitch_summary["elements"]
-                current_page = clamp_page(
-                    st.session_state.get(pitch_page_key, 1), len(pitch_rows)
-                )
+                total_pages = max(int(pitch_summary.get("slide_count", 1) or 1), 1)
+                current_page = min(max(1, int(st.session_state.get(pitch_page_key, 1) or 1)), total_pages)
                 st.session_state[pitch_page_key] = current_page
-                total_pages = max(page_count(len(pitch_rows)), pitch_summary.get("slide_count", 1))
 
                 # Anchor for scroll
                 st.html("""
@@ -7060,6 +7628,9 @@ elif tab_slides.open:
                         st.rerun()
 
                 with nav_col_p:
+                    if st.session_state.get(f"pitch_active_select_{scenario_id}") not in vis_pids:
+                        st.session_state[f"pitch_active_select_{scenario_id}"] = selected_pitch_id
+
                     def _format_pitch_label(pid: str) -> str:
                         lbl = visible_pitch_dict.get(pid, pid)
                         if pid == selected_pitch_id and total_pages > 1:
@@ -7097,7 +7668,7 @@ elif tab_slides.open:
                             st.session_state[f"pitch_active_select_{scenario_id}"] = prev_pid
                             try:
                                 prev_sum = process_pitch_visual_summary(project_id, scenario_id, prev_pid)
-                                prev_tot = max(page_count(len(prev_sum.get("elements", []))), prev_sum.get("slide_count", 1), 1)
+                                prev_tot = max(int(prev_sum.get("slide_count", 1) or 1), 1)
                             except Exception:
                                 prev_tot = 1
                             st.session_state[pitch_page_key] = prev_tot
@@ -7128,6 +7699,7 @@ elif tab_slides.open:
 
                 if slide_action_bar.button("Print", icon=":material/print:", key=f"btn_print_{scenario_id}", help="Print or export 8.5x11 or 11x17 landscape slide"):
                     st.session_state[f"paag_print_active_{scenario_id}"] = True
+                    st.session_state.pop(f"_paag_print_cache_{scenario_id}", None)
                     st.rerun()
 
                 alerts_cnt = sum(len(v) for v in pitch_summary.get("alerts", {}).values())
@@ -7202,7 +7774,7 @@ elif tab_slides.open:
                     )
 
                 # Model applicability resolution for elements
-                active_page_rows = page_elements(pitch_rows, current_page)
+                active_page_rows = list(pitch_rows)
                 for row in active_page_rows:
                     row["models"] = [
                         "All models" if model.casefold() in {"all", "all models"}
@@ -7238,7 +7810,7 @@ elif tab_slides.open:
                     element_options = [
                         (
                             str(el.get("work_element_id") or el.get("id")),
-                            f"{idx + 1} · {el.get('op_id') + ' — ' if el.get('op_id') and el.get('op_id') != 'Yamazumi link required' else ''}{el.get('operation') or el.get('yamazumi_description') or 'Work Step'}"
+                            f"{idx + 1} · {el.get('op_id') + ' — ' if el.get('op_id') and el.get('op_id') != 'Yamazumi link required' else ''}{el.get('yamazumi_description') or el.get('operation') or 'Work Step'}"
                         )
                         for idx, el in enumerate(pitch_rows)
                         if el.get("work_element_id") or el.get("id")
@@ -7255,7 +7827,10 @@ elif tab_slides.open:
 
                     # Upload / Paste / Link Visual Aid Container
                     with st.container(border=True):
-                        vis_tab_file, vis_tab_link, vis_tab_parts = st.tabs(["Upload / Clipboard", "Web Link / URL", "Parts Catalog"])
+                        vis_tab_file, vis_tab_link, vis_tab_parts = guarded_tabs(
+                            ["Upload / Clipboard", "Web Link / URL", "Parts Catalog"],
+                            key=f"paag_vis_aid_add_tab_{selected_pitch_id}",
+                        )
                         with vis_tab_file:
                             up_col1, up_col2 = st.columns([1.5, 1])
                             with up_col1:
@@ -7268,7 +7843,7 @@ elif tab_slides.open:
                                 st.caption("Photos: max **10 MB** • Videos: max **25 MB** • 3D CAD: max **50 MB** (STEP, STP)")
 
                                 st.caption("Or take a photo with your camera / paste a screenshot (Win+Shift+S / Ctrl+V):")
-                                pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}")
+                                pasted = clipboard_image(key=f"paste_media_{selected_pitch_id}") if vis_tab_file.open else None
 
                                 aid_caption = st.text_input(
                                     "Caption / Yellow Callout Note",
@@ -7382,7 +7957,7 @@ elif tab_slides.open:
                                             file_bytes=current_staged["composite_bytes"],
                                             original_file_bytes=current_staged["original_bytes"],
                                             annotations_json=current_staged.get("annotations_json", ""),
-                                            caption=aid_caption or (current_staged["filename"] if "screenshot" not in current_staged["filename"].lower() else "Visual Aid"),
+                                            caption=aid_caption,
                                             tagged_work_element_ids=tagged_element_ids or [],
                                             sequence=aid_sequence or 10,
                                             current_editor=st.session_state.get("current_editor", ""),
@@ -7503,10 +8078,16 @@ elif tab_slides.open:
                                         st.error(str(exc))
 
                         with vis_tab_parts:
-                            catalog_photo_parts = catalog_part_photos_for_pitch(
-                                project_id, scenario_id, selected_pitch_id
+                            catalog_photo_parts = (
+                                catalog_part_photos_for_pitch(
+                                    project_id, scenario_id, selected_pitch_id
+                                )
+                                if vis_tab_parts.open
+                                else []
                             )
-                            if not catalog_photo_parts:
+                            if not vis_tab_parts.open:
+                                pass
+                            elif not catalog_photo_parts:
                                 st.info(
                                     "No photos found in the Parts Catalog yet. Upload or paste part photos in the **Parts Catalog** module to pull them into PAAG slides."
                                 )
@@ -7547,13 +8128,17 @@ elif tab_slides.open:
                                         else f"{prefix}{p_num}{view_suffix}"
                                     )
 
+                                _part_vis_gen_key = f"part_visual_form_gen_{selected_pitch_id}"
+                                _part_vis_gen = int(st.session_state.get(_part_vis_gen_key, 0) or 0)
                                 pc_col1, pc_col2 = st.columns([1.5, 1])
                                 with pc_col1:
                                     selected_catalog_part_id = st.selectbox(
                                         "Select part from Parts Catalog",
                                         options=part_option_ids,
                                         format_func=_format_catalog_part_option,
-                                        key=f"select_catalog_part_visual_{selected_pitch_id}",
+                                        index=None,
+                                        placeholder="Choose a part from Parts Catalog...",
+                                        key=f"select_catalog_part_visual_{selected_pitch_id}_{_part_vis_gen}",
                                         help="Choose any part in the Parts Catalog that has a primary or supplemental photo.",
                                     )
                                     active_part_item = part_by_id.get(selected_catalog_part_id, {})
@@ -7564,7 +8149,7 @@ elif tab_slides.open:
                                             "Part photo view",
                                             options=list(view_by_id.keys()),
                                             format_func=lambda vid: view_by_id.get(vid, {}).get("view_label", vid),
-                                            key=f"select_catalog_part_view_{selected_pitch_id}_{selected_catalog_part_id}",
+                                            key=f"select_catalog_part_view_{selected_pitch_id}_{selected_catalog_part_id}_{_part_vis_gen}",
                                             help="Choose between the Primary Image and any Additional views stored on this part.",
                                         )
                                     else:
@@ -7577,7 +8162,7 @@ elif tab_slides.open:
                                     part_aid_caption = st.text_input(
                                         "Caption / Yellow Callout Note",
                                         value=default_part_caption,
-                                        key=f"input_part_cap_visual_{selected_pitch_id}_{selected_catalog_part_id}_{selected_view_id}",
+                                        key=f"input_part_cap_visual_{selected_pitch_id}_{selected_catalog_part_id}_{selected_view_id}_{_part_vis_gen}",
                                         placeholder="e.g. Verify part orientation and mating surface before fastening",
                                     )
                                     preview_path = str(active_view.get("image_path") or "").strip()
@@ -7596,7 +8181,7 @@ elif tab_slides.open:
                                         for wid in (active_part_item.get("linked_work_element_ids") or [])
                                         if wid in tag_dict_elem
                                     ]
-                                    _part_ms_key = f"select_part_tags_visual_{selected_pitch_id}_{selected_catalog_part_id}"
+                                    _part_ms_key = f"select_part_tags_visual_{selected_pitch_id}_{selected_catalog_part_id}_{_part_vis_gen}"
                                     if _part_ms_key in st.session_state and isinstance(st.session_state[_part_ms_key], list):
                                         st.session_state[_part_ms_key] = [
                                             v for v in st.session_state[_part_ms_key] if v in tag_dict_elem
@@ -7614,7 +8199,7 @@ elif tab_slides.open:
                                         min_value=1,
                                         value=10,
                                         step=5,
-                                        key=f"input_part_seq_visual_{selected_pitch_id}",
+                                        key=f"input_part_seq_visual_{selected_pitch_id}_{_part_vis_gen}",
                                     )
 
                                 if st.button(
@@ -7622,6 +8207,7 @@ elif tab_slides.open:
                                     icon=":material/add_photo_alternate:",
                                     type="primary",
                                     key=f"btn_add_part_visual_{selected_pitch_id}",
+                                    disabled=not bool(selected_catalog_part_id),
                                 ):
                                     try:
                                         saved_media = copy_part_photo_to_pitch_visual_media(
@@ -7653,171 +8239,231 @@ elif tab_slides.open:
                                             f"Added photo for {active_part_item.get('part_number', 'part')} as visual aid!",
                                             icon=":material/check_circle:",
                                         )
+                                        for _stale_vis_key in (
+                                            f"select_catalog_part_visual_{selected_pitch_id}_{_part_vis_gen}",
+                                            f"select_catalog_part_view_{selected_pitch_id}_{selected_catalog_part_id}_{_part_vis_gen}",
+                                            f"input_part_cap_visual_{selected_pitch_id}_{selected_catalog_part_id}_{selected_view_id}_{_part_vis_gen}",
+                                            _part_ms_key,
+                                            f"input_part_seq_visual_{selected_pitch_id}_{_part_vis_gen}",
+                                        ):
+                                            st.session_state.pop(_stale_vis_key, None)
+                                        st.session_state[_part_vis_gen_key] = _part_vis_gen + 1
                                         st.rerun()
                                     except Exception as exc:
                                         st.error(str(exc))
 
                     # Gallery of existing visual aids on this pitch
-                    current_media_items = get_pitch_visual_media(project_id, scenario_id, selected_pitch_id)
-                    if not current_media_items:
-                        st.info("No visual aids uploaded for this pitch yet. Use the form above to add photos, videos, or web links.")
-                    else:
-                        st.markdown(f"**Current Visual Aids ({len(current_media_items)})**")
-                        for m_idx, media_item in enumerate(current_media_items):
-                            with st.container(border=True):
-                                g_col1, g_col2, g_col3 = st.columns([1.5, 4, 1.5])
-                                with g_col1:
-                                    m_path = media_item.get("file_path", "")
-                                    m_type = media_item.get("media_type")
-                                    if m_type == "video":
-                                        st.video(m_path)
-                                    elif m_type == "link":
-                                        lower_p = m_path.lower()
-                                        if any(lower_p.endswith(ext) or (ext + "?") in lower_p for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
-                                            st.image(m_path, width=140)
-                                        st.link_button("Open Web Link", m_path, icon=":material/open_in_new:")
-                                    elif m_type == "cad":
-                                        p = Path(m_path)
-                                        size_str = ""
-                                        if p.exists():
-                                            size_mb = p.stat().st_size / (1024 * 1024)
-                                            size_str = f" ({size_mb:.1f} MB)"
-                                        st.markdown(f":material/view_in_ar: **3D CAD Model**{size_str}")
-                                        if p.exists():
-                                            st.download_button(
-                                                "Download STEP",
-                                                data=p.read_bytes,
-                                                file_name=p.name,
-                                                mime="application/step",
-                                                icon=":material/download:",
-                                                key=f"dl_cad_gallery_{media_item['id']}",
-                                            )
-                                    else:
-                                        st.image(cached_image_bytes(m_path, max_dim=320) or m_path, width=140)
-                                with g_col2:
-                                    st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
-                                    st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")
-                                    if media_item.get("annotations_json"):
-                                        st.caption("Markup: :material/draw: **Annotated** (editable shapes)")
-                                    tags = media_item.get("tagged_work_elements", [])
-                                    pitch_step_map: dict[str, int] = {}
-                                    for idx, el in enumerate(pitch_rows):
-                                        s_num = idx + 1
-                                        for k in (
-                                            el.get("work_element_id"),
-                                            el.get("id"),
-                                            el.get("yamazumi_element_id"),
-                                            *(el.get("yamazumi_member_ids") or []),
-                                        ):
-                                            k_str = str(k or "").strip()
-                                            if k_str and k_str not in pitch_step_map:
-                                                pitch_step_map[k_str] = s_num
-                                    if tags:
-                                        tagged_step_nums = sorted([pitch_step_map[str(t.get("work_element_id"))] for t in tags if str(t.get("work_element_id")) in pitch_step_map])
-                                        if len(pitch_rows) > 0 and len(tagged_step_nums) >= len(pitch_rows):
-                                            nums_display = ", ".join(str(n) for n in tagged_step_nums)
-                                            st.caption(f"Tagged Steps: **All elements ({nums_display})**")
+                    current_media_items = (
+                        pitch_summary.get("raw_visual_media")
+                        if isinstance(pitch_summary, dict) and "raw_visual_media" in pitch_summary
+                        else get_pitch_visual_media(project_id, scenario_id, selected_pitch_id)
+                    )
+                    pitch_step_map: dict[str, int] = {}
+                    pitch_step_desc_map: dict[str, str] = {}
+                    for idx, el in enumerate(pitch_rows):
+                        s_num = idx + 1
+                        s_desc = str(el.get("yamazumi_description") or el.get("operation") or "").strip()
+                        for k in (
+                            el.get("work_element_id"),
+                            el.get("id"),
+                            el.get("yamazumi_element_id"),
+                            *(el.get("yamazumi_member_ids") or []),
+                        ):
+                            k_str = str(k or "").strip()
+                            if k_str and k_str not in pitch_step_map:
+                                pitch_step_map[k_str] = s_num
+                                if s_desc:
+                                    pitch_step_desc_map[k_str] = s_desc
+                    all_nums_display = ", ".join(str(idx + 1) for idx in range(len(pitch_rows)))
+
+                    @st.fragment
+                    def _render_pitch_visual_aids_gallery() -> None:
+                        if not current_media_items:
+                            st.info("No visual aids uploaded for this pitch yet. Use the form above to add photos, videos, or web links.")
+                        else:
+                            st.markdown(f"**Current Visual Aids ({len(current_media_items)})**")
+                            for m_idx, media_item in enumerate(current_media_items):
+                                with st.container(border=True):
+                                    g_col1, g_col2, g_col3 = st.columns([1, 2, 3])
+                                    with g_col1:
+                                        m_path = media_item.get("file_path", "")
+                                        m_type = media_item.get("media_type")
+                                        if m_type == "video":
+                                            st.video(m_path)
+                                        elif m_type == "link":
+                                            lower_p = m_path.lower()
+                                            if any(lower_p.endswith(ext) or (ext + "?") in lower_p for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]):
+                                                st.image(m_path, width=140)
+                                            st.link_button("Open Web Link", m_path, icon=":material/open_in_new:")
+                                        elif m_type == "cad":
+                                            p = Path(m_path)
+                                            size_str = ""
+                                            if p.exists():
+                                                size_mb = p.stat().st_size / (1024 * 1024)
+                                                size_str = f" ({size_mb:.1f} MB)"
+                                            st.markdown(f":material/view_in_ar: **3D CAD Model**{size_str}")
+                                            if p.exists():
+                                                st.download_button(
+                                                    "Download STEP",
+                                                    data=p.read_bytes,
+                                                    file_name=p.name,
+                                                    mime="application/step",
+                                                    icon=":material/download:",
+                                                    key=f"dl_cad_gallery_{media_item['id']}",
+                                                )
                                         else:
-                                            tag_parts = []
-                                            other_parts = []
-                                            for t in tags:
-                                                twid = str(t.get("work_element_id") or "")
-                                                s_num = pitch_step_map.get(twid)
-                                                op_text = t.get("operation") or f"Step {t.get('work_sequence', '')}"
-                                                if s_num:
-                                                    tag_parts.append(f"{s_num} · {op_text}")
-                                                else:
-                                                    other_pnum = t.get("element_pitch_number")
-                                                    other_parts.append(f"{op_text} (on {other_pnum})" if other_pnum else op_text)
-                                            tag_str = ", ".join(tag_parts) if tag_parts else ", ".join(other_parts)
-                                            if tag_parts and other_parts:
-                                                st.caption(f"Tagged Steps: **{tag_str}** *(also on {', '.join(other_parts)})*")
+                                            st.image(cached_image_bytes(m_path, max_dim=320) or m_path, width=140)
+                                    with g_col2:
+                                        st.markdown(f"**Caption:** {media_item.get('caption') or '*(None)*'}")
+                                        st.caption(f"Type: `{media_item.get('media_type')}` | Sequence: `{media_item.get('sequence', 10)}`")
+                                        if media_item.get("annotations_json"):
+                                            st.caption("Markup: :material/draw: **Annotated** (editable shapes)")
+                                        tags = media_item.get("tagged_work_elements", [])
+                                        if tags:
+                                            tagged_step_nums = sorted([pitch_step_map[str(t.get("work_element_id"))] for t in tags if str(t.get("work_element_id")) in pitch_step_map])
+                                            if len(pitch_rows) > 0 and len(tagged_step_nums) >= len(pitch_rows):
+                                                nums_display = ", ".join(str(n) for n in tagged_step_nums)
+                                                st.caption(f"Tagged Steps: **All elements ({nums_display})**")
                                             else:
-                                                st.caption(f"Tagged Steps: **{tag_str}**")
-                                    else:
-                                        all_nums_display = ", ".join(str(idx + 1) for idx in range(len(pitch_rows)))
-                                        if all_nums_display:
-                                            st.caption(f"Tagged Steps: **All elements ({all_nums_display})**")
+                                                tag_parts = []
+                                                other_parts = []
+                                                for t in tags:
+                                                    twid = str(t.get("work_element_id") or "")
+                                                    s_num = pitch_step_map.get(twid)
+                                                    op_text = pitch_step_desc_map.get(twid) or t.get("operation") or f"Step {t.get('work_sequence', '')}"
+                                                    if s_num:
+                                                        tag_parts.append(f"{s_num} · {op_text}")
+                                                    else:
+                                                        other_pnum = t.get("element_pitch_number")
+                                                        other_parts.append(f"{op_text} (on {other_pnum})" if other_pnum else op_text)
+                                                tag_str = ", ".join(tag_parts) if tag_parts else ", ".join(other_parts)
+                                                if tag_parts and other_parts:
+                                                    st.caption(f"Tagged Steps: **{tag_str}** *(also on {', '.join(other_parts)})*")
+                                                else:
+                                                    st.caption(f"Tagged Steps: **{tag_str}**")
                                         else:
-                                            st.caption("Tagged Steps: *General pitch visual (all steps)*")
-                                with g_col3:
-                                    g_act_bar = st.container(horizontal=True)
-                                    if media_item.get("media_type") == "image" and not str(media_item.get("file_path", "")).startswith(("http://", "https://")):
-                                        if g_act_bar.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, insert Parts Catalog or clipboard photos, or add/edit arrows, text callouts, shapes, and badges"):
-                                            st.session_state[f"paag_annotate_media_{scenario_id}"] = {
-                                                "media_id": media_item["id"],
+                                            if all_nums_display:
+                                                st.caption(f"Tagged Steps: **All elements ({all_nums_display})**")
+                                            else:
+                                                st.caption("Tagged Steps: *General pitch visual (all steps)*")
+                                    with g_col3:
+                                        g_act_bar = st.container(horizontal=True)
+                                        if media_item.get("media_type") == "image" and not str(media_item.get("file_path", "")).startswith(("http://", "https://")):
+                                            if g_act_bar.button("Annotate", icon=":material/draw:", key=f"btn_annotate_media_{media_item['id']}", help="Crop, rotate 90°, insert Parts Catalog or clipboard photos, or add/edit arrows, text callouts, shapes, and badges"):
+                                                st.session_state.pop(f"paag_copy_media_{scenario_id}", None)
+                                                st.session_state[f"paag_annotate_media_{scenario_id}"] = {
+                                                    "media_id": media_item["id"],
+                                                    "pitch_id": selected_pitch_id,
+                                                }
+                                                st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
+                                        if g_act_bar.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
+                                            st.session_state.pop(f"paag_copy_media_{scenario_id}", None)
+                                            st.session_state.pop(f"paag_annotate_media_{scenario_id}", None)
+                                            st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
+                                            edit_visual_media_dialog(
+                                                media_id=media_item["id"],
+                                                current_caption=media_item.get("caption", ""),
+                                                current_sequence=media_item.get("sequence", 10),
+                                                current_tags=[t["work_element_id"] for t in tags if "work_element_id" in t],
+                                                element_options=element_options,
+                                                project_id=project_id,
+                                                scenario_id=scenario_id,
+                                                current_url=media_item.get("file_path", "") if media_item.get("media_type") == "link" or str(media_item.get("file_path", "")).startswith(("http://", "https://")) else "",
+                                                pitch_id=selected_pitch_id,
+                                            )
+                                        if g_act_bar.button("Copy", icon=":material/content_copy:", key=f"btn_copy_media_{media_item['id']}", help="Duplicate this visual aid on this pitch or copy it to another pitch"):
+                                            _clear_paag_copy_media_dialog(str(media_item["id"]))
+                                            st.session_state[f"paag_copy_media_{scenario_id}"] = {
+                                                "media_id": str(media_item["id"]),
                                                 "pitch_id": selected_pitch_id,
                                             }
+                                            st.session_state.pop(f"paag_annotate_media_{scenario_id}", None)
                                             st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
-                                    if g_act_bar.button("Edit", icon=":material/edit:", key=f"btn_edit_media_{media_item['id']}"):
-                                        edit_visual_media_dialog(
-                                            media_id=media_item["id"],
-                                            current_caption=media_item.get("caption", ""),
-                                            current_sequence=media_item.get("sequence", 10),
-                                            current_tags=[t["work_element_id"] for t in tags if "work_element_id" in t],
-                                            element_options=element_options,
-                                            project_id=project_id,
-                                            scenario_id=scenario_id,
-                                            current_url=media_item.get("file_path", "") if media_item.get("media_type") == "link" or str(media_item.get("file_path", "")).startswith(("http://", "https://")) else "",
-                                            pitch_id=selected_pitch_id,
-                                        )
-                                    if g_act_bar.button("Copy", icon=":material/content_copy:", key=f"btn_copy_media_{media_item['id']}", help="Duplicate this visual aid on this pitch or copy it to another pitch"):
-                                        copy_visual_media_dialog(
-                                            media_id=media_item["id"],
-                                            current_pitch_id=selected_pitch_id,
-                                            current_caption=media_item.get("caption", ""),
-                                            current_sequence=media_item.get("sequence", 10),
-                                            current_tags=[t["work_element_id"] for t in tags if "work_element_id" in t],
-                                            element_options=element_options,
-                                            pitch_options=pitch_options,
-                                            project_id=project_id,
-                                            scenario_id=scenario_id,
-                                        )
-                                    if g_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
-                                        delete_visual_media_dialog(
-                                            media_id=media_item["id"],
-                                            caption=media_item.get("caption", ""),
-                                            project_id=project_id,
-                                            scenario_id=scenario_id,
-                                        )
+                                        if g_act_bar.button("Delete", icon=":material/delete:", key=f"destructive_btn_del_media_{media_item['id']}"):
+                                            st.session_state.pop(f"paag_copy_media_{scenario_id}", None)
+                                            st.session_state.pop(f"paag_annotate_media_{scenario_id}", None)
+                                            st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
+                                            delete_visual_media_dialog(
+                                                media_id=media_item["id"],
+                                                caption=media_item.get("caption", ""),
+                                                project_id=project_id,
+                                                scenario_id=scenario_id,
+                                            )
 
-                    active_staged_ann_pitch = st.session_state.get(f"paag_annotate_staged_{scenario_id}")
-                    active_media_ann_info = st.session_state.get(f"paag_annotate_media_{scenario_id}")
-                    if active_staged_ann_pitch:
-                        if st.session_state.get(f"staged_media_{active_staged_ann_pitch}"):
-                            annotate_staged_media_dialog(
-                                str(active_staged_ann_pitch),
-                                project_id=project_id,
-                                scenario_id=scenario_id,
-                            )
-                        else:
-                            st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
-                    elif isinstance(active_media_ann_info, dict) and active_media_ann_info.get("media_id"):
-                        target_mid = str(active_media_ann_info["media_id"])
-                        target_pid = str(active_media_ann_info.get("pitch_id") or selected_pitch_id)
-                        target_item = next(
-                            (m for m in current_media_items if str(m.get("id")) == target_mid),
-                            None,
-                        )
-                        if target_item is None and target_pid != selected_pitch_id:
-                            other_items = get_pitch_visual_media(project_id, scenario_id, target_pid)
+                        active_staged_ann_pitch = st.session_state.get(f"paag_annotate_staged_{scenario_id}")
+                        active_media_ann_info = st.session_state.get(f"paag_annotate_media_{scenario_id}")
+                        active_copy_media_info = st.session_state.get(f"paag_copy_media_{scenario_id}")
+                        if active_staged_ann_pitch:
+                            if st.session_state.get(f"staged_media_{active_staged_ann_pitch}"):
+                                annotate_staged_media_dialog(
+                                    str(active_staged_ann_pitch),
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                )
+                            else:
+                                st.session_state.pop(f"paag_annotate_staged_{scenario_id}", None)
+                        elif isinstance(active_media_ann_info, dict) and active_media_ann_info.get("media_id"):
+                            target_mid = str(active_media_ann_info["media_id"])
+                            target_pid = str(active_media_ann_info.get("pitch_id") or selected_pitch_id)
                             target_item = next(
-                                (m for m in other_items if str(m.get("id")) == target_mid),
+                                (m for m in current_media_items if str(m.get("id")) == target_mid),
                                 None,
                             )
-                        if target_item is not None:
-                            annotate_visual_media_dialog(
-                                media_id=target_item["id"],
-                                file_path=target_item.get("file_path", ""),
-                                original_file_path=target_item.get("original_file_path", ""),
-                                annotations_json=target_item.get("annotations_json", ""),
-                                caption=target_item.get("caption", ""),
-                                project_id=project_id,
-                                scenario_id=scenario_id,
-                                pitch_id=target_pid,
+                            if target_item is None and target_pid != selected_pitch_id:
+                                other_items = get_pitch_visual_media(project_id, scenario_id, target_pid)
+                                target_item = next(
+                                    (m for m in other_items if str(m.get("id")) == target_mid),
+                                    None,
+                                )
+                            if target_item is not None:
+                                annotate_visual_media_dialog(
+                                    media_id=target_item["id"],
+                                    file_path=target_item.get("file_path", ""),
+                                    original_file_path=target_item.get("original_file_path", ""),
+                                    annotations_json=target_item.get("annotations_json", ""),
+                                    caption=target_item.get("caption", ""),
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                    pitch_id=target_pid,
+                                )
+                            else:
+                                st.session_state.pop(f"paag_annotate_media_{scenario_id}", None)
+                        elif isinstance(active_copy_media_info, dict) and active_copy_media_info.get("media_id"):
+                            target_mid = str(active_copy_media_info["media_id"])
+                            target_pid = str(active_copy_media_info.get("pitch_id") or selected_pitch_id)
+                            target_item = next(
+                                (m for m in current_media_items if str(m.get("id")) == target_mid),
+                                None,
                             )
-                        else:
-                            st.session_state.pop(f"paag_annotate_media_{scenario_id}", None)
+                            if target_item is None and target_pid != selected_pitch_id:
+                                other_items = get_pitch_visual_media(project_id, scenario_id, target_pid)
+                                target_item = next(
+                                    (m for m in other_items if str(m.get("id")) == target_mid),
+                                    None,
+                                )
+                            if target_item is not None:
+                                target_tags = [
+                                    t["work_element_id"]
+                                    for t in (target_item.get("tagged_work_elements") or [])
+                                    if "work_element_id" in t
+                                ]
+                                copy_visual_media_dialog(
+                                    media_id=target_item["id"],
+                                    current_pitch_id=target_pid,
+                                    current_caption=target_item.get("caption", ""),
+                                    current_sequence=target_item.get("sequence", 10),
+                                    current_tags=target_tags,
+                                    element_options=element_options,
+                                    pitch_options=pitch_options,
+                                    project_id=project_id,
+                                    scenario_id=scenario_id,
+                                    media_type=str(target_item.get("media_type") or "image"),
+                                    file_path=str(target_item.get("file_path") or ""),
+                                )
+                            else:
+                                st.session_state.pop(f"paag_copy_media_{scenario_id}", None)
+
+                    _render_pitch_visual_aids_gallery()
 
 
 _save_paag_tab_snapshot(_current_open_paag_tab)
