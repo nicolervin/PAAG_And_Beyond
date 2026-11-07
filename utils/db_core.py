@@ -1638,6 +1638,10 @@ def init_process_visual_media_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE process_visual_media ADD COLUMN annotations_json TEXT NOT NULL DEFAULT ''")
     if "original_file_path" not in cols:
         conn.execute("ALTER TABLE process_visual_media ADD COLUMN original_file_path TEXT NOT NULL DEFAULT ''")
+    if "source_part_id" not in cols:
+        conn.execute("ALTER TABLE process_visual_media ADD COLUMN source_part_id TEXT NOT NULL DEFAULT ''")
+    if "source_view_id" not in cols:
+        conn.execute("ALTER TABLE process_visual_media ADD COLUMN source_view_id TEXT NOT NULL DEFAULT ''")
 
 
 def init_ergonomics_visual_media_schema(conn: sqlite3.Connection) -> None:
@@ -1793,7 +1797,7 @@ def _sync_linked_process_work_elements(
     process_element_ids: list[str] | None = None,
     timestamp: str | None = None,
 ) -> int:
-    """Keep linked work_elements station, cycle_time_s, and model_applicability aligned with yamazumi_elements."""
+    """Keep linked work_elements operation, station, cycle_time_s, and model_applicability aligned with yamazumi_elements."""
     ts = timestamp or now_iso()
     where_clauses = [
         "e.process_element_id IS NOT NULL",
@@ -1817,6 +1821,8 @@ def _sync_linked_process_work_elements(
         f"""SELECT e.project_id,
                    a.scenario_id,
                    e.process_element_id,
+                   e.description,
+                   w.operation AS current_operation,
                    e.model_variant,
                    e.model_variants,
                    e.time_s,
@@ -1869,19 +1875,23 @@ def _sync_linked_process_work_elements(
         else:
             model_applicability = ", ".join(combined_variants)
 
+        current_operation = str(first["current_operation"] or "").strip()
+        new_operation = str(first["description"] or "").strip() or current_operation
         current_station = str(first["current_station"] or "").strip()
         current_cycle_time_s = float(first["current_cycle_time_s"] or 0.0)
         current_model_app = str(first["current_model_applicability"] or "").strip()
         if (
-            current_station != station
+            current_operation != new_operation
+            or current_station != station
             or abs(current_cycle_time_s - cycle_time_s) > 1e-9
             or current_model_app != model_applicability
         ):
             conn.execute(
                 """UPDATE work_elements
-                   SET station = ?, cycle_time_s = ?, model_applicability = ?, updated_at = ?
+                   SET operation = ?, station = ?, cycle_time_s = ?, model_applicability = ?, updated_at = ?
                    WHERE id = ? AND project_id = ? AND scenario_id = ?""",
                 (
+                    new_operation,
                     station,
                     cycle_time_s,
                     model_applicability,
@@ -1891,7 +1901,468 @@ def _sync_linked_process_work_elements(
                     scen_id,
                 ),
             )
+            if current_operation and current_operation != new_operation:
+                conn.execute(
+                    """UPDATE process_part_groups
+                       SET name = ?, updated_at = ?
+                       WHERE project_id = ? AND scenario_id = ? AND work_element_id = ?
+                         AND LOWER(TRIM(COALESCE(name, ''))) = LOWER(TRIM(?))""",
+                    (new_operation, ts, proj_id, scen_id, proc_id, current_operation),
+                )
             updated_count += 1
+    return updated_count
+
+
+def _sync_part_sourced_visual_media(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+    part_id: str | None = None,
+    timestamp: str | None = None,
+) -> int:
+    """Synchronize PAAG visual aids (direct part photos and annotator part-photo overlays) with the Parts Catalog."""
+    import time as _time
+    _sync_cache = globals().setdefault("_PART_VISUAL_SYNC_CACHE", {})
+    has_media = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='process_visual_media'"
+    ).fetchone()
+    has_parts = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='parts'"
+    ).fetchone()
+    if not has_media or not has_parts:
+        return 0
+
+    m_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(process_visual_media)").fetchall()
+    }
+    if "source_part_id" not in m_cols:
+        conn.execute(
+            "ALTER TABLE process_visual_media ADD COLUMN source_part_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "source_view_id" not in m_cols:
+        conn.execute(
+            "ALTER TABLE process_visual_media ADD COLUMN source_view_id TEXT NOT NULL DEFAULT ''"
+        )
+
+    norm_part_id = str(part_id or "").strip()
+    norm_proj_id = str(project_id or "").strip()
+    if norm_part_id and not norm_proj_id:
+        prow = conn.execute(
+            "SELECT project_id FROM parts WHERE id=?", (norm_part_id,)
+        ).fetchone()
+        if prow and prow["project_id"]:
+            norm_proj_id = str(prow["project_id"]).strip()
+    if norm_proj_id and not norm_part_id:
+        _c_entry = _sync_cache.get((str(DB_PATH), norm_proj_id))
+        if _c_entry and (_time.monotonic() - _c_entry[0]) < 2.5:
+            _m_st = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM process_visual_media WHERE project_id=?",
+                (norm_proj_id,),
+            ).fetchone()
+            _p_st = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM parts WHERE project_id=?",
+                (norm_proj_id,),
+            ).fetchone()
+            if _c_entry[1] == (
+                int(_m_st[0] or 0),
+                str(_m_st[1] or ""),
+                int(_p_st[0] or 0),
+                str(_p_st[1] or ""),
+            ):
+                return 0
+    else:
+        _sync_cache.pop((str(DB_PATH), norm_proj_id), None)
+
+    if norm_proj_id:
+        media_rows = conn.execute(
+            """SELECT id, project_id, scenario_id, pitch_id, media_type, file_path,
+                      original_file_path, annotations_json, caption, source_part_id, source_view_id
+               FROM process_visual_media
+               WHERE project_id=?""",
+            (norm_proj_id,),
+        ).fetchall()
+    else:
+        media_rows = conn.execute(
+            """SELECT id, project_id, scenario_id, pitch_id, media_type, file_path,
+                      original_file_path, annotations_json, caption, source_part_id, source_view_id
+               FROM process_visual_media"""
+        ).fetchall()
+    if not media_rows:
+        return 0
+
+    proj_ids = sorted({str(r["project_id"]) for r in media_rows if r["project_id"]})
+    if not proj_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in proj_ids)
+    part_rows = conn.execute(
+        f"""SELECT id, project_id, part_number, description, factory_nickname,
+                   image_path, original_image_path, annotations_json, image_caption, updated_at
+            FROM parts
+            WHERE project_id IN ({placeholders})""",
+        tuple(proj_ids),
+    ).fetchall()
+
+    has_part_images = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='part_images'"
+    ).fetchone()
+    supp_rows = (
+        conn.execute(
+            f"""SELECT pi.id, pi.part_id, pi.image_path, pi.original_image_path,
+                       pi.annotations_json, pi.image_type, pi.caption, pi.updated_at
+                FROM part_images pi
+                JOIN parts p ON p.id = pi.part_id
+                WHERE p.project_id IN ({placeholders})""",
+            tuple(proj_ids),
+        ).fetchall()
+        if has_part_images
+        else []
+    )
+
+    part_by_id: dict[str, dict[str, dict]] = {}
+    part_by_num: dict[str, dict[str, dict]] = {}
+    for pr in part_rows:
+        pd_row = dict(pr)
+        pid_str = str(pd_row.get("id") or "").strip()
+        prj_str = str(pd_row.get("project_id") or "").strip()
+        pnum_str = str(pd_row.get("part_number") or "").strip()
+        if prj_str and pid_str:
+            part_by_id.setdefault(prj_str, {})[pid_str] = pd_row
+        if prj_str and pnum_str:
+            part_by_num.setdefault(prj_str, {})[pnum_str.casefold()] = pd_row
+
+    supp_by_id: dict[str, dict] = {}
+    for sr in supp_rows:
+        sd_row = dict(sr)
+        sid_str = str(sd_row.get("id") or "").strip()
+        if sid_str:
+            supp_by_id[sid_str] = sd_row
+
+    def _upgrade_part_label_layout(rec: dict, table_name: str) -> None:
+        anns_s = str(rec.get("annotations_json") or "").strip()
+        if '"image"' not in anns_s:
+            return
+        try:
+            r_list = json.loads(anns_s)
+        except Exception:
+            return
+        if not isinstance(r_list, list):
+            return
+        upd_ids: set[str] = set()
+        for idx_s, sh in enumerate(r_list):
+            if isinstance(sh, dict) and sh.get("type") == "image" and str(sh.get("label") or "").strip() and sh.get("labelLayoutRev") != 2:
+                sid_l = str(sh.get("id") or "") or f"shape_{idx_s}"
+                sh["id"] = sid_l
+                sh["labelLayoutRev"] = 2
+                upd_ids.add(sid_l)
+        if not upd_ids:
+            return
+        img_str = str(rec.get("image_path") or "").strip()
+        orig_str = str(rec.get("original_image_path") or img_str).strip()
+        if not img_str or img_str.startswith(("http://", "https://")):
+            return
+        img_p = resolve_upload_path(img_str, UPLOAD_DIR) or Path(img_str)
+        orig_p = (resolve_upload_path(orig_str, UPLOAD_DIR) or Path(orig_str)) if orig_str else img_p
+        if not img_p.exists() or not img_p.is_file():
+            return
+        new_anns = json.dumps(r_list)
+        from utils.image_annotator import patch_visual_media_composite_image_shapes
+        patch_visual_media_composite_image_shapes(orig_p, img_p, new_anns, updated_shape_ids=upd_ids)
+        rec["annotations_json"] = new_anns
+        conn.execute(f"UPDATE {table_name} SET annotations_json=? WHERE id=?", (new_anns, str(rec.get("id") or "")))
+
+    for pr_map in part_by_id.values():
+        if norm_proj_id and not norm_part_id:
+            _m_st2 = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM process_visual_media WHERE project_id=?",
+                (norm_proj_id,),
+            ).fetchone()
+            _p_st2 = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM parts WHERE project_id=?",
+                (norm_proj_id,),
+            ).fetchone()
+            _sync_cache[(str(DB_PATH), norm_proj_id)] = (
+                _time.monotonic(),
+                (
+                    int(_m_st2[0] or 0),
+                    str(_m_st2[1] or ""),
+                    int(_p_st2[0] or 0),
+                    str(_p_st2[1] or ""),
+                ),
+            )
+        for prec_item in pr_map.values():
+            _upgrade_part_label_layout(prec_item, "parts")
+    for srec_item in supp_by_id.values():
+        _upgrade_part_label_layout(srec_item, "part_images")
+
+    def _resolve_part_view(prj_id: str, p_id: str, v_id: str) -> dict | None:
+        prec = part_by_id.get(prj_id, {}).get(p_id)
+        if not prec:
+            return None
+        clean_vid = str(v_id or "").strip()
+        if clean_vid.startswith("supp::"):
+            supp_id = clean_vid[6:].strip()
+            srec = supp_by_id.get(supp_id)
+            if srec and str(srec.get("part_id") or "").strip() == p_id:
+                s_img = str(srec.get("image_path") or "").strip()
+                if s_img:
+                    return {
+                        "part_id": p_id,
+                        "part_number": str(prec.get("part_number") or "").strip(),
+                        "view_id": f"supp::{supp_id}",
+                        "image_path": s_img,
+                        "original_image_path": str(srec.get("original_image_path") or s_img).strip(),
+                        "annotations_json": str(srec.get("annotations_json") or "").strip(),
+                    }
+        p_img = str(prec.get("image_path") or "").strip()
+        if not p_img:
+            return None
+        return {
+            "part_id": p_id,
+            "part_number": str(prec.get("part_number") or "").strip(),
+            "view_id": f"primary::{p_id}",
+            "image_path": p_img,
+            "original_image_path": str(prec.get("original_image_path") or p_img).strip(),
+            "annotations_json": str(prec.get("annotations_json") or "").strip(),
+        }
+
+    def _extract_shape_ids(anns_str: str) -> set[str]:
+        if not anns_str:
+            return set()
+        try:
+            items = json.loads(anns_str)
+            if not isinstance(items, list):
+                return set()
+            return {
+                str(it.get("id") or "")
+                for it in items
+                if isinstance(it, dict) and it.get("type") and it.get("type") != "__transform__"
+            }
+        except Exception:
+            return set()
+
+    ts = timestamp or now_iso()
+    updated_count = 0
+
+    for mr in media_rows:
+        m_id = str(mr["id"] or "").strip()
+        prj_id = str(mr["project_id"] or "").strip()
+        m_type = str(mr["media_type"] or "").strip()
+        m_cap = str(mr["caption"] or "").strip()
+        m_anns_str = str(mr["annotations_json"] or "").strip()
+        src_part_id = str(mr["source_part_id"] or "").strip()
+        src_view_id = str(mr["source_view_id"] or "").strip()
+
+        if not src_part_id and m_type == "image" and m_cap and m_cap.casefold() not in {"visual aid", "step visual aid"}:
+            cap_prefix = m_cap.split("—", 1)[0].strip().casefold()
+            matched_p = (
+                part_by_num.get(prj_id, {}).get(cap_prefix)
+                or part_by_num.get(prj_id, {}).get(m_cap.casefold())
+            )
+            if matched_p and str(matched_p.get("image_path") or "").strip():
+                src_part_id = str(matched_p["id"])
+                src_view_id = f"primary::{src_part_id}"
+                conn.execute(
+                    "UPDATE process_visual_media SET source_part_id=?, source_view_id=? WHERE id=?",
+                    (src_part_id, src_view_id, m_id),
+                )
+
+        if src_part_id and (not norm_part_id or src_part_id == norm_part_id):
+            v_info = _resolve_part_view(prj_id, src_part_id, src_view_id)
+            if v_info and v_info["image_path"]:
+                v_img_str = v_info["image_path"]
+                v_orig_str = v_info["original_image_path"] or v_img_str
+                v_anns = v_info["annotations_json"]
+                if v_img_str.startswith(("http://", "https://")):
+                    if str(mr["file_path"] or "").strip() != v_img_str:
+                        conn.execute(
+                            """UPDATE process_visual_media
+                               SET file_path=?, original_file_path=?, source_view_id=?, updated_at=?
+                               WHERE id=?""",
+                            (v_img_str, v_img_str, v_info["view_id"], ts, m_id),
+                        )
+                        updated_count += 1
+                else:
+                    v_img_path = resolve_upload_path(v_img_str, UPLOAD_DIR) or Path(v_img_str)
+                    v_orig_path = resolve_upload_path(v_orig_str, UPLOAD_DIR) or Path(v_orig_str)
+                    m_file_str = str(mr["file_path"] or "").strip()
+                    m_orig_str = str(mr["original_file_path"] or m_file_str).strip()
+                    m_file_path = resolve_upload_path(m_file_str, UPLOAD_DIR) or Path(m_file_str)
+                    m_orig_path = (
+                        resolve_upload_path(m_orig_str, UPLOAD_DIR) or Path(m_orig_str)
+                        if m_orig_str
+                        else m_file_path
+                    )
+                    if v_img_path.exists() and v_img_path.is_file():
+                        v_img_bytes = v_img_path.read_bytes()
+                        v_orig_bytes = (
+                            v_orig_path.read_bytes()
+                            if (v_orig_path.exists() and v_orig_path.is_file())
+                            else v_img_bytes
+                        )
+                        curr_file_bytes = (
+                            m_file_path.read_bytes()
+                            if (m_file_path.exists() and m_file_path.is_file())
+                            else b""
+                        )
+                        curr_orig_bytes = (
+                            m_orig_path.read_bytes()
+                            if (m_orig_path.exists() and m_orig_path.is_file())
+                            else b""
+                        )
+                        m_shape_ids = _extract_shape_ids(m_anns_str)
+                        v_shape_ids = _extract_shape_ids(v_anns)
+                        has_custom_paag_shapes = bool(m_shape_ids - v_shape_ids)
+                        if not has_custom_paag_shapes:
+                            if (
+                                curr_file_bytes != v_img_bytes
+                                or curr_orig_bytes != v_orig_bytes
+                                or m_anns_str != v_anns
+                            ):
+                                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                                m_file_path.write_bytes(v_img_bytes)
+                                if v_orig_bytes != v_img_bytes:
+                                    if m_orig_path == m_file_path:
+                                        suffix = m_file_path.suffix or ".png"
+                                        m_orig_path = UPLOAD_DIR / f"process_visual_{mr['pitch_id']}_{m_id}_orig{suffix}"
+                                    m_orig_path.write_bytes(v_orig_bytes)
+                                    new_orig_str = str(m_orig_path)
+                                else:
+                                    new_orig_str = str(m_file_path)
+                                conn.execute(
+                                    """UPDATE process_visual_media
+                                       SET file_path=?, original_file_path=?, annotations_json=?,
+                                           source_view_id=?, updated_at=?
+                                       WHERE id=?""",
+                                    (
+                                        str(m_file_path),
+                                        new_orig_str,
+                                        v_anns,
+                                        v_info["view_id"],
+                                        ts,
+                                        m_id,
+                                    ),
+                                )
+                                m_anns_str = v_anns
+                                updated_count += 1
+                        else:
+                            if curr_orig_bytes != v_img_bytes:
+                                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                                if m_orig_path == m_file_path:
+                                    suffix = m_file_path.suffix or ".png"
+                                    m_orig_path = UPLOAD_DIR / f"process_visual_{mr['pitch_id']}_{m_id}_orig{suffix}"
+                                m_orig_path.write_bytes(v_img_bytes)
+                                from utils.image_annotator import (
+                                    patch_visual_media_composite_image_shapes,
+                                )
+
+                                patch_visual_media_composite_image_shapes(
+                                    m_orig_path,
+                                    m_file_path,
+                                    m_anns_str,
+                                    updated_shape_ids=None,
+                                )
+                                conn.execute(
+                                    """UPDATE process_visual_media
+                                       SET original_file_path=?, source_view_id=?, updated_at=?
+                                       WHERE id=?""",
+                                    (str(m_orig_path), v_info["view_id"], ts, m_id),
+                                )
+                                updated_count += 1
+
+        if '"image"' in m_anns_str:
+            try:
+                raw_list = json.loads(m_anns_str)
+            except Exception:
+                raw_list = []
+            if isinstance(raw_list, list):
+                updated_shape_ids: set[str] = set()
+                resolved_paths_by_shape_id: dict[str, str] = {}
+                meta_changed = False
+                for s_idx, s in enumerate(raw_list):
+                    if not isinstance(s, dict) or s.get("type") != "image":
+                        continue
+                    if str(s.get("label") or "").strip() and s.get("labelLayoutRev") != 2:
+                        sid_lbl = str(s.get("id") or "") or f"shape_{s_idx}"
+                        s["id"] = sid_lbl
+                        s["labelLayoutRev"] = 2
+                        updated_shape_ids.add(sid_lbl)
+                        meta_changed = True
+                    s_pid = str(s.get("partId") or "").strip()
+                    s_pnum = str(s.get("partNumber") or s.get("label") or "").strip()
+                    s_vid = str(s.get("viewId") or "").strip()
+                    matched_p = part_by_id.get(prj_id, {}).get(s_pid) if s_pid else None
+                    if not matched_p and s_pnum:
+                        matched_p = part_by_num.get(prj_id, {}).get(s_pnum.casefold())
+                    if not matched_p:
+                        continue
+                    resolved_pid = str(matched_p["id"])
+                    if norm_part_id and resolved_pid != norm_part_id:
+                        continue
+                    v_info = _resolve_part_view(prj_id, resolved_pid, s_vid)
+                    if not v_info or not v_info["image_path"] or v_info["image_path"].startswith(("http://", "https://")):
+                        continue
+                    v_path = resolve_upload_path(v_info["image_path"], UPLOAD_DIR) or Path(v_info["image_path"])
+                    if not v_path.exists() or not v_path.is_file():
+                        continue
+                    v_bytes = v_path.read_bytes()
+                    v_sha = hashlib.sha256(v_bytes).hexdigest()[:16]
+                    sid = str(s.get("id") or "")
+                    if not sid:
+                        sid = f"shape_{s_idx}"
+                        s["id"] = sid
+                        meta_changed = True
+                    resolved_paths_by_shape_id[sid] = str(v_path)
+                    if (
+                        s.get("partId") != resolved_pid
+                        or s.get("partNumber") != v_info["part_number"]
+                        or s.get("viewId") != v_info["view_id"]
+                    ):
+                        s["partId"] = resolved_pid
+                        s["partNumber"] = v_info["part_number"]
+                        s["viewId"] = v_info["view_id"]
+                        meta_changed = True
+                    if s.get("partImageSha") != v_sha:
+                        from utils.media_cache import cached_image_data_url
+
+                        new_durl = cached_image_data_url(
+                            v_path, max_dim=480, output_format="PNG"
+                        )
+                        if new_durl:
+                            s["dataUrl"] = new_durl
+                        s["partImageSha"] = v_sha
+                        if sid:
+                            updated_shape_ids.add(sid)
+                        meta_changed = True
+
+                if updated_shape_ids or meta_changed:
+                    new_anns_str = json.dumps(raw_list)
+                    if updated_shape_ids:
+                        from utils.image_annotator import (
+                            patch_visual_media_composite_image_shapes,
+                        )
+
+                        m_file_str = str(mr["file_path"] or "").strip()
+                        m_orig_str = str(mr["original_file_path"] or m_file_str).strip()
+                        m_file_p = resolve_upload_path(m_file_str, UPLOAD_DIR) or Path(m_file_str)
+                        m_orig_p = (
+                            resolve_upload_path(m_orig_str, UPLOAD_DIR) or Path(m_orig_str)
+                            if m_orig_str
+                            else m_file_p
+                        )
+                        patch_visual_media_composite_image_shapes(
+                            m_orig_p,
+                            m_file_p,
+                            new_anns_str,
+                            updated_shape_ids=updated_shape_ids,
+                            resolved_paths_by_shape_id=resolved_paths_by_shape_id,
+                        )
+                    conn.execute(
+                        "UPDATE process_visual_media SET annotations_json=?, updated_at=? WHERE id=?",
+                        (new_anns_str, ts, m_id),
+                    )
+                    updated_count += 1
+
     return updated_count
 
 
@@ -3646,6 +4117,7 @@ def init_db() -> None:
             )
         _rebase_cross_platform_upload_paths(conn)
         _sync_linked_process_work_elements(conn, timestamp=timestamp)
+        _sync_part_sourced_visual_media(conn, timestamp=timestamp)
 
     if is_cacheable_runtime():
         ident = _db_file_identity(Path(DB_PATH))

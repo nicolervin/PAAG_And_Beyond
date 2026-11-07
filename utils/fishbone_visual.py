@@ -39,7 +39,7 @@ _HTML = """
         <span id="palette-count"></span>
       </div>
       <div class="palette-search-box">
-        <input type="text" id="palette-search" placeholder="Search parts / assemblies..." />
+        <input type="text" id="palette-search" placeholder="Search parts (press Enter to locate)..." title="Type to filter the palette; press Enter or click a part card to zoom and highlight on the Fishbone" />
       </div>
       <div class="palette-filter-row">
         <label><input type="checkbox" id="palette-unplaced-only" checked /> Unplaced only</label>
@@ -881,6 +881,9 @@ export default function renderFishbone(component) {
   }
   if (!state.clusterActiveIndices) {
     state.clusterActiveIndices = new Map()
+  }
+  if (state.activeSearchQuery === undefined) {
+    state.activeSearchQuery = ""
   }
   if (!state.connNodeOverrides) {
     state.connNodeOverrides = getSavedConnNodes(storageKey)
@@ -2036,6 +2039,7 @@ export default function renderFishbone(component) {
             e.stopPropagation()
             state.focusedPartId = item.part_id
             state.focusedSectionId = secId
+            state.activeSearchQuery = ""
             if (syncClusterActiveIndicesForSearch()) {
               state.pendingSearchZoom = true
               renderWorld()
@@ -2083,6 +2087,7 @@ export default function renderFishbone(component) {
           if (e.target.closest(".palette-replicate-btn") || e.target.closest(".palette-sec-pill")) return
           state.focusedPartId = item.part_id
           state.focusedSectionId = null
+          state.activeSearchQuery = ""
           if (syncClusterActiveIndicesForSearch()) {
             state.pendingSearchZoom = true
             renderWorld()
@@ -2103,6 +2108,40 @@ export default function renderFishbone(component) {
   }
 
   paletteSearch.oninput = () => {
+    const liveQuery = (paletteSearch.value || "").trim().toLowerCase()
+    renderPalette()
+    if (!liveQuery && (state.activeSearchQuery || state.focusedPartId)) {
+      state.activeSearchQuery = ""
+      state.focusedPartId = null
+      state.focusedSectionId = null
+      applySearchHighlightAndZoom({ zoomToMatch: false })
+    } else if (state.activeSearchQuery && liveQuery !== state.activeSearchQuery) {
+      state.activeSearchQuery = ""
+      applySearchHighlightAndZoom({ zoomToMatch: false })
+    }
+  }
+  paletteSearch.onkeydown = (e) => {
+    if (e.key === "Escape") {
+      if (state.activeSearchQuery || state.focusedPartId) {
+        state.activeSearchQuery = ""
+        state.focusedPartId = null
+        state.focusedSectionId = null
+        renderPalette()
+        applySearchHighlightAndZoom({ zoomToMatch: false })
+      }
+      return
+    }
+    if (e.key !== "Enter") return
+    e.preventDefault()
+    const committedQuery = (paletteSearch.value || "").trim().toLowerCase()
+    state.activeSearchQuery = committedQuery
+    if (!committedQuery) {
+      state.focusedPartId = null
+      state.focusedSectionId = null
+      renderPalette()
+      applySearchHighlightAndZoom({ zoomToMatch: false })
+      return
+    }
     state.focusedPartId = null
     state.focusedSectionId = null
     if (syncClusterActiveIndicesForSearch()) {
@@ -2257,7 +2296,7 @@ export default function renderFishbone(component) {
   })
 
   function syncClusterActiveIndicesForSearch() {
-    const query = (paletteSearch.value || "").trim().toLowerCase()
+    const query = (state.activeSearchQuery || "").trim().toLowerCase()
     const focusedPartId = state.focusedPartId ? String(state.focusedPartId) : null
     const focusedSectionId = state.focusedSectionId ? String(state.focusedSectionId) : null
     if (!query && !focusedPartId) return false
@@ -4352,7 +4391,7 @@ export default function renderFishbone(component) {
 
   function applySearchHighlightAndZoom(options = {}) {
     const zoomToMatch = Boolean(options.zoomToMatch)
-    const query = (paletteSearch.value || "").trim().toLowerCase()
+    const query = (state.activeSearchQuery || "").trim().toLowerCase()
     const focusedPartId = state.focusedPartId ? String(state.focusedPartId) : null
     const focusedSectionId = state.focusedSectionId ? String(state.focusedSectionId) : null
 
@@ -4494,7 +4533,8 @@ export default function renderFishbone(component) {
   // Pan interaction
   svg.onmousedown = (e) => {
     if (e.target !== svg && e.target.tagName !== "svg") return
-    if (state.focusedPartId && !(paletteSearch.value || "").trim()) {
+    if ((state.focusedPartId || state.activeSearchQuery) && !(paletteSearch.value || "").trim()) {
+      state.activeSearchQuery = ""
       state.focusedPartId = null
       state.focusedSectionId = null
       renderPalette()

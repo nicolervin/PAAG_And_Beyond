@@ -18,6 +18,7 @@ from utils.process_pitch_visual import (
     page_for_element,
     render_pitch_canvas,
     render_presentation_deck,
+    render_paag_pptx_deck,
     render_printable_paag_deck,
 )
 
@@ -762,6 +763,9 @@ class ProcessPitchVisualTests(unittest.TestCase):
         self.assertIn("fit-contain", html_letter)
         self.assertIn("11 / 8.5", html_letter)
         self.assertIn("11in 8.5in landscape", html_letter)
+        self.assertIn("grid-template-rows: minmax(0, 1fr)", html_letter)
+        self.assertIn(".paag-slide.print-letter .visual-media-box", html_letter)
+        self.assertIn("fitPrintSlideStacks", html_letter)
 
     def test_render_printable_paag_deck(self) -> None:
         slide_1 = "<section class='paag-slide print-tabloid fit-fill'>Slide 1 Content</section>"
@@ -800,7 +804,8 @@ class ProcessPitchVisualTests(unittest.TestCase):
 
         # Verify radio widgets for Print Selection, Page Format, and Image Fit exist
         scope_radio = next(r for r in app.radio if "Print Selection" in r.label)
-        self.assertTrue(any("Current slide only" in opt for opt in scope_radio.options))
+        self.assertIn("Current slide only (Slide 1/2)", scope_radio.options)
+        self.assertTrue(all("Pitch " not in opt for opt in scope_radio.options if "Current slide only" in opt))
         self.assertTrue(any("All pitches in scenario" in opt for opt in scope_radio.options))
 
         # Default page format is 8.5x11 Letter Landscape
@@ -811,6 +816,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
 
         fit_radio = next(r for r in app.radio if "Image Fit in Print" in r.label)
         self.assertTrue(any("Stretch to Fill Box" in opt for opt in fit_radio.options))
+        self.assertEqual(fit_radio.value, "Preserve Aspect Ratio")
 
         # Download HTML Deck button exists
         dl_btn = next(b for b in app.download_button if "Download HTML Deck" in b.label)
@@ -1677,11 +1683,11 @@ class ProcessPitchVisualTests(unittest.TestCase):
             self.project_id, self.scenario_id, mixed_pitch_id
         )
         elements = summary["elements"]
-        self.assertEqual(len(elements), 4)
+        self.assertEqual(len(elements), 3)
         self.assertEqual(elements[0]["work_element_id"], linked_we_id)
         self.assertEqual(elements[1]["work_element_id"], station_matched_we_id)
         self.assertEqual(elements[2]["work_element_id"], f"yam::{unlinked_yam_id}")
-        self.assertEqual(elements[3]["work_element_id"], station_only_we_id)
+        self.assertNotIn(station_only_we_id, [el["work_element_id"] for el in elements])
 
         # Save visual aid tagged to Step 2 (station-matched) and Step 3 (unlinked yamazumi)
         saved = store.save_pitch_visual_media(
@@ -1690,7 +1696,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
             pitch_id=mixed_pitch_id,
             filename="tag_test.png",
             file_bytes=b"\x89PNG\r\n\x1a\ntag_test_bytes",
-            caption="Tagging unlinked and station-matched steps",
+            caption="Visual Aid",
             tagged_work_element_ids=[
                 elements[1]["work_element_id"],
                 elements[2]["work_element_id"],
@@ -1718,13 +1724,13 @@ class ProcessPitchVisualTests(unittest.TestCase):
             self.assertEqual(y2_proc, station_matched_we_id)
             self.assertEqual(y3_proc, reconciled_step3_we_id)
 
-            # Re-fetching summary now shows real work_element_id for all 4 steps
+            # Re-fetching summary now shows real work_element_id for the 3 active Yamazumi steps
             summary_after = store.process_pitch_visual_summary(
                 self.project_id, self.scenario_id, mixed_pitch_id
             )
             self.assertEqual(
                 [el["work_element_id"] for el in summary_after["elements"]],
-                [linked_we_id, station_matched_we_id, reconciled_step3_we_id, station_only_we_id],
+                [linked_we_id, station_matched_we_id, reconciled_step3_we_id],
             )
             media_after = summary_after["visual_media"]
             self.assertEqual(len(media_after), 1)
@@ -1732,10 +1738,799 @@ class ProcessPitchVisualTests(unittest.TestCase):
                 set(media_after[0]["tagged_work_element_ids"]),
                 {station_matched_we_id, reconciled_step3_we_id},
             )
+            rendered_html = render_pitch_canvas(
+                summary_after,
+                summary_after["elements"],
+                scenario_name="Rev A Plan",
+                project_name="Test Project",
+            )
+            self.assertIn(
+                '<div class="visual-step-line"><span class="visual-tag-badge">2</span><span class="visual-tag-title" title="Step 2 Station Match">Step 2 Station Match</span></div>',
+                rendered_html,
+            )
+            self.assertIn(
+                '<div class="visual-step-line"><span class="visual-tag-badge">3</span><span class="visual-tag-title" title="Step 3 Unlinked Yamazumi">Step 3 Unlinked Yamazumi</span></div>',
+                rendered_html,
+            )
+            self.assertNotIn('<div class="caption-callout">', rendered_html)
+
+            # Update wording on the Yamazumi element and verify the visual aid step title reflects the updated wording
+            store.update_yamazumi_element(
+                self.project_id,
+                self.area_id,
+                unlinked_yam_id,
+                {
+                    "description": "Install front control bracket, run wires through hole",
+                    "pitch_id": mixed_pitch_id,
+                    "time_s": 12.0,
+                    "work_type": "Cycle",
+                    "model_variants": ["All models"],
+                },
+            )
+            summary_reworded = store.process_pitch_visual_summary(
+                self.project_id, self.scenario_id, mixed_pitch_id
+            )
+            self.assertEqual(
+                summary_reworded["elements"][2]["operation"],
+                "Install front control bracket, run wires through hole",
+            )
+            media_reworded = summary_reworded["visual_media"]
+            tag_ops = {t["work_element_id"]: t["operation"] for t in media_reworded[0]["tagged_work_elements"]}
+            self.assertEqual(
+                tag_ops.get(reconciled_step3_we_id),
+                "Install front control bracket, run wires through hole",
+            )
+            rendered_reworded = render_pitch_canvas(
+                summary_reworded,
+                summary_reworded["elements"],
+                scenario_name="Rev A Plan",
+                project_name="Test Project",
+            )
+            self.assertIn(
+                '<div class="visual-step-line"><span class="visual-tag-badge">3</span><span class="visual-tag-title" title="Install front control bracket, run wires through hole">Install front control bracket, run wires through hole</span></div>',
+                rendered_reworded,
+            )
+            self.assertNotIn("Step 3 Unlinked Yamazumi", rendered_reworded)
         finally:
             Path(saved["file_path"]).unlink(missing_ok=True)
             if saved.get("original_file_path"):
                 Path(saved["original_file_path"]).unlink(missing_ok=True)
+
+    def test_updating_part_image_or_annotations_updates_visual_aid(self) -> None:
+        import base64
+        import io
+        import json
+        from PIL import Image
+
+        def _make_png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (80, 60)) -> bytes:
+            buf = io.BytesIO()
+            Image.new("RGB", size, color).save(buf, format="PNG")
+            return buf.getvalue()
+
+        initial_part_bytes = _make_png_bytes((20, 40, 200))
+        annotated_part_bytes = _make_png_bytes((220, 30, 30))
+        base_visual_bytes = _make_png_bytes((240, 240, 240), size=(200, 150))
+
+        created_files: list[str] = []
+        try:
+            parts_df = store.project_table("parts", self.project_id)
+            self.assertFalse(parts_df.empty)
+            self.assertFalse(store.project_table(self.project_id, "parts").empty)
+            test_part_id = str(parts_df.iloc[0]["id"])
+            test_part_number = str(parts_df.iloc[0]["part_number"])
+            # 1. Set initial primary image on test_part_id
+            from utils.clipboard_image import as_uploaded_file
+            part_img_path = store.set_part_image(
+                test_part_id,
+                as_uploaded_file({"name": "pn1001_init.png", "bytes": initial_part_bytes}),
+                original_file_bytes=initial_part_bytes,
+                original_filename="pn1001_init.png",
+            )
+            created_files.append(part_img_path)
+
+            # 2a. Copy part photo directly as a pitch visual aid
+            direct_res = store.copy_part_photo_to_pitch_visual_media(
+                project_id=self.project_id,
+                scenario_id=self.scenario_id,
+                pitch_id=self.pitch_id,
+                part_id=test_part_id,
+                tagged_work_element_ids=[self.work_ids[0]],
+                sequence=10,
+                current_editor="Tester",
+            )
+            created_files.append(direct_res["file_path"])
+            if direct_res.get("original_file_path"):
+                created_files.append(direct_res["original_file_path"])
+
+            # 2b. Create a visual aid with an inset type="image" part photo shape in annotations_json
+            initial_data_url = "data:image/png;base64," + base64.b64encode(initial_part_bytes).decode("ascii")
+            inset_annotations = json.dumps(
+                [
+                    {
+                        "type": "image",
+                        "x": 20,
+                        "y": 15,
+                        "w": 100,
+                        "h": 75,
+                        "dataUrl": initial_data_url,
+                        "label": test_part_number,
+                    }
+                ]
+            )
+            inset_res = store.save_pitch_visual_media(
+                project_id=self.project_id,
+                scenario_id=self.scenario_id,
+                pitch_id=self.pitch_id,
+                filename="station_overview.png",
+                file_bytes=base_visual_bytes,
+                original_file_bytes=base_visual_bytes,
+                annotations_json=inset_annotations,
+                caption="Station with inset part photo",
+                tagged_work_element_ids=[self.work_ids[0]],
+                sequence=20,
+                current_editor="Tester",
+            )
+            created_files.append(inset_res["file_path"])
+            if inset_res.get("original_file_path"):
+                created_files.append(inset_res["original_file_path"])
+
+            # 3. Update the part image annotations in the Parts Catalog
+            new_part_img_path = store.update_part_primary_image_annotations(
+                project_id=self.project_id,
+                part_id=test_part_id,
+                annotations_json=json.dumps([{"type": "callout", "text": "1/4 hex", "x": 0.2, "y": 0.2, "tx": 0.5, "ty": 0.5}]),
+                composite_image_bytes=annotated_part_bytes,
+                current_editor="Tester",
+            )
+            created_files.append(new_part_img_path)
+
+            # 4. Verify both the direct part visual aid and the inset part photo visual aid were updated!
+            media_items = {
+                m["id"]: m
+                for m in store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+            }
+            direct_item = media_items[direct_res["id"]]
+            created_files.append(direct_item["file_path"])
+            if direct_item.get("original_file_path"):
+                created_files.append(direct_item["original_file_path"])
+            self.assertEqual(Path(direct_item["file_path"]).read_bytes(), annotated_part_bytes)
+
+            inset_item = media_items[inset_res["id"]]
+            inset_shapes = json.loads(inset_item["annotations_json"])
+            expected_data_url = "data:image/png;base64," + base64.b64encode(annotated_part_bytes).decode("ascii")
+            self.assertEqual(inset_shapes[0]["dataUrl"], expected_data_url)
+            self.assertEqual(inset_shapes[0].get("partId"), test_part_id)
+
+            # Also verify the composite image on disk for inset_item was re-rendered with the red annotated part image
+            with Image.open(inset_item["file_path"]) as comp_im:
+                comp_rgb = comp_im.convert("RGB")
+                # Center of inset box (0.1..0.6 x, 0.1..0.6 y -> pixel (70, 52) on 200x150 image)
+                r_px, g_px, b_px = comp_rgb.getpixel((70, 52))
+                self.assertGreater(r_px, 180)
+                self.assertLess(b_px, 80)
+        finally:
+            for fp in set(created_files):
+                if fp:
+                    Path(fp).unlink(missing_ok=True)
+
+
+    def test_render_paag_pptx_deck_produces_valid_pptx_with_media(self) -> None:
+        import io
+        import xml.etree.ElementTree as ET
+        import zipfile
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (120, 90), (40, 120, 200)).save(buf, format="PNG")
+        sample_png = buf.getvalue()
+
+        saved_media = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="pptx_step_photo.png",
+            file_bytes=sample_png,
+            caption="Use torque wrench at 45 Nm",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Tester",
+        )
+        try:
+            summary = store.process_pitch_visual_summary(
+                self.project_id, self.scenario_id, self.pitch_id
+            )
+            pptx_bytes = render_paag_pptx_deck(
+                [
+                    {
+                        "pitch": summary,
+                        "elements": summary.get("elements", []),
+                        "page_num": 1,
+                        "total_pages": 1,
+                    }
+                ],
+                paper_size="letter",
+                image_fit="contain",
+                scenario_name="Rev A Plan",
+                project_name="Nexus Dryer",
+                title="PAAG Export Test",
+            )
+            self.assertTrue(pptx_bytes.startswith(b"PK"))
+            with zipfile.ZipFile(io.BytesIO(pptx_bytes), "r") as zf:
+                names = set(zf.namelist())
+                self.assertIn("[Content_Types].xml", names)
+                self.assertIn("_rels/.rels", names)
+                self.assertIn("ppt/presentation.xml", names)
+                self.assertIn("ppt/slides/slide1.xml", names)
+                self.assertIn("ppt/slides/_rels/slide1.xml.rels", names)
+                media_files = [n for n in names if n.startswith("ppt/media/")]
+                self.assertGreaterEqual(len(media_files), 1)
+                for name in names:
+                    if name.endswith((".xml", ".rels")):
+                        ET.fromstring(zf.read(name))
+                slide1_text = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+                self.assertIn(summary["pitch_number"], slide1_text)
+                self.assertIn("GE Appliances Logo", slide1_text)
+                self.assertIn("Process at a Glance", slide1_text)
+                self.assertIn('numCol="2"', slide1_text)
+                self.assertIn("Project: ", slide1_text)
+                self.assertIn("Building: ", slide1_text)
+                self.assertIn("Section: ", slide1_text)
+                self.assertIn("Date: ", slide1_text)
+                self.assertIn("Scenario: ", slide1_text)
+                self.assertIn("Use torque wrench at 45 Nm", slide1_text)
+                self.assertIn("TOOLS &amp; PPE REQUIRED", slide1_text)
+                self.assertIn("YAMAZUMI", slide1_text)
+        finally:
+            Path(saved_media["file_path"]).unlink(missing_ok=True)
+            if saved_media.get("original_file_path"):
+                Path(saved_media["original_file_path"]).unlink(missing_ok=True)
+
+
+    def test_pitch_part_quantity_consume_and_handle_rules(self) -> None:
+        timestamp = store.now_iso()
+        part_ch_id = str(uuid4())
+        part_h_id = str(uuid4())
+        fb_ch_id = str(uuid4())
+        fb_h_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, updated_at)
+                   VALUES (?, ?, '308D3061P001', 'Side Panel Alabaster', ?)""",
+                (part_ch_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO parts (id, project_id, part_number, description, updated_at)
+                   VALUES (?, ?, '999D0001P001', 'Handled Only Subframe', ?)""",
+                (part_h_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 10, 1.0, 'North Side Panel Press', ?)""",
+                (fb_ch_id, self.project_id, self.section_id, part_ch_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 20, 1.0, 'Upstream Frame', ?)""",
+                (fb_h_id, self.project_id, self.section_id, part_h_id, timestamp),
+            )
+
+        upstream_we_id = str(uuid4())
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation, model_applicability, updated_at)
+                   VALUES (?, ?, ?, 5, '01-SW1-050', 'Consume Subframe Upstream', 'All', ?)""",
+                (upstream_we_id, self.project_id, self.scenario_id, timestamp),
+            )
+        store.save_process_part_group(
+            self.project_id,
+            self.scenario_id,
+            upstream_we_id,
+            self.section_id,
+            str(uuid4()),
+            "Upstream Frame Consume",
+            "Use all",
+            1,
+            [part_h_id],
+            handling_types_by_part={part_h_id: "Consume"},
+            fishbone_assignment_ids_by_part={part_h_id: fb_h_id},
+        )
+
+        # Step 1: Consume 308D3061P001 (qty 1)
+        store.save_process_part_group(
+            self.project_id,
+            self.scenario_id,
+            self.work_ids[0],
+            self.section_id,
+            str(uuid4()),
+            "Panel Consume",
+            "Use all",
+            1,
+            [part_ch_id],
+            handling_types_by_part={part_ch_id: "Consume"},
+            fishbone_assignment_ids_by_part={part_ch_id: fb_ch_id},
+        )
+        # Step 2: Handle 308D3061P001 AND Handle 999D0001P001
+        store.save_process_part_group(
+            self.project_id,
+            self.scenario_id,
+            self.work_ids[1],
+            self.section_id,
+            str(uuid4()),
+            "Panel & Frame Handle",
+            "Use all",
+            1,
+            [part_ch_id, part_h_id],
+            handling_types_by_part={part_ch_id: "Handle", part_h_id: "Handle"},
+        )
+
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        parts_by_num = {p["part_number"]: p for p in summary["parts"]}
+        # 1. Part with both Consume (qty 1) and Handle on pitch shows Consume quantity only (1.0)
+        self.assertEqual(parts_by_num["308D3061P001"]["quantity"], 1.0)
+        self.assertEqual(set(parts_by_num["308D3061P001"]["handling_types"]), {"Consume", "Handle"})
+        # 2. Part with only Handle on pitch has None quantity
+        self.assertIsNone(parts_by_num["999D0001P001"]["quantity"])
+        self.assertEqual(set(parts_by_num["999D0001P001"]["handling_types"]), {"Handle"})
+
+        rendered_html = render_pitch_canvas(
+            summary,
+            summary["elements"],
+            scenario_name="Rev A Plan",
+            project_name="Nexus Dryer",
+        )
+        self.assertIn('<td class="col-qty">1</td>', rendered_html)
+        self.assertIn('<td class="col-qty"></td>', rendered_html)
+        self.assertNotIn('<td class="col-qty">2</td>', rendered_html)
+
+    def test_part_has_model_variants_ignores_same_prefix_all_model_hardware(self) -> None:
+        placements_df = pd.DataFrame(
+            [
+                {
+                    "part_id": "part_screw_341",
+                    "part_number": "8911201P341",
+                    "section_id": "sec_mbb",
+                    "step_number": 1,
+                    "variant_group": "8911201P227, 8911201P281, 8911201P679",
+                    "model_applicability": "All",
+                },
+                {
+                    "part_id": "part_brkt_nrml",
+                    "part_number": "308D1405P001",
+                    "section_id": "sec_mbb",
+                    "step_number": 1,
+                    "variant_group": "",
+                    "model_applicability": "GFD36ESMB0WW, GFD56ESMB0WW",
+                },
+                {
+                    "part_id": "part_brkt_long",
+                    "part_number": "308D1406P001",
+                    "section_id": "sec_mbb",
+                    "step_number": 1,
+                    "variant_group": "",
+                    "model_applicability": "GFV36ESSB0WW",
+                },
+                {
+                    "part_id": "part_stack_a",
+                    "part_number": "308D9001P001",
+                    "section_id": "sec_mbb",
+                    "step_number": 2,
+                    "variant_group": "",
+                    "model_applicability": "All",
+                },
+                {
+                    "part_id": "part_stack_b",
+                    "part_number": "308D9002P001",
+                    "section_id": "sec_mbb",
+                    "step_number": 2,
+                    "variant_group": "",
+                    "model_applicability": "All",
+                },
+            ]
+        )
+        # 1. All-model hardware screw with auto-grouped drawing prefix peers is NOT a model variant
+        self.assertFalse(
+            store.part_has_model_variants(
+                "part_screw_341",
+                placements_df,
+                section_id="sec_mbb",
+                fallback_model_applicability="All",
+            )
+        )
+        # 2. Model-specific brackets ARE model variant parts
+        self.assertTrue(
+            store.part_has_model_variants(
+                "part_brkt_nrml",
+                placements_df,
+                section_id="sec_mbb",
+                fallback_model_applicability="GFD36ESMB0WW, GFD56ESMB0WW",
+            )
+        )
+        self.assertTrue(
+            store.part_has_model_variants(
+                "part_brkt_long",
+                placements_df,
+                section_id="sec_mbb",
+                fallback_model_applicability="GFV36ESSB0WW",
+            )
+        )
+        # 3. Explicitly canvas-stacked parts (step_number > 1 with >=2 peers in section) ARE model variants
+        self.assertTrue(
+            store.part_has_model_variants(
+                "part_stack_a",
+                placements_df,
+                section_id="sec_mbb",
+                fallback_model_applicability="All",
+            )
+        )
+
+    def test_copy_visual_media_across_pitches_preserves_independent_annotations(self) -> None:
+        dest_pitch_id = "pitch_dest_copy_test"
+        dest_work_id = "we_dest_copy_test"
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, updated_at)
+                   VALUES (?, ?, ?, '01-SW1-052', 'Destination Pitch', ?)""",
+                (dest_pitch_id, self.project_id, self.area_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO work_elements
+                   (id, project_id, scenario_id, sequence, station, operation,
+                    model_applicability, updated_at)
+                   VALUES (?, ?, ?, 10, '01-SW1-052', 'Install side panel on P2', 'All', ?)""",
+                (dest_work_id, self.project_id, self.scenario_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, process_element_id,
+                    description, time_s, sequence, updated_at)
+                   VALUES ('yam-dest-1', ?, ?, ?, ?, 'Install side panel on P2', 12.0, 10, ?)""",
+                (self.project_id, self.area_id, dest_pitch_id, dest_work_id, timestamp),
+            )
+
+        initial_annotations = '[{"type":"callout","text":"Step 1 on P1","x":0.2,"y":0.3}]'
+        src_media = store.save_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            pitch_id=self.pitch_id,
+            filename="panel_callout.png",
+            file_bytes=b"\x89PNG\r\n\x1a\ncomposite_p1_bytes",
+            original_file_bytes=b"\x89PNG\r\n\x1a\nclean_base_bytes",
+            annotations_json=initial_annotations,
+            caption="P1 Side Panel Callout",
+            tagged_work_element_ids=[self.work_ids[0]],
+            sequence=10,
+            current_editor="Tester",
+        )
+
+        copied_media = store.copy_pitch_visual_media(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            media_id=src_media["id"],
+            target_pitch_id=dest_pitch_id,
+            caption="P2 Side Panel Callout",
+            sequence=15,
+            tagged_work_element_ids=[dest_work_id],
+            current_editor="Tester",
+        )
+        self.assertNotEqual(copied_media["id"], src_media["id"])
+        self.assertEqual(copied_media["pitch_id"], dest_pitch_id)
+        self.assertEqual(copied_media["annotations_json"], initial_annotations)
+        self.assertNotEqual(copied_media["file_path"], src_media["file_path"])
+        self.assertNotEqual(copied_media["original_file_path"], src_media["original_file_path"])
+        self.assertTrue(Path(copied_media["file_path"]).exists())
+        self.assertTrue(Path(copied_media["original_file_path"]).exists())
+
+        # Editing annotations on the destination pitch must not alter the source pitch's visual aid
+        updated_dest_annotations = '[{"type":"callout","text":"Edited for P2","x":0.5,"y":0.6}]'
+        store.update_pitch_visual_annotations(
+            project_id=self.project_id,
+            scenario_id=self.scenario_id,
+            media_id=copied_media["id"],
+            annotations_json=updated_dest_annotations,
+            composite_image_bytes=b"\x89PNG\r\n\x1a\ncomposite_p2_updated_bytes",
+            current_editor="Tester",
+        )
+
+        p1_items = store.get_pitch_visual_media(self.project_id, self.scenario_id, self.pitch_id)
+        p2_items = store.get_pitch_visual_media(self.project_id, self.scenario_id, dest_pitch_id)
+        src_reloaded = next(m for m in p1_items if m["id"] == src_media["id"])
+        dest_reloaded = next(m for m in p2_items if m["id"] == copied_media["id"])
+
+        self.assertEqual(src_reloaded["annotations_json"], initial_annotations)
+        self.assertEqual(Path(src_reloaded["file_path"]).read_bytes(), b"\x89PNG\r\n\x1a\ncomposite_p1_bytes")
+        self.assertEqual(dest_reloaded["annotations_json"], updated_dest_annotations)
+        self.assertEqual(Path(dest_reloaded["file_path"]).read_bytes(), b"\x89PNG\r\n\x1a\ncomposite_p2_updated_bytes")
+        self.assertEqual(Path(dest_reloaded["original_file_path"]).read_bytes(), b"\x89PNG\r\n\x1a\nclean_base_bytes")
+
+    def test_paag_slide_header_logo_and_detail_box_fields(self) -> None:
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE projects SET name=?, building_location=? WHERE id=?",
+                ("GFD36", "AP1", self.project_id),
+            )
+        summary = store.process_pitch_visual_summary(
+            self.project_id, self.scenario_id, self.pitch_id
+        )
+        self.assertEqual(summary["project_name"], "GFD36")
+        self.assertEqual(summary["building_location"], "AP1")
+        self.assertEqual(summary["section_name"], "Main")
+
+        html_out = render_pitch_canvas(
+            summary,
+            summary.get("elements", []),
+            generated_on=date(2026, 4, 20),
+        )
+        self.assertIn("header-logo-img", html_out)
+        self.assertIn('<div class="header-doc-title">Process at a Glance</div>', html_out)
+        self.assertIn("<div><strong>Project:</strong> GFD36</div>", html_out)
+        self.assertIn("<div><strong>Building:</strong> AP1</div>", html_out)
+        self.assertIn("<div><strong>Section:</strong> Main</div>", html_out)
+        self.assertIn("<div><strong>Date:</strong> April 20, 2026</div>", html_out)
+        self.assertIn(f"<div><strong>Scenario:</strong> {summary['scenario_name']}</div>", html_out)
+
+    def test_inset_part_photo_renders_entire_photo_above_label_footer(self) -> None:
+        import base64
+        import io
+        from PIL import Image
+        from utils.image_annotator import _draw_annotator_shape_pil
+
+        # Create a 100x100 part photo whose bottom 20px is bright green (0, 220, 0)
+        part_im = Image.new("RGBA", (100, 100), (220, 0, 0, 255))
+        for py in range(80, 100):
+            for px in range(100):
+                part_im.putpixel((px, py), (0, 220, 0, 255))
+        buf = io.BytesIO()
+        part_im.save(buf, format="PNG")
+        d_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+        canvas = Image.new("RGBA", (300, 300), (255, 255, 255, 255))
+        shape = {
+            "id": "sh_latch",
+            "type": "image",
+            "x": 20,
+            "y": 20,
+            "w": 120,
+            "h": 140,
+            "dataUrl": d_url,
+            "label": "308D3028P001",
+            "color": "#0284c7",
+            "strokeWidth": 3,
+        }
+        _draw_annotator_shape_pil(canvas, shape, 1.0, 1.0)
+
+        # Verify the bottom-most green strip of the part photo is visible above the dark footer banner
+        green_pixels_found = 0
+        for py in range(25, 155):
+            r, g, b, _ = canvas.getpixel((80, py))
+            if g > 180 and r < 50 and b < 50:
+                green_pixels_found += 1
+        self.assertGreater(
+            green_pixels_found,
+            8,
+            "Bottom details of the part photo should remain visible above the part-number footer.",
+        )
+
+    def test_sync_model_variant_placement_selections_populates_tied_variants(self) -> None:
+        import pandas as pd
+
+        all_placements = pd.DataFrame(
+            [
+                {
+                    "id": "fb-p1-a",
+                    "part_id": "pid-1",
+                    "part_number": "308D3012P001",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Left",
+                },
+                {
+                    "id": "fb-p1-b",
+                    "part_id": "pid-1",
+                    "part_number": "308D3012P001",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Right",
+                },
+                {
+                    "id": "fb-p2-a",
+                    "part_id": "pid-2",
+                    "part_number": "308D3012P002",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Left",
+                },
+                {
+                    "id": "fb-p2-b",
+                    "part_id": "pid-2",
+                    "part_number": "308D3012P002",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Right",
+                },
+                {
+                    "id": "fb-p3-a",
+                    "part_id": "pid-3",
+                    "part_number": "308D3012P003",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Left",
+                },
+                {
+                    "id": "fb-p3-b",
+                    "part_id": "pid-3",
+                    "part_number": "308D3012P003",
+                    "section_id": "sec-cab",
+                    "section_name": "Cabinet & Console",
+                    "use_description": "Front Panel Right",
+                },
+            ]
+        )
+
+        def _opts_for(part_idx: int) -> pd.DataFrame:
+            return pd.DataFrame(
+                [
+                    {
+                        "fishbone_assignment_id": f"fb-p{part_idx}-a",
+                        "section_id": "sec-cab",
+                        "section_name": "Cabinet & Console",
+                        "use_description": "Front Panel Left",
+                        "can_consume": True,
+                        "can_handle": False,
+                    },
+                    {
+                        "fishbone_assignment_id": f"fb-p{part_idx}-b",
+                        "section_id": "sec-cab",
+                        "section_name": "Cabinet & Console",
+                        "use_description": "Front Panel Right",
+                        "can_consume": True,
+                        "can_handle": False,
+                    },
+                ]
+            )
+
+        entries = [
+            {
+                "part_id": "pid-1",
+                "part_number": "308D3012P001",
+                "is_model_variant": True,
+                "handling_type": "Consume",
+                "placement_key": "loc_pid_1",
+                "placement_options": _opts_for(1),
+            },
+            {
+                "part_id": "pid-2",
+                "part_number": "308D3012P002",
+                "is_model_variant": True,
+                "handling_type": "Consume",
+                "placement_key": "loc_pid_2",
+                "placement_options": _opts_for(2),
+            },
+            {
+                "part_id": "pid-3",
+                "part_number": "308D3012P003",
+                "is_model_variant": True,
+                "handling_type": "Consume",
+                "placement_key": "loc_pid_3",
+                "placement_options": _opts_for(3),
+            },
+        ]
+
+        # 1. Selecting location on 308D3012P001 populates 308D3012P002 and 308D3012P003
+        session_state: dict = {
+            "loc_pid_1": "fb-p1-a",
+            "loc_pid_2": None,
+            "loc_pid_3": None,
+        }
+        store.sync_model_variant_placement_selections(
+            entries, all_placements, session_state
+        )
+        self.assertEqual(session_state["loc_pid_1"], "fb-p1-a")
+        self.assertEqual(session_state["loc_pid_2"], "fb-p2-a")
+        self.assertEqual(session_state["loc_pid_3"], "fb-p3-a")
+
+        # 2. Changing location on 308D3012P003 updates 308D3012P001 and 308D3012P002
+        session_state["loc_pid_3"] = "fb-p3-b"
+        store.sync_model_variant_placement_selections(
+            entries, all_placements, session_state
+        )
+        self.assertEqual(session_state["loc_pid_1"], "fb-p1-b")
+        self.assertEqual(session_state["loc_pid_2"], "fb-p2-b")
+        self.assertEqual(session_state["loc_pid_3"], "fb-p3-b")
+
+    def test_duplicate_yamazumi_elements_copies_to_destination_pitch_in_active_scenario(
+        self,
+    ) -> None:
+        area_id = self.area_id
+        pitch_a_id = store.add_yamazumi_pitch(
+            self.project_id,
+            area_id,
+            "01-ML1-001",
+            "Station 1",
+            "Active",
+            ["All models", "Feature A"],
+        )
+        pitch_b_id = store.add_yamazumi_pitch(
+            self.project_id,
+            area_id,
+            "01-ML1-002",
+            "Station 2",
+            "Active",
+            ["All models"],
+        )
+        elem_id = store.add_yamazumi_element(
+            self.project_id,
+            area_id,
+            pitch_a_id,
+            {
+                "description": "Install door latch",
+                "time_s": 14.5,
+                "model_variants": ["Feature A"],
+                "work_type": "Cycle",
+                "work_region": "None",
+            },
+        )
+
+        # Copy work element from Pitch A to Pitch B in the active scenario
+        result = store.duplicate_yamazumi_elements(
+            self.project_id,
+            self.scenario_id,
+            [elem_id],
+            target_pitch_id=pitch_b_id,
+            editor_name="IE Collaborator",
+        )
+        self.assertEqual(result["copied_count"], 1)
+        self.assertEqual(result["target_pitch_id"], pitch_b_id)
+        self.assertEqual(result["target_pitch_number"], "01-ML1-002")
+        self.assertIn("Feature A", result["enabled_variants"])
+
+        elements_df = store.yamazumi_elements(self.project_id, area_id)
+        pitch_b_elems = elements_df.loc[
+            elements_df["pitch_id"].astype(str) == str(pitch_b_id)
+        ]
+        self.assertEqual(len(pitch_b_elems), 1)
+        self.assertEqual(
+            str(pitch_b_elems.iloc[0]["description"]), "Install door latch"
+        )
+
+        # Verify copying to a pitch in another scenario is rejected
+        other_scenario_id = str(uuid4())
+        other_area_id = str(uuid4())
+        other_pitch_id = str(uuid4())
+        timestamp = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO planning_scenarios
+                   (id, project_id, name, revision_label, status, created_at, updated_at)
+                   VALUES (?, ?, 'Other Scenario', 'B', 'Draft', ?, ?)""",
+                (other_scenario_id, self.project_id, timestamp, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_areas
+                   (id, project_id, scenario_id, section_id, name, updated_at)
+                   VALUES (?, ?, ?, ?, 'Other area', ?)""",
+                (other_area_id, self.project_id, other_scenario_id, self.section_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_pitches
+                   (id, project_id, area_id, pitch_number, pitch_name, status, updated_at)
+                   VALUES (?, ?, ?, '01-ML1-099', 'Other Station', 'Active', ?)""",
+                (other_pitch_id, self.project_id, other_area_id, timestamp),
+            )
+        with self.assertRaises(ValueError):
+            store.duplicate_yamazumi_elements(
+                self.project_id,
+                self.scenario_id,
+                [elem_id],
+                target_pitch_id=other_pitch_id,
+                editor_name="IE Collaborator",
+            )
 
 
 if __name__ == "__main__":

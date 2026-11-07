@@ -7,6 +7,23 @@ from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
+import importlib as _importlib
+import sys as _sys
+
+if "utils.model_part_store" in _sys.modules and getattr(_sys.modules["utils.model_part_store"], "_MODEL_PART_STORE_REV_20261106", 0) < 2:
+    if "utils.image_annotator" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.image_annotator"])
+    if "utils.db_core" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.db_core"])
+    _importlib.reload(_sys.modules["utils.model_part_store"])
+    if "utils.process_store" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.process_store"])
+    if "utils.store" in _sys.modules and hasattr(_sys.modules["utils.store"], "_refresh_domain_modules"):
+        _sys.modules["utils.store"]._refresh_domain_modules()
+    if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
+        _sys.modules["utils.cache_store"].get_data_cache().clear()
+if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
+    _importlib.reload(_sys.modules["utils.image_annotator"])
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image
 from utils.image_annotator import decode_data_url, image_annotator
@@ -1954,7 +1971,7 @@ def annotate_part_primary_image_dialog(part_row: dict, active_project_id: str) -
             or ""
         )
         if prim_conflict_res != "overwrite":
-            live_parts_df = project_table(active_project_id, "parts")
+            live_parts_df = project_table("parts", active_project_id)
             live_match = live_parts_df.loc[live_parts_df["id"].astype(str) == str(part_row["id"])] if not live_parts_df.empty else pd.DataFrame()
             if not live_match.empty:
                 live_ann = str(live_match.iloc[0].get("annotations_json") or "")

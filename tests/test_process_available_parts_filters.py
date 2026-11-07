@@ -2183,3 +2183,66 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
 
 
 
+    def test_placement_location_dropdown_shows_fishbone_section_name_when_use_description_blank(
+        self,
+    ) -> None:
+        part_id = str(uuid4())
+        assign_id = str(uuid4())
+        yam_id = str(uuid4())
+        timestamp = store.now_iso()
+
+        with store.connection() as conn:
+            conn.execute(
+                """INSERT INTO parts
+                   (id, project_id, part_number, description, factory_nickname, model_applicability, updated_at)
+                   VALUES (?, ?, 'PRT-LOC-SEC', 'Side Panel Part', 'Side Panel', 'All', ?)""",
+                (part_id, self.project_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO fishbone_part_assignments
+                   (id, project_id, section_id, part_id, sequence, quantity, use_description, updated_at)
+                   VALUES (?, ?, ?, ?, 10, 1, '', ?)""",
+                (assign_id, self.project_id, self.section_id, part_id, timestamp),
+            )
+            conn.execute(
+                """INSERT INTO yamazumi_elements
+                   (id, project_id, area_id, pitch_id, model_variant, model_variants,
+                    work_type, description, time_s, sequence, updated_at)
+                   VALUES (?, ?, ?, ?, 'All models', '["All models"]', 'Cycle',
+                           'Install side panel', 10.0, 40, ?)""",
+                (yam_id, self.project_id, self.area_id, self.pitch_id, timestamp),
+            )
+
+        app = AppTest.from_file(str(store.ROOT / "app_pages/process.py"), default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["scenario_id"] = self.scenario_id
+        app.session_state["current_editor"] = "Location Tester"
+
+        work_key = f"process_yamazumi_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        part_key = f"process_part_source_{self.scenario_id}_{self.section_id}__editor_instance_0"
+        placement_key = (
+            f"process_pairing_location_{self.scenario_id}_{self.section_id}_"
+            f"{yam_id}_{part_id}"
+        )
+        app.session_state[work_key] = {
+            "selection": {"rows": [0], "columns": [], "cells": []}
+        }
+        app.session_state[part_key] = {
+            "selection": {"rows": [0], "columns": [], "cells": []}
+        }
+        app.run(timeout=30)
+        self.assertEqual(list(app.exception), [])
+
+        loc_sb = app.selectbox(key=placement_key)
+        self.assertEqual(loc_sb.value, assign_id)
+        formatted_labels = [loc_sb.format_func(opt) for opt in loc_sb.options]
+        self.assertTrue(
+            any("Main · Fishbone quantity 1" in lbl for lbl in formatted_labels),
+            msg=f"formatted_labels={formatted_labels}",
+        )
+        self.assertFalse(
+            any("No location recorded" in lbl for lbl in formatted_labels),
+            msg=f"formatted_labels={formatted_labels}",
+        )
+
+

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import streamlit.components.v1 as components
 from html import escape
 
 import pandas as pd
@@ -15,6 +17,7 @@ from utils.store import (
     complexity_visual_part_rules,
     deduplicate_visual_box_parts,
     delete_project_models,
+    get_project,
     model_planning_snapshot,
     part_feature_rules,
     potential_duplicate_models,
@@ -1171,7 +1174,18 @@ else:
         confirm_duplicate_model_save()
 
     st.divider()
-    editable_table_heading("Complexity tree visual")
+    visual_heading_cols = st.columns([6, 1], vertical_alignment="bottom")
+    with visual_heading_cols[0]:
+        editable_table_heading("Complexity tree visual")
+    with visual_heading_cols[1]:
+        if st.button(
+            "Print",
+            icon=":material/print:",
+            key=f"btn_print_complexity_tree_visual_{project_id}",
+            width="stretch",
+            help="Print or export the Complexity tree visual to PDF",
+        ):
+            st.session_state[f"complexity_tree_print_active_{project_id}"] = True
     category_values = sorted(
         {
             str(category).strip()
@@ -1606,6 +1620,673 @@ else:
             )
         visual_html.append("</div>")
         st.markdown("".join(visual_html), unsafe_allow_html=True)
+
+    def _build_complexity_tree_grid_for_print(
+        target_categories: list[str],
+        target_model_labels: list[str],
+        target_feature_displays: list[str],
+    ) -> str | None:
+        if not target_categories or not target_model_labels or not target_feature_displays:
+            return None
+        cat_order = {cat: idx for idx, cat in enumerate(target_categories)}
+        p_features = (
+            active_features.loc[
+                active_features["category"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .isin(target_categories)
+            ]
+            .assign(
+                _category_order=lambda df: df["category"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .map(cat_order)
+            )
+            .sort_values(by="_category_order", kind="stable")
+            .drop(columns=["_category_order"])
+        )
+        if p_features.empty or visual_models.empty:
+            return None
+        f_ids = [str(fid) for fid in p_features["id"]]
+        grp_by_vals: dict[tuple[str, ...], dict[str, object]] = {}
+        for _, m_row in visual_models.iterrows():
+            m_id = str(m_row["id"])
+            if m_id not in visual_tree.index:
+                continue
+            vals = tuple(
+                "" if pd.isna(visual_tree.at[m_id, fid])
+                else str(visual_tree.at[m_id, fid]).strip()
+                for fid in f_ids
+            )
+            grp = grp_by_vals.setdefault(
+                vals,
+                {"model_ids": [], "model_names": [], "model_numbers": []},
+            )
+            grp["model_ids"].append(m_id)
+            grp["model_names"].append(str(m_row["display_name"] or "").strip())
+            grp["model_numbers"].append(str(m_row["model_number"]).strip())
+        if not grp_by_vals:
+            return None
+        v_ranks: list[dict[str, int]] = [{} for _ in range(len(f_ids))]
+        for vals in grp_by_vals:
+            for idx, val in enumerate(vals):
+                if val not in v_ranks[idx]:
+                    v_ranks[idx][val] = len(v_ranks[idx])
+        s_keys = sorted(
+            grp_by_vals.keys(),
+            key=lambda vals: tuple(v_ranks[idx][val] for idx, val in enumerate(vals)),
+        )
+        p_groups = [grp_by_vals[k] for k in s_keys]
+        g_cols = len(p_groups)
+        g_tmpl = f"minmax(130px, 1.2fr) repeat({g_cols}, minmax(90px, 1fr))"
+
+        def _grp_model_lines(grp_obj: dict[str, object]) -> list[str]:
+            if target_model_labels == ["Model name"]:
+                return [
+                    escape(str(lbl or "Model name not defined"))
+                    for lbl in dict.fromkeys(grp_obj["model_names"])
+                ]
+            if target_model_labels == ["Model number"]:
+                return [escape(str(lbl)) for lbl in grp_obj["model_numbers"]]
+            res_lines: list[str] = []
+            for m_name, m_num in zip(grp_obj["model_names"], grp_obj["model_numbers"]):
+                for l_type in target_model_labels:
+                    if l_type == "Model name":
+                        res_lines.append(escape(str(m_name or "Model name not defined")))
+                    elif l_type == "Model number":
+                        res_lines.append(escape(str(m_num)))
+            return res_lines
+
+        grp_lbl_lines = [_grp_model_lines(g) for g in p_groups]
+        m_hdr_height = max(42, max(len(lns) for lns in grp_lbl_lines) * 22 + 12)
+        out_html = [
+            f'<div class="complexity-visual-grid" style="display:grid;grid-template-columns:{g_tmpl};'
+            'gap:10px 8px;align-items:center;">',
+            '<div style="font-weight:700;color:#0f172a;">Model</div>',
+        ]
+        for lns in grp_lbl_lines:
+            m_lbls = "<br>".join(lns)
+            out_html.append(
+                '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;color:#0f172a;background:#ffffff;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{m_hdr_height}px;height:100%;'
+                'box-sizing:border-box;display:flex;align-items:center;'
+                'justify-content:center;text-align:center;">'
+                f"{m_lbls}</div>"
+            )
+        out_html.append("<div></div>")
+        out_html.extend(
+            '<div style="height:12px;width:0;border-left:2px solid #475569;margin:auto;"></div>'
+            for _ in p_groups
+        )
+
+        p_show_parts = any(
+            m in target_feature_displays for m in ("Part number", "Part name")
+        )
+        p_rules_map: dict[tuple[str, str], list[tuple[str, set[str] | None]]] = {}
+        p_desc_map: dict[str, set[str]] = {}
+        p_name_map: dict[str, str] = {}
+        if p_show_parts:
+            p_rules_map, p_desc_map = complexity_visual_part_rules(project_id)
+            if "Part name" in target_feature_displays:
+                p_df = project_table("parts", project_id)
+                if not p_df.empty:
+                    for r_pn, r_desc in zip(p_df["part_number"], p_df["description"]):
+                        pk = str(r_pn or "").strip().upper()
+                        pn_val = str(r_desc or "").strip()
+                        if pk and (pk not in p_name_map or (pn_val and not p_name_map[pk])):
+                            p_name_map[pk] = pn_val
+
+        def _p_box_part_lines(m_parts: list[str], p_modes: list[str]) -> list[str]:
+            if p_modes == ["Part number"]:
+                return [escape(pn) for pn in m_parts]
+            if p_modes == ["Part name"]:
+                return [
+                    escape(lbl)
+                    for lbl in dict.fromkeys(
+                        p_name_map.get(pn.upper(), "") or "Part name not defined"
+                        for pn in m_parts
+                    )
+                ]
+            p_lines: list[str] = []
+            for pn in m_parts:
+                p_nm = p_name_map.get(pn.upper(), "") or "Part name not defined"
+                for md in p_modes:
+                    if md == "Part number":
+                        p_lines.append(escape(pn))
+                    elif md == "Part name":
+                        p_lines.append(escape(p_nm))
+            return p_lines
+
+        r_hues = [220, 145, 35, 295, 5, 180, 75, 255, 330, 110]
+        f_cnt = len(p_features)
+        for f_idx, (_, f_row) in enumerate(p_features.iterrows()):
+            fid = str(f_row["id"])
+            f_choices = [
+                str(c).strip()
+                for c in json.loads(f_row["allowed_values"] or "[]")
+                if str(c).strip()
+            ]
+            c_by_choice = {
+                c: f"hsl({r_hues[f_idx % len(r_hues)]}, 65%, {max(38, 92 - idx * 8)}%)"
+                for idx, c in enumerate(f_choices)
+            }
+            f_name = str(f_row["name"]).strip()
+            f_cat = str(f_row.get("category") or "").strip()
+            f_row_lbl = (
+                f"{f_cat} · {f_name}"
+                if len(target_categories) > 1 and f_cat
+                else f_name
+            )
+            out_html.append(
+                f'<div style="font-weight:700;color:#0f172a;">{escape(f_row_lbl)}</div>'
+            )
+            f_vals: list[str] = []
+            g_parts_col: list[list[str]] = []
+            for grp in p_groups:
+                m_id = grp["model_ids"][0]
+                v_raw = visual_tree.at[m_id, fid]
+                s_val = "" if pd.isna(v_raw) else str(v_raw).strip()
+                f_vals.append(s_val)
+                if p_show_parts and s_val:
+                    g_models = {str(m).strip() for m in grp.get("model_numbers", []) if str(m).strip()}
+                    raw_m = [
+                        pn
+                        for pn, app_m in p_rules_map.get((fid, s_val), [])
+                        if app_m is None or bool(g_models & app_m)
+                    ]
+                    g_parts_col.append(deduplicate_visual_box_parts(raw_m, p_desc_map))
+                else:
+                    g_parts_col.append([])
+            st_idx = 0
+            while st_idx < len(f_vals):
+                end_idx = st_idx + 1
+                while (
+                    end_idx < len(f_vals)
+                    and f_vals[end_idx] == f_vals[st_idx]
+                    and (not p_show_parts or g_parts_col[end_idx] == g_parts_col[st_idx])
+                ):
+                    end_idx += 1
+                s_val = f_vals[st_idx]
+                bg = c_by_choice.get(s_val, "#f1f5f9")
+                c_i = f_choices.index(s_val) if s_val in f_choices else -1
+                txt_col = "#ffffff" if c_i >= 4 else "#17324d"
+                if not s_val:
+                    txt_col = "#64748b"
+                    box_lbl = escape("Not assigned")
+                elif target_feature_displays == ["Feature"]:
+                    box_lbl = escape(s_val)
+                elif "Feature" not in target_feature_displays:
+                    m_parts = g_parts_col[st_idx]
+                    if m_parts:
+                        box_lbl = "<br>".join(_p_box_part_lines(m_parts, target_feature_displays))
+                    else:
+                        txt_col = "#64748b"
+                        box_lbl = escape("No parts assigned")
+                else:
+                    m_parts = g_parts_col[st_idx]
+                    p_modes = [
+                        m for m in target_feature_displays if m in ("Part number", "Part name")
+                    ]
+                    f_between = (
+                        len(p_modes) == 2 and target_feature_displays.index("Feature") == 1
+                    )
+                    segs: list[str] = []
+                    emitted = False
+                    for d_mode in target_feature_displays:
+                        if d_mode == "Feature":
+                            segs.append(escape(s_val))
+                        elif not m_parts:
+                            if not emitted:
+                                segs.append(
+                                    f'<span style="font-weight:400;opacity:0.8;">{escape("No parts assigned")}</span>'
+                                )
+                                emitted = True
+                        elif f_between:
+                            m_lns = _p_box_part_lines(m_parts, [d_mode])
+                            segs.append(f'<span style="font-weight:400;">{"<br>".join(m_lns)}</span>')
+                        elif not emitted:
+                            c_lns = _p_box_part_lines(m_parts, p_modes)
+                            segs.append(f'<span style="font-weight:400;">{"<br>".join(c_lns)}</span>')
+                            emitted = True
+                    box_lbl = "<br>".join(segs)
+                out_html.append(
+                    f'<div style="grid-column:span {end_idx - st_idx};background:{bg};'
+                    'border-radius:8px;padding:10px 12px;text-align:center;display:flex;'
+                    'align-items:center;justify-content:center;line-height:1.45;overflow-wrap:anywhere;'
+                    f'color:{txt_col};-webkit-print-color-adjust:exact;print-color-adjust:exact;"><strong>{box_lbl}</strong></div>'
+                )
+                st_idx = end_idx
+            if f_idx < f_cnt - 1:
+                out_html.append("<div></div>")
+                out_html.extend(
+                    '<div style="height:12px;width:0;border-left:2px solid #475569;margin:auto;"></div>'
+                    for _ in p_groups
+                )
+        out_html.append("<div></div>")
+        out_html.extend(
+            '<div style="height:12px;width:0;border-left:2px solid #475569;margin:auto;"></div>'
+            for _ in p_groups
+        )
+        out_html.append('<div style="font-weight:700;color:#0f172a;">Model</div>')
+        for lns in grp_lbl_lines:
+            m_lbls = "<br>".join(lns)
+            out_html.append(
+                '<div style="font-weight:700;line-height:1.45;overflow-wrap:anywhere;color:#0f172a;background:#ffffff;'
+                f'border:2px solid #000;border-radius:4px;padding:6px;min-height:{m_hdr_height}px;height:100%;'
+                'box-sizing:border-box;display:flex;align-items:center;'
+                'justify-content:center;text-align:center;">'
+                f"{m_lbls}</div>"
+            )
+        out_html.append("</div>")
+        return "".join(out_html)
+
+    def _render_printable_complexity_tree_deck(
+        pages_spec: list[tuple[str, str]],
+        *,
+        paper_size: str,
+        project_name: str,
+        model_labels_desc: str,
+        feature_displays_desc: str,
+    ) -> str:
+        page_w_in = "17in" if paper_size == "tabloid" else "11in"
+        page_h_in = "11in" if paper_size == "tabloid" else "8.5in"
+        page_css_size = "17in 11in" if paper_size == "tabloid" else "11in 8.5in"
+        total_p = len(pages_spec)
+        sheets_html: list[str] = []
+        for idx, (cat_label, grid_markup) in enumerate(pages_spec, start=1):
+            page_badge = f"Page {idx} of {total_p}" if total_p > 1 else "Page 1 of 1"
+            sheets_html.append(
+                f"""<section class="print-sheet">
+  <header class="print-sheet-header">
+    <div>
+      <div class="print-sheet-title">{escape(project_name)} — Complexity Tree Visual</div>
+      <div class="print-sheet-subtitle">Category: <strong>{escape(cat_label)}</strong> &nbsp;&bull;&nbsp; Model label: {escape(model_labels_desc)} &nbsp;&bull;&nbsp; Display: {escape(feature_displays_desc)}</div>
+    </div>
+    <div class="print-sheet-badge">{escape(page_badge)}</div>
+  </header>
+  <div class="print-sheet-body">
+    <div class="print-tree-stage">{grid_markup}</div>
+  </div>
+</section>"""
+            )
+        joined_sheets = "\n".join(sheets_html)
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{escape(project_name)} - Complexity Tree Visual</title>
+<style>
+  @page {{
+    size: {page_css_size};
+    margin: 0.3in;
+  }}
+  * {{
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+  }}
+  html, body {{
+    margin: 0;
+    padding: 0;
+    background: #f8fafc;
+    color: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  .print-sheet {{
+    background: #ffffff;
+    width: calc({page_w_in} - 0.6in);
+    min-height: calc({page_h_in} - 0.6in);
+    margin: 12px auto;
+    padding: 14px 18px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    page-break-after: always;
+    break-after: page;
+    overflow: hidden;
+  }}
+  .print-sheet:last-child {{
+    page-break-after: auto;
+    break-after: auto;
+  }}
+  .print-sheet-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 2px solid #0f172a;
+    padding-bottom: 8px;
+    flex: 0 0 auto;
+  }}
+  .print-sheet-title {{
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: #0f172a;
+  }}
+  .print-sheet-subtitle {{
+    font-size: 0.84rem;
+    color: #334155;
+    margin-top: 2px;
+  }}
+  .print-sheet-badge {{
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #334155;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    padding: 4px 10px;
+    white-space: nowrap;
+  }}
+  .print-sheet-body {{
+    flex: 1 1 auto;
+    display: flex;
+    align-items: flex-start;
+    justify-content: stretch;
+    width: 100%;
+    overflow: hidden;
+  }}
+  .print-tree-stage {{
+    width: 100%;
+    transform-origin: top left;
+  }}
+  @media print {{
+    html, body {{
+      background: #ffffff !important;
+    }}
+    .print-sheet {{
+      margin: 0 !important;
+      border: none !important;
+      border-radius: 0 !important;
+      width: 100% !important;
+      height: calc({page_h_in} - 0.6in) !important;
+      min-height: 0 !important;
+      padding: 4px 6px !important;
+    }}
+  }}
+</style>
+</head>
+<body>
+{joined_sheets}
+<script>
+  function fitComplexitySheets() {{
+    const sheets = document.querySelectorAll('.print-sheet');
+    sheets.forEach(sheet => {{
+      const body = sheet.querySelector('.print-sheet-body');
+      const stage = sheet.querySelector('.print-tree-stage');
+      if (!body || !stage) return;
+      stage.style.zoom = '1';
+      stage.style.width = '100%';
+      const availW = body.clientWidth || 980;
+      const availH = (sheet.clientHeight - (sheet.querySelector('.print-sheet-header')?.offsetHeight || 50) - 28) || 680;
+      const naturalW = stage.scrollWidth || availW;
+      const naturalH = stage.scrollHeight || availH;
+      const scaleW = naturalW > availW ? availW / naturalW : 1;
+      const scaleH = naturalH > availH ? availH / naturalH : 1;
+      const scale = Math.min(scaleW, scaleH, 1);
+      if (scale < 0.995) {{
+        stage.style.zoom = String(Math.max(0.35, scale));
+      }}
+    }});
+  }}
+  window.addEventListener('load', () => setTimeout(fitComplexitySheets, 60));
+  window.addEventListener('resize', fitComplexitySheets);
+  window.addEventListener('beforeprint', fitComplexitySheets);
+</script>
+</body>
+</html>"""
+
+    @st.dialog("Print Complexity Tree Visual", width="large")
+    def print_complexity_tree_visual_dialog() -> None:
+        _, close_col = st.columns([5.0, 1.4])
+        with close_col:
+            if st.button(
+                "Close Print View",
+                icon=":material/close:",
+                width="stretch",
+                key=f"close_complexity_print_dlg_{project_id}",
+            ):
+                st.session_state[f"complexity_tree_print_active_{project_id}"] = False
+                st.rerun()
+
+        st.markdown("#### Export and Print Settings")
+        col_scope, col_fmt = st.columns([1.5, 1.2])
+
+        with col_scope:
+            scope_options: list[str] = []
+            if selected_categories:
+                scope_options.append(
+                    f"Current visual selection ({', '.join(selected_categories)})"
+                )
+            scope_options.append(
+                f"All active categories — 1 page per category ({len(category_values)} page{'s' if len(category_values) != 1 else ''})"
+            )
+            scope_options.append(
+                f"All active categories — combined on 1 page ({len(category_values)} categor{'ies' if len(category_values) != 1 else 'y'})"
+            )
+            scope_options.append("Select specific categories...")
+
+            chosen_scope = st.radio(
+                "Print Selection",
+                scope_options,
+                index=0,
+                key=f"complexity_print_scope_{project_id}",
+                help="Choose whether to print your current category selection, each category on its own page, or all categories combined.",
+            )
+
+            custom_cats: list[str] = []
+            custom_combine = False
+            if "Select specific categories" in chosen_scope:
+                custom_cats = st.multiselect(
+                    "Categories to include",
+                    options=category_values,
+                    default=selected_categories or category_values[:1],
+                    key=f"complexity_print_custom_cats_{project_id}",
+                )
+                layout_mode = st.radio(
+                    "Category Page Layout",
+                    ["One page per category", "Combine selected categories on one page"],
+                    index=0,
+                    key=f"complexity_print_custom_layout_{project_id}",
+                )
+                custom_combine = "Combine" in layout_mode
+
+        with col_fmt:
+            format_choice = st.radio(
+                "Page Format",
+                ["8.5 × 11 in (Letter Landscape)", "11 × 17 in (Tabloid Landscape)"],
+                index=0,
+                key=f"complexity_print_fmt_{project_id}",
+                help="8.5×11 Letter is standard printer paper. 11×17 Tabloid gives extra horizontal room for many model columns.",
+            )
+            paper_size = "letter" if "8.5 × 11" in format_choice else "tabloid"
+
+            default_m_labels = (
+                selected_model_labels
+                if selected_model_labels
+                else ["Model name", "Model number"]
+            )
+            print_model_labels = st.multiselect(
+                "Model label in print",
+                options=visual_model_label_options,
+                default=default_m_labels,
+                key=f"complexity_print_model_labels_{project_id}",
+            )
+            default_f_displays = (
+                selected_feature_displays
+                if selected_feature_displays
+                else ["Feature"]
+            )
+            print_feature_displays = st.multiselect(
+                "Feature display in print",
+                options=visual_feature_display_options,
+                default=default_f_displays,
+                key=f"complexity_print_feature_displays_{project_id}",
+            )
+
+        if not print_model_labels:
+            st.warning("Select at least one Model label option to generate the print view.")
+            return
+        if not print_feature_displays:
+            st.warning("Select at least one Feature display option to generate the print view.")
+            return
+
+        pages_to_build: list[list[str]] = []
+        if chosen_scope.startswith("Current visual selection"):
+            pages_to_build = [selected_categories] if selected_categories else []
+        elif "1 page per category" in chosen_scope:
+            pages_to_build = [[cat] for cat in category_values]
+        elif "combined on 1 page" in chosen_scope:
+            pages_to_build = [category_values] if category_values else []
+        else:
+            clean_custom = [c for c in custom_cats if c in category_values]
+            if custom_combine:
+                pages_to_build = [clean_custom] if clean_custom else []
+            else:
+                pages_to_build = [[cat] for cat in clean_custom]
+
+        pages_spec: list[tuple[str, str]] = []
+        for cat_group in pages_to_build:
+            g_html = _build_complexity_tree_grid_for_print(
+                cat_group, print_model_labels, print_feature_displays
+            )
+            if g_html:
+                pages_spec.append((", ".join(cat_group), g_html))
+
+        if not pages_spec:
+            st.warning("No Complexity tree visual pages match the selected categories.")
+            return
+
+        proj_row = get_project(project_id) or {}
+        project_name = str(proj_row.get("name") or "Project").strip()
+        full_deck_html = _render_printable_complexity_tree_deck(
+            pages_spec,
+            paper_size=paper_size,
+            project_name=project_name,
+            model_labels_desc=", ".join(print_model_labels),
+            feature_displays_desc=", ".join(print_feature_displays),
+        )
+        total_pages_cnt = len(pages_spec)
+        paper_label = (
+            "8.5 × 11 in (Letter Landscape)"
+            if paper_size == "letter"
+            else "11 × 17 in (Tabloid Landscape)"
+        )
+        st.info(
+            f"Ready to print **{total_pages_cnt} page{'s' if total_pages_cnt != 1 else ''}** on **{paper_label}**"
+        )
+
+        scope_sig = f"{chosen_scope}_{paper_size}_{','.join(print_model_labels)}_{','.join(print_feature_displays)}_{total_pages_cnt}"
+        scope_slug = hashlib.md5(scope_sig.encode()).hexdigest()[:8]
+
+        act_col1, act_col2 = st.columns([1.6, 1.4], vertical_alignment="center")
+        with act_col1:
+            escaped_deck_html = (
+                json.dumps(full_deck_html)
+                .replace("</script>", "<\\/script>")
+                .replace("</Script>", "<\\/Script>")
+            )
+            action_btn_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {{
+    margin: 0;
+    padding: 2px 0;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  .btn-print {{
+    background: #0284c7;
+    color: #ffffff !important;
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 700;
+    padding: 8px 18px;
+    border-radius: 6px;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }}
+  .btn-print:hover {{
+    background: #0369a1;
+  }}
+  .btn-open {{
+    background: #f1f5f9;
+    color: #0f172a !important;
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }}
+  .btn-open:hover {{
+    background: #e2e8f0;
+  }}
+</style>
+</head>
+<body>
+  <button id="btnActionPrint" class="btn-print" title="Opens print preview immediately for 1-click printing or PDF export">
+    <span>🖨️</span> Print to PDF / Printer
+  </button>
+  <button id="btnActionOpen" class="btn-open" title="Open printable complexity tree in a new browser tab">
+    <span>↗️</span> Open in New Tab
+  </button>
+  <script>
+    const deckContent = {escaped_deck_html};
+    document.getElementById("btnActionPrint").onclick = function(e) {{
+      e.preventDefault();
+      const printHtml = deckContent.replace('</body>', '<script>window.addEventListener("load", function(){{ setTimeout(function(){{ window.print(); }}, 350); }});<\\/script></body>');
+      const blob = new Blob([printHtml], {{ type: "text/html;charset=utf-8" }});
+      const blobUrl = URL.createObjectURL(blob);
+      const win = window.open(blobUrl, "_blank");
+      if (win) win.focus();
+    }};
+    document.getElementById("btnActionOpen").onclick = function(e) {{
+      e.preventDefault();
+      const blob = new Blob([deckContent], {{ type: "text/html;charset=utf-8" }});
+      const blobUrl = URL.createObjectURL(blob);
+      const win = window.open(blobUrl, "_blank");
+      if (win) win.focus();
+    }};
+  </script>
+</body>
+</html>"""
+            components.html(action_btn_html, height=45)
+
+        with act_col2:
+            safe_fn = f"Complexity_Tree_{project_name}_{paper_size}_{total_pages_cnt}_pages.html".replace(" ", "_")
+            st.download_button(
+                f"Download HTML ({total_pages_cnt} Page{'s' if total_pages_cnt != 1 else ''})",
+                data=full_deck_html,
+                file_name=safe_fn,
+                mime="text/html",
+                icon=":material/download:",
+                type="secondary",
+                key=f"dl_complexity_tree_btn_{project_id}_{scope_slug}",
+            )
+
+        st.divider()
+        st.caption(f"Preview ({total_pages_cnt} page{'s' if total_pages_cnt != 1 else ''} on {paper_label}):")
+        st.html(full_deck_html, unsafe_allow_javascript=True)
+
+    if st.session_state.get(f"complexity_tree_print_active_{project_id}", False):
+        print_complexity_tree_visual_dialog()
 
     st.markdown('<div style="height:24px;"></div>', unsafe_allow_html=True)
 with st.expander("History", icon=":material/history:"):
