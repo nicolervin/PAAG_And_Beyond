@@ -346,7 +346,8 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Create & update Ergonomics reviews**: Link reviews to Process steps, select ergonomic hazards, assign a reviewer and due date, and set the risk classification.",
-            "**Attach visual media**: Upload or paste posture photos and videos with annotated callouts (including adjustable callout text font sizes via the **Text** dropdown, **A−** / **A+** buttons, or corner drag handle).",
+            "**View & Edit Ergonomics slides**: Click **View Slide** on any row in the Ergonomics reviews table to jump directly to its 16:9 slide below, then click **Edit Slide** in the slide toolbar to select the **Ergonomic Assessment Tools** used (`Delmia`, `Work(s)`, `Handpak`, `Shoulder Tool`, `NIOSH Single/Multi Task`, `Humantech`, `ErgoNOVA`, `Force Test`), record tool-specific findings/notes, and attach tool-specific images, videos, or supporting documents.",
+            "**Attach visual media & tool documents**: Upload or paste posture photos and videos with annotated callouts (including adjustable callout text font sizes via the **Text** dropdown, **A−** / **A+** buttons, or corner drag handle), or attach supporting tool reports (`.pdf`, `.xlsx`, `.docx`, `.csv`, `.pptx`, `.txt`) for download directly from the slide.",
             "**Edit or Acknowledge upstream Process changes**: When a linked Process step is edited upstream (pitch, operation text, time, height, or parts), review the `⚠️ Upstream Process changes to review` queue to either **Acknowledge selected** directly or **Edit** the review and click **Save & Refresh** to clear the flag automatically.",
         ],
         "connections": (
