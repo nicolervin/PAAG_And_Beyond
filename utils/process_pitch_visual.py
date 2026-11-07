@@ -136,9 +136,13 @@ def _media_data_url(raw_path: object) -> str:
         return val
     path = Path(val)
     try:
-        st_info = path.stat()
+        if not path.is_file() and not path.is_absolute():
+            alt = Path(__file__).resolve().parent.parent / val
+            if alt.is_file():
+                path = alt
         if not path.is_file():
             return ""
+        st_info = path.stat()
         cache_key = (str(path), int(st_info.st_mtime_ns), int(st_info.st_size))
         cached = _MEDIA_DATA_URL_CACHE.get(cache_key)
         if cached is not None:
@@ -872,6 +876,8 @@ def render_pitch_canvas(
     current_media_items = page_media(visual_media, eff_page_num, MEDIA_PER_PAGE) if visual_media else []
 
     # 1. BUILD LEFT COLUMN: TOOLS
+    from utils.safety_store import get_ppe_catalog_item
+
     tool_items_html: list[str] = []
     seen_tool_ids: set[str] = set()
     for tool in tools:
@@ -879,15 +885,28 @@ def render_pitch_canvas(
         if t_id and t_id in seen_tool_ids:
             continue
         seen_tool_ids.add(t_id)
-        t_name = _text(tool.get("name") or "Tool")
+        raw_t_name = str(tool.get("name") or "Tool")
+        t_name = _text(raw_t_name)
         t_type = _text(tool.get("type_name") or "")
         t_tier = _text(tool.get("tier") or tool.get("equipment_tier") or "")
         t_summary = _text(tool.get("summary_line") or (f"{t_name} ({t_type})" if t_type and t_type.lower() != "tool" else t_name))
-        is_ppe = tool.get("is_ppe", False)
+        is_ppe = bool(tool.get("is_ppe", False))
+        ppe_img_html = ""
+        if is_ppe:
+            img_path = str(tool.get("image_path") or "").strip()
+            if not img_path:
+                cat_entry = get_ppe_catalog_item(raw_t_name)
+                if cat_entry:
+                    img_path = str(cat_entry.get("image_path") or "")
+            img_url = _media_data_url(img_path)
+            if img_url:
+                ppe_img_html = f'<img src="{img_url}" alt="{t_name}" class="ppe-inline-icon" /> '
         ppe_badge = '<span class="badge-ppe">PPE</span> ' if is_ppe else ''
         tier_badge = f'<span class="badge-tier" style="font-size:0.68rem;background:#e2e8f0;color:#334155;padding:1px 4px;border-radius:3px;margin-right:4px;">{t_tier}</span> ' if t_tier else ''
+        t_notes = _text(tool.get("notes") or "")
+        title_attr = f"{t_summary} — {t_notes}" if t_notes else t_summary
         tool_items_html.append(
-            f'<li class="tool-item" title="{t_summary}">{ppe_badge}{tier_badge}<span class="tool-text">{t_summary}</span></li>'
+            f'<li class="tool-item" title="{title_attr}">{ppe_img_html}{ppe_badge}{tier_badge}<span class="tool-text">{t_summary}</span></li>'
         )
     tools_section_html = (
         f'<ul class="tools-list">{"".join(tool_items_html)}</ul>'
@@ -896,12 +915,20 @@ def render_pitch_canvas(
     )
 
     tie_tool_btn_html = (
+        '<span class="tools-header-actions">'
+        '<button type="button" class="ppe-poster-slide-btn" '
+        'title="Open Job Safety Analysis (JSA) & PPE Poster for this pitch" '
+        'onclick="if(window.__paagOpenPpePosterDialog){window.__paagOpenPpePosterDialog(event);}else{'
+        'var d=(window.parent&&window.parent.document)?window.parent.document:document;'
+        'var b=d.querySelector(\'[class*=st-key-btn_ppe_poster_slide_] button\');'
+        'if(b)b.click();}">🛡️ JSA &amp; PPE</button>'
         '<button type="button" class="tie-tool-slide-btn" '
         'title="Tie a tool to a work element in this pitch" '
         'onclick="if(window.__paagOpenTieToolDialog){window.__paagOpenTieToolDialog(event);}else{'
         'var d=(window.parent&&window.parent.document)?window.parent.document:document;'
         'var b=d.querySelector(\'[class*=st-key-btn_tie_tool_slide_] button\')||d.querySelector(\'[class*=st-key-btn_tools_] button\');'
         'if(b)b.click();}">+ Tie Tool</button>'
+        '</span>'
         if not presentation_mode and not print_format
         else ""
     )
@@ -1607,6 +1634,18 @@ def render_pitch_canvas(
                     """
                 )
 
+            pitch_id_raw = str(pitch.get("id") or pitch.get("pitch_id") or "").strip()
+            safety_poster_link_html = (
+                f'<a href="./functional_safety?pitch_id={quote_plus(pitch_id_raw)}&tab=jsa" target="_top" class="popover-action-link" style="margin-right:6px;">📋 JSA Poster ↗</a>'
+                f'<a href="./functional_safety?pitch_id={quote_plus(pitch_id_raw)}&tab=poster" target="_top" class="popover-action-link" style="margin-right:6px;">🛡️ PPE Poster ↗</a>'
+                if cat_key == "safety" and pitch_id_raw
+                else (
+                    '<a href="./functional_safety?tab=jsa" target="_top" class="popover-action-link" style="margin-right:6px;">📋 JSA Poster ↗</a>'
+                    '<a href="./functional_safety?tab=poster" target="_top" class="popover-action-link" style="margin-right:6px;">🛡️ PPE Poster ↗</a>'
+                    if cat_key == "safety"
+                    else ""
+                )
+            )
             popover_html = f"""
             <div class="alert-popover" role="tooltip">
               <div class="popover-header">
@@ -1617,7 +1656,7 @@ def render_pitch_canvas(
                 {"".join(popover_items_html)}
               </div>
               <div class="popover-footer">
-                <a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
+                {safety_poster_link_html}<a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
               </div>
             </div>
             """
@@ -1631,6 +1670,18 @@ def render_pitch_canvas(
                 """
             )
         else:
+            pitch_id_raw = str(pitch.get("id") or pitch.get("pitch_id") or "").strip()
+            safety_poster_link_html = (
+                f'<a href="./functional_safety?pitch_id={quote_plus(pitch_id_raw)}&tab=jsa" target="_top" class="popover-action-link" style="margin-right:6px;">📋 JSA Poster ↗</a>'
+                f'<a href="./functional_safety?pitch_id={quote_plus(pitch_id_raw)}&tab=poster" target="_top" class="popover-action-link" style="margin-right:6px;">🛡️ PPE Poster ↗</a>'
+                if cat_key == "safety" and pitch_id_raw
+                else (
+                    '<a href="./functional_safety?tab=jsa" target="_top" class="popover-action-link" style="margin-right:6px;">📋 JSA Poster ↗</a>'
+                    '<a href="./functional_safety?tab=poster" target="_top" class="popover-action-link" style="margin-right:6px;">🛡️ PPE Poster ↗</a>'
+                    if cat_key == "safety"
+                    else ""
+                )
+            )
             popover_html = f"""
             <div class="alert-popover" role="tooltip">
               <div class="popover-header">
@@ -1643,7 +1694,7 @@ def render_pitch_canvas(
                 </div>
               </div>
               <div class="popover-footer">
-                <a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
+                {safety_poster_link_html}<a href="./{page_slug}" target="_top" class="popover-action-link">Open {display_name} Review ↗</a>
               </div>
             </div>
             """
@@ -2004,7 +2055,13 @@ def render_pitch_canvas(
       .header-page-row {{
         margin-bottom: 4px;
       }}
-      .tie-tool-slide-btn {{
+      .tools-header-actions {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }}
+      .tie-tool-slide-btn,
+      .ppe-poster-slide-btn {{
         display: inline-flex;
         align-items: center;
         gap: 3px;
@@ -2020,10 +2077,21 @@ def render_pitch_canvas(
         cursor: pointer;
         transition: all 0.15s ease;
       }}
-      .tie-tool-slide-btn:hover {{
+      .tie-tool-slide-btn:hover,
+      .ppe-poster-slide-btn:hover {{
         background: #e0f2fe;
         border-color: #38bdf8;
         color: #0369a1;
+      }}
+      .ppe-inline-icon {{
+        width: 18px;
+        height: 18px;
+        object-fit: contain;
+        vertical-align: middle;
+        border-radius: 3px;
+        background: #ffffff;
+        border: 1px solid #cbd5e1;
+        margin-right: 2px;
       }}
       .header-page-row-noop {{
         margin-bottom: 4px;
@@ -3964,6 +4032,19 @@ def render_pitch_canvas(
         }}
         window.__paagOpenTieToolDialog = triggerTieToolDialog;
 
+        function triggerPpePosterDialog(e) {{
+          if (e) {{
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          const doc = (window.parent && window.parent.document) ? window.parent.document : document;
+          const btn = doc.querySelector('[class*="st-key-btn_ppe_poster_slide_"] button');
+          if (btn) {{
+            btn.click();
+          }}
+        }}
+        window.__paagOpenPpePosterDialog = triggerPpePosterDialog;
+
         function setupTieToolButton() {{
           const bindBtn = (btn) => {{
             if (btn.dataset.tieToolBound === '1') return;
@@ -3971,9 +4052,16 @@ def render_pitch_canvas(
             btn.addEventListener('click', triggerTieToolDialog);
           }};
           document.querySelectorAll('.tie-tool-slide-btn').forEach(bindBtn);
+          const bindPosterBtn = (btn) => {{
+            if (btn.dataset.ppePosterBound === '1') return;
+            btn.dataset.ppePosterBound = '1';
+            btn.addEventListener('click', triggerPpePosterDialog);
+          }};
+          document.querySelectorAll('.ppe-poster-slide-btn').forEach(bindPosterBtn);
           document.querySelectorAll('*').forEach(el => {{
             if (el.shadowRoot) {{
               el.shadowRoot.querySelectorAll('.tie-tool-slide-btn').forEach(bindBtn);
+              el.shadowRoot.querySelectorAll('.ppe-poster-slide-btn').forEach(bindPosterBtn);
             }}
           }});
         }}
@@ -6486,4 +6574,4 @@ def render_paag_pptx_deck(
     return buf.getvalue()
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 13
+_PROCESS_PITCH_VISUAL_REV_20261102 = 14

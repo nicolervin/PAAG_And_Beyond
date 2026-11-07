@@ -1887,3 +1887,67 @@ Future issued-document generation and approval (not implemented)
      - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` with Current editor attribution and displayed in the bottom **History** expander on the Ergonomics page.
      - **Scope Badges & Help Text:** Retains `page_title_with_scope("Ergonomics", scope="scenario")` and updates the in-app Ergonomics help guide in `utils/help_hub.py`.
 
+### Safety Functional Review: Pitch PPE Hierarchy Rollup, Baseline PPE Assignment & 11×17 PPE Poster Generator (`safety_requirements`, `yamazumi_pitches`, `app_pages/functional_safety.py`, `app_pages/process.py`)
+
+- **Proposed by:** Project Owner & Antigravity
+- **Date recorded:** November 6, 2026
+- **Approval status:** Approved by project owner on November 6, 2026 for implementation on branch `NE_Safety_JSA_PPE_POSTER`.
+- **Purpose:** Expand the Safety (EHS) Functional Review and Process at a Glance (PAAG) slides with:
+  1. Standardized 21-item PPE catalog with icons, automatic Hazard descriptions, and Mitigation controls (`PPE Poster Generator V2`).
+  2. Automatic Pitch-level PPE deduplication and category hierarchy override logic (`Cut Level 6 Gloves > Cut Level 4 Gloves > Cut Level 2 Gloves`, `Safety Toe Shoes > Sturdy Closed Toe and Heel Shoes`, and `Foam Lined Safety Glasses > Safety Glasses`), dynamically re-evaluated whenever PAAG work elements move between pitches.
+  3. A 1-click **Apply Standard Baseline PPE** action on the Safety page to assign standard baseline PPE (`Safety Glasses`, `Cut Level 2 Gloves`, `Sturdy Closed Toe and Heel Shoes`) to unreviewed work elements while leaving newly created steps blank until EHS review.
+  4. An interactive 11"×17" landscape **Minimum PPE Requirements Poster** per pitch (`mode-standard` green diagonal border when exact baseline PPE applies, `mode-special` purple diagonal border when additional/elevated PPE applies), accessible on the Safety page and directly from PAAG slides via a modal dialog and deep link.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects scenario-specific `safety_requirements` (`work_element_id -> work_elements.id`) to `yamazumi_elements` (`process_element_id -> work_elements.id`), `yamazumi_pitches` (`yamazumi_elements.pitch_id -> yamazumi_pitches.id`), and `assembly_sections` (`yamazumi_pitches.section_id -> assembly_sections.id`).
+  2. *Critical thread relationship:* Preserves the critical thread (*Product Architecture -> Parts -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> Safety Functional Review & PAAG Slide*). PPE remains stored at the work element level (`safety_requirements.ppe`), while pitch-level PPE on PAAG slides and the PPE Poster is derived dynamically from the work elements currently placed on that pitch.
+  3. *Scope:* Scenario-specific (`safety_requirements` and `yamazumi_pitches` belong to `planning_scenarios`), with a static repository-bundled 21-item PPE icon and hazard/mitigation reference catalog.
+  4. *Table requirement:* No new table required. Extends `yamazumi_pitches` in-place via `init_db()` with three optional text columns for per-pitch PPE Poster header overrides:
+     - `ppe_poster_job_override TEXT NOT NULL DEFAULT ''` (defaults to `yamazumi_pitches.pitch_name` when blank)
+     - `ppe_poster_workstation_override TEXT NOT NULL DEFAULT ''` (defaults to `yamazumi_pitches.pitch_number` when blank)
+     - `ppe_poster_section_override TEXT NOT NULL DEFAULT ''` (defaults to `assembly_sections.name` when blank)
+     Scenario cloning (`clone_planning_scenario()`) copies these three columns onto cloned pitches.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Scope Badge:** `page_title_with_scope("Safety", scope="scenario")` and `page_title_with_scope("Process at a Glance", scope="scenario")`.
+     - **Universal Save Action Standard:** Explicit **Save & Refresh** for Safety table edits and poster header overrides, plus explicit 1-click **Apply Standard Baseline PPE** action.
+     - **Universal Deletion Standard:** Checked delete confirmation modal for safety requirement rows.
+     - **Universal Audit Trail & History Standard:** Every persisted change (`safety_requirements` save, baseline PPE application, and pitch poster header override save) is logged via `record_audit_event()` under category `"Safety requirements"` with Current editor attribution and exposed in the bottom `audit_history()` expander.
+     - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS`, `TROUBLESHOOTING_FAQS`, `GLOSSARY_TERMS`) and in-page `Instructions` popovers.
+
+
+### Safety Functional Review: Job Safety Analysis (JSA) Poster (`FRM-GEA-SAF-085`) & Expanded PPE Catalog/Hierarchy (`safety_requirements`, `yamazumi_pitches`, `app_pages/functional_safety.py`, `app_pages/process.py`)
+
+- **Proposed by:** Project Owner & Antigravity
+- **Date recorded:** November 6, 2026
+- **Approval status:** Approved by project owner on November 6, 2026 for implementation on branch `NE_Safety_JSA_PPE_POSTER`.
+- **Purpose:** Expand the Safety Functional Review, Pitch PPE Catalog, and PAAG slide integrations to generate and persist **Job Safety Analysis (JSA) Posters (`FRM-GEA-SAF-085 Rev 0`)** per pitch:
+  1. Merge the JSA PPE icon sheet items (`Cut Level 1 Gloves`, `Cut Level 3 Gloves`, `Cut Level 5 Gloves`, `Bump Cap`, `Hard Hat`, `High Visibility Vest`, `Chemical Resistant Coverall`, `N95 Filtering Facepiece Respirator`) into the unified PPE catalog with cropped icon assets (`assets/ppe_icons/`) and expanded category hierarchies:
+     - **Cut Gloves:** `Cut Level 6 Gloves > Cut Level 5 Gloves > Cut Level 4 Gloves > Cut Level 3 Gloves > Cut Level 2 Gloves > Cut Level 1 Gloves`
+     - **Head Protection:** `Hard Hat > Bump Cap`
+     - **Footwear:** `Safety Toe Shoes > Sturdy Closed Toe and Heel Shoes`
+     - **Eye Protection:** `Foam Lined Safety Glasses > Safety Glasses`
+  2. Pre-populate each pitch's **Job Safety Analysis (JSA)** poster (`FRM-GEA-SAF-085`) with:
+     - **Job Title:** `<pitch_number> — <pitch_name>` (with optional per-pitch override)
+     - **Plant / Area Code:** defaults to `AP1` (editable per pitch)
+     - **Important Notice Banner:** pre-filled standard EHS review notice (editable per pitch)
+     - **Add Photos / PPE Icons Middle Section:** automatically displays the pitch's deduplicated, hierarchy-resolved PPE icons, plus an optional per-pitch toggle to display PAAG Pitch Visual Aid photos (`process_visual_media`) side-by-side.
+     - **Job Steps | Potential Errors / Hazards | Action Table:** auto-includes a lead-in **"Put on PPE"** row (dynamically listing the pitch's effective rolled-up PPE) followed by every PAAG Work Element on the pitch (`work_elements`), with step-level **Potential Errors / Hazards** (`potential_hazards`) and **Action** (`proposed_actions`) persisted on `safety_requirements` (with PPE mitigations pre-seeded into `Action` when blank, plus preset hazard/action quick-suggestions alongside full free-text editing). Because `potential_hazards` and `proposed_actions` are stored on `safety_requirements` linked to `work_elements.id`, moving a work element between pitches in Yamazumi automatically moves its JSA row and PPE to the new pitch.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects scenario-specific `safety_requirements` (`work_element_id -> work_elements.id`) to `yamazumi_elements`, `yamazumi_pitches`, `assembly_sections`, and `process_visual_media` (for optional pitch visual aid photos on the JSA).
+  2. *Critical thread relationship:* Preserves the critical thread (*Product Architecture -> Parts -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> Safety Functional Review & JSA / PPE Posters*). Step-level JSA hazards, actions, and PPE remain tied to `work_elements.id`, and pitch-level JSA posters and PPE rollups derive dynamically from the work elements assigned to that pitch.
+  3. *Scope:* Scenario-specific (`safety_requirements` and `yamazumi_pitches` belong to `planning_scenarios`), with repository-bundled PPE icons under `assets/ppe_icons/`.
+  4. *Table requirement:* No new table required. Extends existing tables in-place via `init_db()`:
+     - On `safety_requirements`:
+       - `potential_hazards TEXT NOT NULL DEFAULT ''`: Free-text (and future/preset-assisted) Potential Errors / Hazards for the PAAG work element on the JSA.
+       - `proposed_actions TEXT NOT NULL DEFAULT ''`: Free-text (and future/preset-assisted) Action / Mitigation for the PAAG work element on the JSA (falls back to auto-generated PPE mitigations when blank).
+     - On `yamazumi_pitches`:
+       - `jsa_job_title_override TEXT NOT NULL DEFAULT ''`: Optional override for JSA Job Title (defaults to `<pitch_number> — <pitch_name>`).
+       - `jsa_plant_code TEXT NOT NULL DEFAULT 'AP1'`: Plant/area code displayed in top-left of JSA header (defaults to `'AP1'`).
+       - `jsa_important_notice TEXT NOT NULL DEFAULT ''`: Optional custom text for the green `IMPORTANT` banner box on the JSA poster.
+       - `jsa_include_pitch_photos INTEGER NOT NULL DEFAULT 1`: Boolean flag (`1` or `0`) controlling whether PAAG Pitch Visual Aid photos are displayed alongside the rolled-up PPE icons in the middle section of the JSA poster.
+     Scenario cloning (`clone_planning_scenario()`) copies both the `safety_requirements` JSA columns and `yamazumi_pitches` JSA header columns.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Scope Badge:** `page_title_with_scope("Safety", scope="scenario")` and `page_title_with_scope("Process at a Glance", scope="scenario")`.
+     - **Universal Save Action Standard:** Explicit **Save & Refresh** for Safety Review table edits, JSA step table edits, and JSA poster header settings.
+     - **Universal Deletion Standard:** Checked delete confirmation modal for safety requirement rows.
+     - **Universal Audit Trail & History Standard:** Every persisted change (`safety_requirements` JSA fields and `yamazumi_pitches` JSA settings) is logged via `record_audit_event()` under category `"Safety requirements"` with Current editor attribution and exposed in the bottom `audit_history()` expander.
+     - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS`, `TROUBLESHOOTING_FAQS`, `GLOSSARY_TERMS`) and in-page `Instructions` popovers.

@@ -29,7 +29,7 @@ if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 13:
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 14:
     _importlib.reload(_sys.modules["utils.process_pitch_visual"])
 if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
     _importlib.reload(_sys.modules["utils.image_annotator"])
@@ -42,6 +42,7 @@ if "utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazu
 
 from utils.fishbone_ui import section_breadcrumb_labels
 from utils.media_cache import cached_image_bytes, cached_image_data_url
+from utils.ppe_poster import build_jsa_poster_html, build_ppe_poster_html
 from utils.store import (
     ROOT,
     assign_parts_to_section,
@@ -57,6 +58,8 @@ from utils.store import (
     parse_yamazumi_model_variants,
     part_has_model_variants,
     sync_model_variant_placement_selections,
+    pitch_jsa_poster_summary,
+    pitch_ppe_poster_summary,
     process_element_id_for_yamazumi,
     process_ergonomics_risk_work_element_ids,
     work_element_criticality,
@@ -1341,7 +1344,22 @@ def alerts_detail_dialog(
                     help=f"Navigate directly to {cat_title} review page",
                     width="stretch",
                 ):
+                    if cat_key == "safety" and pitch_id:
+                        st.session_state[f"safety_poster_pitch_{scenario_id}"] = pitch_id
+                        st.session_state[f"safety_page_tabs_{project_id}"] = "Review"
                     st.switch_page(cfg["page"])
+                if cat_key == "safety":
+                    if st.button(
+                        "Open PPE Poster ↗",
+                        icon=":material/shield:",
+                        key=f"btn_nav_safety_poster_{pitch_id}",
+                        help="Open this pitch's Minimum PPE Requirements Poster on the Safety page",
+                        width="stretch",
+                    ):
+                        if pitch_id:
+                            st.session_state[f"safety_poster_pitch_{scenario_id}"] = pitch_id
+                        st.session_state[f"safety_page_tabs_{project_id}"] = "PPE Poster"
+                        st.switch_page(cfg["page"])
 
             if cat_key == "materials":
                 unclassified_options = []
@@ -1808,6 +1826,142 @@ def tools_detail_dialog(
                 st.caption(f"Manufacturer: {mfg or 'N/A'} | Model: {mdl or 'N/A'}")
             if tool.get("notes"):
                 st.info(tool["notes"])
+
+
+@st.dialog("Job Safety Analysis (JSA) & PPE Poster", width="large")
+def ppe_poster_slide_dialog(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str,
+    pitch_summary: dict | None = None,
+) -> None:
+    poster_list = (
+        pitch_ppe_poster_summary(project_id, scenario_id, pitch_id)
+        if project_id and scenario_id and pitch_id
+        else []
+    )
+    jsa_list = (
+        pitch_jsa_poster_summary(project_id, scenario_id, pitch_id)
+        if project_id and scenario_id and pitch_id
+        else []
+    )
+    active_poster = poster_list[0] if poster_list else {}
+    active_jsa = jsa_list[0] if jsa_list else {}
+    p_sum = pitch_summary or {}
+    rollup = active_poster.get("rollup") or p_sum.get("ppe_rollup") or {}
+    effective_items = active_poster.get("effective_ppe") or rollup.get("effective_ppe") or []
+    overrides_list = active_poster.get("overrides") or rollup.get("overrides") or []
+
+    job_name = str(
+        active_poster.get("job_name")
+        or p_sum.get("pitch_name")
+        or p_sum.get("pitch_number")
+        or ""
+    ).strip()
+    workstation = str(
+        active_poster.get("workstation")
+        or p_sum.get("pitch_number")
+        or ""
+    ).strip()
+    section_name = str(
+        active_poster.get("section")
+        or p_sum.get("section_name")
+        or ""
+    ).strip()
+    safe_pitch_slug = (workstation or "Pitch").replace(" ", "_")
+
+    if overrides_list:
+        ov_text = " · ".join(str(ov.get("summary") or "") for ov in overrides_list if ov.get("summary"))
+        if ov_text:
+            st.info(f"**Hierarchy Override Applied:** {ov_text}", icon=":material/auto_awesome:")
+
+    dlg_jsa_tab, dlg_ppe_tab = st.tabs(
+        ["📋 JSA Poster (FRM-GEA-SAF-085)", "🛡️ 11×17 PPE Poster"]
+    )
+    with dlg_jsa_tab:
+        jsa_bar = st.columns([2.4, 1.3, 1.3], vertical_alignment="center")
+        with jsa_bar[0]:
+            st.caption(
+                "Portrait Job Safety Analysis (FRM-GEA-SAF-085) pre-populated with pitch title, "
+                "PAAG steps, potential hazards/actions, and rolled-up PPE icons."
+            )
+        jsa_html_doc = build_jsa_poster_html(
+            job_title=str(active_jsa.get("job_title") or f"{workstation} — {job_name}".strip(" —")),
+            plant_code=str(active_jsa.get("plant_code") or "AP1"),
+            important_notice=str(active_jsa.get("important_notice") or ""),
+            effective_ppe_items=active_jsa.get("effective_ppe") or effective_items,
+            jsa_rows=active_jsa.get("jsa_rows") or [],
+            pitch_photos=active_jsa.get("pitch_photos") or [],
+            include_pitch_photos=bool(active_jsa.get("include_pitch_photos", True)),
+            overrides=overrides_list,
+        )
+        with jsa_bar[1]:
+            st.download_button(
+                "Download JSA (HTML)",
+                data=jsa_html_doc,
+                file_name=f"JSA_Poster_{safe_pitch_slug}.html",
+                mime="text/html",
+                icon=":material/download:",
+                width="stretch",
+                key=f"dl_slide_jsa_poster_{scenario_id}_{pitch_id}",
+            )
+        with jsa_bar[2]:
+            if st.button(
+                "Edit JSA in Safety ↗",
+                icon=":material/assignment:",
+                type="primary",
+                width="stretch",
+                key=f"btn_dialog_open_safety_jsa_{scenario_id}_{pitch_id}",
+                help="Navigate to the Safety page JSA Poster tab to edit step hazards and actions",
+            ):
+                if pitch_id:
+                    st.session_state[f"safety_poster_pitch_{scenario_id}"] = pitch_id
+                st.session_state[f"safety_page_tabs_{project_id}"] = "JSA Poster"
+                st.switch_page("app_pages/functional_safety.py")
+        components.html(jsa_html_doc, height=960, scrolling=True)
+
+    with dlg_ppe_tab:
+        top_bar = st.columns([2.4, 1.3, 1.3], vertical_alignment="center")
+        with top_bar[0]:
+            st.caption(
+                "11\"×17\" Landscape Minimum PPE Requirements Poster for this pitch. "
+                "PPE is deduplicated and resolved using category hierarchy overrides across all active steps."
+            )
+        poster_html_doc = build_ppe_poster_html(
+            job_name=job_name,
+            workstation=workstation,
+            section_name=section_name,
+            effective_ppe_items=effective_items,
+            overrides=overrides_list,
+            interactive_controls=True,
+            default_job=str(active_poster.get("default_job") or p_sum.get("pitch_name") or ""),
+            default_workstation=str(active_poster.get("default_workstation") or p_sum.get("pitch_number") or ""),
+            default_section=str(active_poster.get("default_section") or p_sum.get("section_name") or ""),
+        )
+        with top_bar[1]:
+            st.download_button(
+                "Download PPE (HTML)",
+                data=poster_html_doc,
+                file_name=f"PPE_Poster_{safe_pitch_slug}.html",
+                mime="text/html",
+                icon=":material/download:",
+                width="stretch",
+                key=f"dl_slide_ppe_poster_{scenario_id}_{pitch_id}",
+            )
+        with top_bar[2]:
+            if st.button(
+                "Open in Safety Review ↗",
+                icon=":material/health_and_safety:",
+                type="primary",
+                width="stretch",
+                key=f"btn_dialog_open_safety_poster_{scenario_id}_{pitch_id}",
+                help="Navigate to the Safety page PPE Poster tab for this pitch",
+            ):
+                if pitch_id:
+                    st.session_state[f"safety_poster_pitch_{scenario_id}"] = pitch_id
+                st.session_state[f"safety_page_tabs_{project_id}"] = "PPE Poster"
+                st.switch_page("app_pages/functional_safety.py")
+        components.html(poster_html_doc, height=820, scrolling=True)
 
 
 @st.dialog("Edit Visual Aid", width="medium")
@@ -7730,6 +7884,19 @@ elif tab_slides.open:
                     help="Tie a tool to a work element on this pitch",
                 ):
                     tie_tool_slide_dialog(
+                        project_id=project_id,
+                        scenario_id=scenario_id,
+                        pitch_id=selected_pitch_id,
+                        pitch_summary=pitch_summary,
+                    )
+
+                if slide_action_bar.button(
+                    "JSA & PPE",
+                    icon=":material/health_and_safety:",
+                    key=f"btn_ppe_poster_slide_{scenario_id}",
+                    help="Open and print the Job Safety Analysis (JSA) Poster and 11×17 Minimum PPE Requirements Poster for this pitch",
+                ):
+                    ppe_poster_slide_dialog(
                         project_id=project_id,
                         scenario_id=scenario_id,
                         pitch_id=selected_pitch_id,

@@ -6,7 +6,7 @@ import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import cached_store_read
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
-from utils.safety_store import parse_ppe
+from utils.safety_store import parse_ppe, resolve_pitch_ppe_rollup
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 MATERIAL_SELECTION_RULES = {"Model choice", "Choose one", "Use all", "Optional"}
@@ -4608,6 +4608,7 @@ def process_pitch_visual_summary(
                 "summary_line": summary_line,
             })
 
+        pitch_ppe_rollup: dict = resolve_pitch_ppe_rollup([])
         existing_names = {t["name"].casefold() for t in tools_list if t.get("name")}
         if pitch_tool_work_ids:
             we_tools = conn.execute(
@@ -4635,30 +4636,53 @@ def process_pitch_visual_summary(
                     existing_names.add(tool_val.casefold())
 
             # Include assigned PPE from Safety Review in Tools & PPE required list
+            # (deduplicated per pitch with category hierarchy overrides applied)
             assigned_ppe_rows = conn.execute(
-                f"""SELECT DISTINCT ppe FROM safety_requirements
+                f"""SELECT ppe FROM safety_requirements
                     WHERE project_id=? AND scenario_id=? AND active=1
                       AND work_element_id IN ({tool_placeholders})
-                      AND ppe IS NOT NULL AND TRIM(ppe) != ''""",
+                      AND ppe IS NOT NULL AND TRIM(ppe) != ''
+                    ORDER BY created_at, id""",
                 (project_id, scenario_id, *pitch_tool_work_ids),
             ).fetchall()
-            for row in assigned_ppe_rows:
-                items = parse_ppe(row["ppe"])
-                for item in items:
-                    if item and item.casefold() not in existing_names:
-                        tools_list.append({
-                            "equipment_id": f"ppe_{item}",
-                            "name": item,
-                            "type_name": "PPE",
-                            "manufacturer": "",
-                            "model": "",
-                            "description": "Required Safety PPE",
-                            "notes": "",
-                            "image_path": "",
-                            "is_ppe": True,
-                            "summary_line": f"PPE: {item}",
-                        })
-                        existing_names.add(item.casefold())
+            pitch_ppe_rollup = resolve_pitch_ppe_rollup(
+                [row["ppe"] for row in assigned_ppe_rows]
+            )
+            overridden_by_winner: dict[str, list[str]] = {}
+            for ov in pitch_ppe_rollup.get("overridden_items", []):
+                overridden_by_winner.setdefault(
+                    str(ov.get("overridden_by") or "").casefold(), []
+                ).append(str(ov.get("item") or ""))
+
+            for eff_item in pitch_ppe_rollup.get("effective_items", []):
+                item_name = str(eff_item.get("name") or "").strip()
+                if not item_name or item_name.casefold() in existing_names:
+                    continue
+                canon_key = str(eff_item.get("canonical_name") or item_name).casefold()
+                ov_list = overridden_by_winner.get(canon_key, [])
+                ov_note = (
+                    f"Overrides {', '.join(ov_list)} on this pitch."
+                    if ov_list
+                    else ""
+                )
+                haz = str(eff_item.get("hazard") or "").strip()
+                mit = str(eff_item.get("mitigation") or "").strip()
+                desc_text = f"Hazard: {haz} | Mitigation: {mit}" if (haz and mit) else "Required Safety PPE"
+                tools_list.append({
+                    "equipment_id": f"ppe_{item_name}",
+                    "name": item_name,
+                    "type_name": "PPE",
+                    "manufacturer": "",
+                    "model": "",
+                    "description": desc_text,
+                    "hazard": haz,
+                    "mitigation": mit,
+                    "notes": ov_note,
+                    "image_path": str(eff_item.get("image_path") or ""),
+                    "is_ppe": True,
+                    "summary_line": f"PPE: {item_name}",
+                })
+                existing_names.add(item_name.casefold())
 
         # Mini Yamazumi pitch stack
         yamazumi_pitch_elements = conn.execute(
@@ -4933,6 +4957,7 @@ def process_pitch_visual_summary(
         "elements": cards,
         "yamazumi_elements": [dict(yel) for yel in yamazumi_pitch_elements],
         "tools": tools_list,
+        "ppe_rollup": pitch_ppe_rollup,
         "parts": final_parts,
         "yamazumi_stacks": variant_stacks,
         "visual_media": sorted_visual_media,
