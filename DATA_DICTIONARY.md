@@ -15,6 +15,7 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records. `takt_time_s` remains canonical seconds while `takt_time_unit` stores the scenario's independent takt display preference. `yamazumi_time_unit` separately controls Yamazumi work-duration presentation and entry; neither preference changes persisted timing quantities.
 - **Key relationships:** Belongs to `projects`. May reference another `planning_scenarios` row as its parent. Owns `part_scenario_activity`, `yamazumi_areas`, `work_elements`, and `process_part_groups`. Scenario cloning copies the applicable scenario-owned planning data.
 - **Scope:** Scenario-specific.
+- **Scenario Active toggle:** Overview's **Scenario definitions** table exposes an **Active** checkbox column mapped to `planning_scenarios.status` (`'Working'` when checked vs. `'Archived'` when unchecked; existing non-archived statuses such as `'Frozen'` or `'Released'` remain preserved when kept active). Unchecking **Active** hides the scenario from the sidebar and page-header scenario selectors without deleting any scenario-owned records, while keeping it visible in Overview's **Scenario definitions** table so it can be re-activated at any time. At least one planning scenario per project must remain Active; deactivating the currently viewed scenario automatically switches the session to the newest remaining active scenario.
 
 Creating a new active Fishbone section or subassembly atomically creates one linked Yamazumi area in every existing planning scenario, including archived scenarios. Automatic creation is idempotent and create-only: it uses a new UUID, the Fishbone section name, and no takt override, but never relinks, renames, detaches, or otherwise repairs an existing area. A same-name or conflicting area is preserved and reported for explicit repair; unaffected scenarios still receive their new areas. Later scenario clones retain the established behavior of copying the source scenario's linked areas. Yamazumi does not display the fixed Fishbone relationship for an already linked area; only an imported or legacy area with a null `section_id` exposes **Pair with Fishbone section**.
 
@@ -1951,3 +1952,29 @@ Future issued-document generation and approval (not implemented)
      - **Universal Deletion Standard:** Checked delete confirmation modal for safety requirement rows.
      - **Universal Audit Trail & History Standard:** Every persisted change (`safety_requirements` JSA fields and `yamazumi_pitches` JSA settings) is logged via `record_audit_event()` under category `"Safety requirements"` with Current editor attribution and exposed in the bottom `audit_history()` expander.
      - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS`, `TROUBLESHOOTING_FAQS`, `GLOSSARY_TERMS`) and in-page `Instructions` popovers.
+
+
+### Project Overview: Scenario Active Toggle & Copy Project from Existing Project (`projects`, `planning_scenarios`, `app_pages/overview.py`, `utils/project_store.py`, `utils/project_transfer.py`)
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** November 9, 2026
+- **Approval status:** Approved by project owner on November 9, 2026 for implementation on branch `NE_Continue_Safety_Functional_Reviews`.
+- **Purpose:**
+  1. *Scenario Active Toggle:* Allow collaborators to turn planning scenarios on and off (`Active` checkbox column) in the **Scenario definitions** table on **Project overview**. Active scenarios (`status != 'Archived'`) appear in the sidebar and page-title scenario selectors across the application; inactive scenarios (`status = 'Archived'`) are hidden from active scenario selectors without deleting their data and remain manageable in Overview's **Scenario definitions** table.
+  2. *Copy Project to New Project:* Allow collaborators to create a new NPI project copied from an existing project (e.g., copying a Current Production project to start a new NPI project) directly from the **Project definition** section (and **New project** dialog) on **Project overview**, copying all project-wide master data, uploaded media files, and **only the active planning scenarios** (`status != 'Archived'`) and their scenario-owned records into a new independent project.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Scenario Active Toggle: connects to `planning_scenarios` (`planning_scenarios.project_id -> projects.id`).
+     - Copy Project to New Project: connects to `projects` (root entity) and clones all project-wide entities and active-scenario-owned entities across `PROJECT_TRANSFER_TABLES` (`planning_scenarios`, `project_models`, `complexity_features`, `parts`, `assembly_sections`, `fishbone_part_assignments`, `yamazumi_areas`/`pitches`/`elements`, `work_elements`, `layout_plans`, Functional Reviews, and owned files in `data/uploads/`).
+  2. *Critical thread relationship:*
+     - Scenario Active Toggle: operates at the `projects -> planning_scenarios` branch level of the critical thread (*Product Architecture -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> derived Pin Map*), controlling which planning scenarios are active and selectable in downstream scenario-aware and scenario-specific views.
+     - Copy Project to New Project: deep-clones the complete critical thread from a source `projects` record into a brand-new `projects` UUID with fresh remapped UUIDs for all child records and duplicated upload files so edits in the new NPI project never mutate the source production project.
+  3. *Scope:*
+     - Scenario Active Toggle: Scenario-specific metadata managed in the **Planning scenarios** section on **Project overview**.
+     - Copy Project to New Project: Project-wide (`scope="project"`), creating a new top-level `projects` record and switching the active workspace to the new project.
+  4. *Table requirement:* No new tables or columns required. Existing `planning_scenarios.status` serves the **Active** toggle (`status != 'Archived'` when Active, `'Archived'` when inactive, enforcing that at least one scenario in a project remains Active). Existing `projects` and `PROJECT_TRANSFER_TABLES` in `utils/project_transfer.py` serve project copying, filtering scenario-scoped tables and child graphs to active scenarios only.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Universal Save Action Standard:** The **Active** checkbox in **Scenario definitions** saves atomically via **Save & Refresh** and **Undo** (`editable_table_footer()`) with concurrent save conflict protection. Project copying uses a modal dialog with required **Project name** and **Building location** validation.
+     - **Universal Deletion Standard:** Deactivating a scenario hides it from active scenario switchers without deleting any records.
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` with Current editor attribution under `"Planning scenarios"` and `"Projects"` (`"Copy project"`), exposed in the bottom **History** expander on **Project overview**.
+     - **Canonical Terminology & Help Text:** Uses the canonical label **Active** for the boolean toggle column, preserves scope badges, and updates `utils/help_hub.py`.

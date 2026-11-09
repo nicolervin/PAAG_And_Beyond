@@ -187,7 +187,9 @@ def _frame(data: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
     result = data.copy()
     for name, dtype in columns.items():
         if name not in result:
-            result[name] = pd.Series(index=result.index, dtype=dtype)
+            result[name] = pd.Series(
+                index=result.index, dtype="object" if dtype == "list" else dtype
+            )
         if dtype.startswith("float"):
             result[name] = pd.to_numeric(result[name], errors="coerce").astype("float64")
         elif dtype.startswith("int"):
@@ -198,6 +200,8 @@ def _frame(data: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
             result[name] = pd.to_datetime(result[name], errors="coerce")
         elif dtype == "list":
             result[name] = result[name].map(_list_values).astype("object")
+        elif name == "target_completion_date":
+            result[name] = result[name].map(_format_date_text).astype("string")
         else:
             result[name] = result[name].astype("string")
     return result.reindex(columns=list(columns))
@@ -252,6 +256,28 @@ def _plain_text(value) -> str:
     except (TypeError, ValueError):
         pass
     return str(value).strip()
+
+
+def _format_date_text(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text or text.lower() in {"nat", "nan", "none", "<na>"}:
+        return ""
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return text
 
 
 def _process_step_option_label(step: dict | pd.Series) -> str:
@@ -347,6 +373,10 @@ def _normalize_pfmea_process_selection(
         if work_element_id
         else ""
     )
+    if "target_completion_date" in normalized.columns:
+        normalized["target_completion_date"] = (
+            normalized["target_completion_date"].map(_format_date_text).astype("string")
+        )
     return normalized, selection_changed, reassignment_attempted
 
 
@@ -355,6 +385,10 @@ def _editor_rows_from_state(
 ) -> pd.DataFrame:
     """Materialize Streamlit's current editor state for pre-render derivation."""
     current = source_rows.reset_index(drop=True).copy()
+    if "target_completion_date" in current.columns:
+        current["target_completion_date"] = (
+            current["target_completion_date"].map(_format_date_text).astype(object)
+        )
     for raw_position, changes in (editor_state.get("edited_rows") or {}).items():
         try:
             position = int(raw_position)
@@ -677,6 +711,8 @@ def _propagate_shared_editor_changes(
         mask = updated[identity_column].map(_plain_text).eq(record_id)
         if int(mask.sum()) <= 1:
             continue
+        if column == "target_completion_date":
+            value = _format_date_text(value)
         updated.loc[mask, column] = value
         propagated.append(column)
     return updated, sorted(set(propagated)), conflicts
@@ -3910,10 +3946,10 @@ def _render_flat_pfmea_table(
             known_people.append(extra)
     responsibility_options = sorted(list(set(known_people)), key=str.casefold)
 
-    if not editor_rows.empty and "target_completion_date" in editor_rows.columns:
+    if "target_completion_date" in editor_rows.columns:
         editor_rows["target_completion_date"] = pd.to_datetime(
             editor_rows["target_completion_date"], errors="coerce"
-        ).dt.date
+        )
 
     column_config = {
         column: None for column in PFMEA_FLAT_COLUMNS if column not in PFMEA_VISIBLE_COLUMNS

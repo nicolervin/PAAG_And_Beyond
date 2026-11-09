@@ -4,7 +4,7 @@ import streamlit as st
 from utils.time_units import (
     TIME_UNITS, display_to_seconds, format_seconds, seconds_to_display, time_unit,
 )
-from utils.scope_ui import page_title_with_scope, section_heading_with_scope
+from utils.scope_ui import page_title_with_scope, section_heading_with_scope, sync_active_scenario_state
 from utils.table_filters import apply_pending_table_editor_reset, filter_table, merge_filtered_edits, request_table_editor_reset
 from utils.table_ui import (
     check_standalone_conflict_resolution,
@@ -17,7 +17,7 @@ from utils.table_ui import (
     trigger_standalone_conflict_dialog,
 )
 from utils.store import (
-    audit_history, create_project, delete_project, format_eastern_timestamp,
+    audit_history, copy_project, create_project, delete_project, format_eastern_timestamp,
     get_planning_scenario, get_project,
     get_project_deletion_impact, next_scenario_revision_label, planning_scenarios,
     project_table, projects, record_audit_event, save_planning_scenario_rows,
@@ -70,8 +70,149 @@ div[class*="st-key-destructive_"] button:disabled {
 st.html(DESTRUCTIVE_BUTTON_CSS)
 
 
+def _render_copy_project_form(
+    form_key_suffix: str, default_source_project_id: str | None = None
+) -> None:
+    available_projects = projects()
+    if not available_projects:
+        st.info("No existing projects are available to copy.")
+        return
+    project_ids = [str(row["id"]) for row in available_projects]
+    project_labels = {
+        str(row["id"]): (
+            f"{row['name']} ({row['program']})"
+            if str(row.get("program") or "").strip()
+            else str(row["name"])
+        )
+        for row in available_projects
+    }
+    default_idx = (
+        project_ids.index(str(default_source_project_id))
+        if default_source_project_id and str(default_source_project_id) in project_ids
+        else 0
+    )
+    source_project_id = st.selectbox(
+        "Copy from existing project",
+        options=project_ids,
+        index=default_idx,
+        format_func=lambda pid: project_labels.get(str(pid), str(pid)),
+        key=f"copy_project_source_select_{form_key_suffix}",
+        help=(
+            "Copies project-wide master data (models, Parts Catalog, BOM, Fishbone, "
+            "Quality requirements, equipment library, questions/concerns) and only "
+            "Active planning scenarios into a new project."
+        ),
+    )
+    source_project = get_project(source_project_id) or {}
+    source_active_scenarios = planning_scenarios(source_project_id, include_archived=False)
+    source_all_scenarios = planning_scenarios(source_project_id, include_archived=True)
+    inactive_count = max(0, len(source_all_scenarios) - len(source_active_scenarios))
+    st.caption(
+        f"Will copy **{len(source_active_scenarios)}** active scenario(s) from "
+        f"**{source_project.get('name', 'selected project')}**"
+        + (f" ({inactive_count} inactive scenario(s) will be skipped)." if inactive_count else ".")
+    )
+    default_takt_unit = str(source_project.get("takt_time_unit") or "seconds")
+    if default_takt_unit not in TIME_UNITS:
+        default_takt_unit = "seconds"
+    default_takt_s = float(source_project.get("takt_time_s") or 60.0)
+    with st.form(f"copy_project_form_{form_key_suffix}_{source_project_id}"):
+        name = st.text_input(
+            "New Program Name",
+            value=f"{source_project.get('name', '').strip()} (Copy)".strip(),
+        )
+        program = st.text_input(
+            "Product",
+            value=str(source_project.get("program") or ""),
+        )
+        loc_cols = st.columns(2)
+        product_line = loc_cols[0].text_input(
+            "Assembly Line",
+            value=str(source_project.get("product_line") or ""),
+        )
+        building_location = loc_cols[1].text_input(
+            "Building Location",
+            value=str(source_project.get("building_location") or ""),
+            placeholder="e.g. Building 2, AP1, Plant 4",
+        )
+        rev_cols = st.columns(3)
+        revision = rev_cols[0].text_input(
+            "Product baseline revision",
+            value=str(source_project.get("revision") or "A"),
+        )
+        takt_unit = rev_cols[1].selectbox(
+            "Target takt unit",
+            list(TIME_UNITS),
+            index=list(TIME_UNITS).index(default_takt_unit),
+            format_func=lambda value: TIME_UNITS[value].label,
+        )
+        unit_config = time_unit(takt_unit)
+        takt = rev_cols[2].number_input(
+            f"Target takt time ({unit_config.label.lower()})",
+            min_value=unit_config.step,
+            value=seconds_to_display(default_takt_s, takt_unit),
+            step=unit_config.step,
+            format=f"%.{unit_config.decimals}f",
+        )
+        if st.form_submit_button(
+            "Create project from copy",
+            type="primary",
+            icon=":material/content_copy:",
+        ):
+            if not name.strip():
+                st.error("New Program Name is required.")
+            elif not building_location.strip():
+                st.error("Building Location is required.")
+            else:
+                try:
+                    editor_name = st.session_state.get("current_editor", "")
+                    copy_result = copy_project(
+                        source_project_id,
+                        name=name.strip(),
+                        program=program.strip(),
+                        revision=revision.strip(),
+                        takt_time_s=display_to_seconds(takt, takt_unit),
+                        product_line=product_line.strip(),
+                        takt_time_unit=takt_unit,
+                        building_location=building_location.strip(),
+                        active_scenarios_only=True,
+                        editor_name=editor_name,
+                    )
+                    created_project_id = str(copy_result["project_id"])
+                    st.session_state.project_id = created_project_id
+                    st.session_state.pending_active_project_id = created_project_id
+                    st.session_state.scenario_id = None
+                    st.session_state.pop("global_project", None)
+                    st.session_state.pop("global_scenario", None)
+                    set_last_active_workspace(created_project_id, None)
+                    st.toast(
+                        f"Created project '{name.strip()}' copied from '{source_project.get('name', '')}'",
+                        icon=":material/check_circle:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+
+@st.dialog("Copy project to new NPI project")
+def copy_project_dialog(default_source_project_id: str | None = None):
+    _render_copy_project_form("standalone", default_source_project_id)
+
+
 @st.dialog("Create an NPI project")
 def new_project_dialog():
+    available_projects = projects()
+    creation_mode = "Blank project"
+    if available_projects:
+        creation_mode = st.radio(
+            "Starting point",
+            options=["Blank project", "Copy from an existing project"],
+            horizontal=True,
+            key="new_project_creation_mode",
+        )
+    if creation_mode == "Copy from an existing project":
+        _render_copy_project_form("from_new_dialog", project_id)
+        return
     with st.form("new_project"):
         name = st.text_input("Program Name")
         program = st.text_input("Product")
@@ -469,6 +610,18 @@ with st.container(horizontal=True, horizontal_alignment="right"):
 
 with st.container(border=True):
     section_heading_with_scope("Project definition", scope="project")
+    with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+        st.caption(
+            "Starting a new NPI program from current production or a previous project? "
+            "Copy this project (including only its Active scenarios) into a new project."
+        )
+        if st.button(
+            "New project from existing project",
+            icon=":material/content_copy:",
+            help="Create a new project initialized with shared project data and all Active scenarios from an existing project",
+            key=f"copy_project_from_definition_{project_id}",
+        ):
+            copy_project_dialog(project_id)
     with st.form("project_details"):
         identity_row = st.columns(2)
         name = identity_row[0].text_input("Project name", value=project["name"])
@@ -732,7 +885,7 @@ if scenario:
     scenario_editor_key = apply_pending_table_editor_reset(scenario_editor_key)
     all_scenarios = planning_scenarios(project_id, include_archived=True)
     scenario_columns = [
-        "id", "view_details", "current_view", "name", "revision_label", "status",
+        "id", "view_details", "current_view", "active", "name", "revision_label", "status",
         "takt", "takt_time_unit", "takt_time_s", "change_summary",
         "parent_scenario_id", "parent_scenario",
         "created_by", "created_at", "updated_at",
@@ -742,6 +895,10 @@ if scenario:
     scenario_rows["current_view"] = [
         "Current view" if str(value) == str(scenario_id) else ""
         for value in scenario_rows["id"]
+    ]
+    scenario_rows["active"] = [
+        str(status_val or "Working").strip().title() != "Archived"
+        for status_val in scenario_rows.get("status", [])
     ]
     scenario_rows["takt"] = [
         seconds_to_display(ts, tu)
@@ -759,9 +916,10 @@ if scenario:
     ]
     scenario_rows = scenario_rows.reindex(columns=scenario_columns)
     for column in [
-        column for column in scenario_columns if column not in {"takt", "takt_time_s"}
+        column for column in scenario_columns if column not in {"active", "takt", "takt_time_s"}
     ]:
         scenario_rows[column] = scenario_rows[column].astype("string").fillna("")
+    scenario_rows["active"] = scenario_rows["active"].fillna(True).astype(bool)
     scenario_rows["takt_time_s"] = pd.to_numeric(
         scenario_rows["takt_time_s"], errors="coerce"
     ).astype("float64")
@@ -778,9 +936,10 @@ if scenario:
             "Planning scenarios", scope="scenario", scenario_name=scenario["name"]
         )
         st.caption(
-            "Edit saved scenario metadata directly. A new row creates a complete branch from the "
-            "currently viewed scenario, including its Yamazumi and Process at a Glance data. "
-            "The newest saved branch becomes the shared scenario view across pages."
+            "Edit saved scenario metadata directly. Use the Active checkbox to turn scenarios "
+            "on or off across workspace scenario selectors (and control which scenarios are "
+            "included when copying a project). A new row creates a complete branch from the "
+            "currently viewed scenario, including its Yamazumi and Process at a Glance data."
         )
         st.info(
             "When you switch scenarios, the app changes which Parts Catalog records are Active, "
@@ -794,12 +953,12 @@ if scenario:
 
         visible_scenarios = filter_table(
             scenario_rows, key=f"overview_scenario_filters_{project_id}",
-            dropdown_columns=["status", "parent_scenario"],
+            dropdown_columns=["active", "parent_scenario"],
             search_columns=[
                 "name", "revision_label", "status", "change_summary",
                 "parent_scenario", "created_by",
             ],
-            labels={"parent_scenario": "Source scenario"},
+            labels={"active": "Active", "parent_scenario": "Source scenario"},
             reset_widget_keys=[scenario_editor_key],
         )
         selected_detail_key = f"overview_scenario_details_{project_id}"
@@ -818,18 +977,22 @@ if scenario:
         editor_rows = direct_entry_editor_rows(
             visible_scenarios, editor_key=scenario_editor_key,
             sort_columns=[
-                "current_view", "name", "revision_label", "takt",
+                "current_view", "active", "name", "revision_label", "takt",
                 "takt_time_unit",
                 "change_summary", "parent_scenario", "created_by", "updated_at",
             ],
             labels={
-                "current_view": "View", "name": "Scenario name",
+                "current_view": "View", "active": "Active", "name": "Scenario name",
                 "revision_label": "Scenario revision", "takt": "Takt",
                 "takt_time_unit": "Takt unit",
                 "parent_scenario": "Source scenario", "created_by": "Created by",
                 "updated_at": "Updated",
             },
         )
+        if "active" in editor_rows.columns:
+            new_scen_mask = editor_rows["id"].fillna("").astype(str).str.strip() == ""
+            editor_rows.loc[new_scen_mask, "active"] = True
+            editor_rows["active"] = editor_rows["active"].fillna(True).astype(bool)
         edited_scenarios = st.data_editor(
             editor_rows, key=scenario_editor_key, hide_index=True,
             num_rows="dynamic", height=390,
@@ -838,7 +1001,7 @@ if scenario:
                 "parent_scenario", "created_by", "created_at", "updated_at",
             ],
             column_order=[
-                "view_details", "current_view", "name", "revision_label",
+                "view_details", "current_view", "active", "name", "revision_label",
                 "takt", "takt_time_unit", "change_summary", "parent_scenario",
                 "created_by", "updated_at",
             ],
@@ -849,6 +1012,15 @@ if scenario:
                     key=f"overview_scenario_details_action_{project_id}",
                 ),
                 "current_view": st.column_config.TextColumn("View", pinned=True),
+                "active": st.column_config.CheckboxColumn(
+                    "Active",
+                    default=True,
+                    help=(
+                        "Active scenarios appear in scenario selectors across the workspace "
+                        "and are included when copying this project to a new NPI project. "
+                        "Uncheck to hide a scenario from active selectors without deleting its data."
+                    ),
+                ),
                 "name": st.column_config.TextColumn("Scenario name", required=True, pinned=True),
                 "revision_label": st.column_config.TextColumn(
                     "Scenario revision", required=True, default=suggested_revision
@@ -938,10 +1110,17 @@ if scenario:
                 save_records = []
                 for record in merged_scenarios.to_dict("records"):
                     record_id = str(record.get("id") or "")
-                    record["status"] = (
-                        str(original_scenarios[record_id].get("status") or "Working")
+                    orig_status = (
+                        str(original_scenarios[record_id].get("status") or "Working").strip().title()
                         if record_id in original_scenarios else "Working"
                     )
+                    raw_active = record.get("active")
+                    is_active = True if raw_active is None or pd.isna(raw_active) else bool(raw_active)
+                    if is_active:
+                        record["status"] = orig_status if orig_status != "Archived" else "Working"
+                    else:
+                        record["status"] = "Archived"
+                    record["active"] = is_active
                     selected_unit = str(record.get("takt_time_unit") or "seconds")
                     original = original_scenarios.get(record_id)
                     original_display = (
@@ -993,16 +1172,18 @@ if scenario:
                         "active_scenario_changed_fields": active_scenario_changed_fields,
                     },
                 )
+                active_after_save = planning_scenarios(project_id, include_archived=False)
+                active_ids_after_save = [str(row["id"]) for row in active_after_save]
                 if result["created_ids"]:
                     newest_id = str(result["created_ids"][-1])
-                    st.session_state["scenario_id"] = newest_id
-                    st.session_state["global_scenario"] = newest_id
-                    st.session_state["_qp_synced_scenario_id"] = newest_id
-                    try:
-                        st.query_params["scenario_id"] = newest_id
-                    except Exception:
-                        pass
+                    sync_active_scenario_state(newest_id, update_query_params=True)
+                    set_last_active_workspace(project_id, newest_id)
                     st.session_state[selected_detail_key] = newest_id
+                elif str(scenario_id) not in active_ids_after_save and active_ids_after_save:
+                    fallback_id = active_ids_after_save[0]
+                    sync_active_scenario_state(fallback_id, update_query_params=True)
+                    set_last_active_workspace(project_id, fallback_id)
+                    st.session_state[selected_detail_key] = fallback_id
                 request_table_editor_reset(scenario_editor_key)
                 created_scen_count = len(result["created_ids"])
                 updated_scen_count = int(result["updated_count"])
@@ -1028,7 +1209,7 @@ if scenario:
             st.subheader(f"Scenario details · {detail['name']}")
             detail_metrics = st.columns(4)
             detail_metrics[0].metric("Revision", detail["revision_label"])
-            detail_metrics[1].metric("Status", detail["status"])
+            detail_metrics[1].metric("Active", "Yes" if str(detail.get("status") or "Working").strip().title() != "Archived" else "No")
             detail_metrics[2].metric("Takt", format_seconds(detail["takt_time_s"], detail["takt_time_unit"]))
             detail_metrics[3].metric("Current view", "Yes" if str(detail["id"]) == str(scenario_id) else "No")
             source_label = (
