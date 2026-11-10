@@ -22,7 +22,7 @@ if "utils.model_part_store" in _sys.modules and getattr(_sys.modules["utils.mode
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
+if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 7:
     _importlib.reload(_sys.modules["utils.image_annotator"])
 
 from utils.clipboard_image import as_uploaded_file, clipboard_image, decode_clipboard_image

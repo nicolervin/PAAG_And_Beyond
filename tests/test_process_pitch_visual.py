@@ -1967,6 +1967,8 @@ class ProcessPitchVisualTests(unittest.TestCase):
                 for name in names:
                     if name.endswith((".xml", ".rels")):
                         ET.fromstring(zf.read(name))
+                pres_xml = zf.read("ppt/presentation.xml").decode("utf-8")
+                self.assertIn('cx="12191695" cy="6858000"', pres_xml)
                 slide1_text = zf.read("ppt/slides/slide1.xml").decode("utf-8")
                 self.assertIn(summary["pitch_number"], slide1_text)
                 self.assertIn("GE Appliances Logo", slide1_text)
@@ -1980,6 +1982,7 @@ class ProcessPitchVisualTests(unittest.TestCase):
                 self.assertIn("Use torque wrench at 45 Nm", slide1_text)
                 self.assertIn("TOOLS &amp; PPE REQUIRED", slide1_text)
                 self.assertIn("YAMAZUMI", slide1_text)
+                self.assertIn('val="35C84A"', slide1_text)
         finally:
             Path(saved_media["file_path"]).unlink(missing_ok=True)
             if saved_media.get("original_file_path"):
@@ -2531,6 +2534,65 @@ class ProcessPitchVisualTests(unittest.TestCase):
                 target_pitch_id=other_pitch_id,
                 editor_name="IE Collaborator",
             )
+
+    def test_zoomed_visual_aid_preserves_callout_without_left_edge_clipping(self) -> None:
+        import json
+        import tempfile
+        from PIL import Image
+        from utils.image_annotator import patch_visual_media_composite_image_shapes
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_path = Path(tmpdir) / "orig_portrait.png"
+            comp_path = Path(tmpdir) / "comp_portrait.png"
+            # Portrait image where default 150% zoom centered at panX=0.5 would crop x < 67 without callout-aware bounds
+            Image.new("RGB", (400, 600), (230, 230, 230)).save(orig_path, format="PNG")
+            Image.new("RGB", (400, 600), (230, 230, 230)).save(comp_path, format="PNG")
+
+            anns_json = json.dumps(
+                [
+                    {
+                        "id": "__transform__",
+                        "type": "__transform__",
+                        "ops": [],
+                        "zoom": 1.5,
+                        "panX": 0.5,
+                        "panY": 0.5,
+                    },
+                    {
+                        "id": "callout_1",
+                        "type": "text",
+                        "x": 12,
+                        "y": 90,
+                        "text": "Cut out faces up",
+                        "color": "#0284c7",
+                        "strokeWidth": 4,
+                        "fontSize": 18,
+                    },
+                ]
+            )
+            ok = patch_visual_media_composite_image_shapes(orig_path, comp_path, anns_json)
+            self.assertTrue(ok)
+            with Image.open(comp_path) as out_im:
+                rgb_im = out_im.convert("RGB")
+                self.assertEqual(rgb_im.size, (400, 600))
+                # The very left margin (x=0) should still be the light background/margin, not mid-text or clipped dark box
+                # And the callout box dark fill (15, 23, 42) or blue border should appear cleanly inside the left edge
+                left_edge_pixels = [rgb_im.getpixel((0, y)) for y in range(0, 220)]
+                self.assertTrue(
+                    all(p[0] > 100 for p in left_edge_pixels),
+                    f"Expected unclipped margin at x=0, got {left_edge_pixels[:5]}",
+                )
+                # Confirm the dark callout fill is present inside the zoomed image
+                has_callout_fill = False
+                for y in range(0, 260):
+                    for x in range(4, 250):
+                        r, g, b = rgb_im.getpixel((x, y))
+                        if r < 35 and g < 45 and b < 65:
+                            has_callout_fill = True
+                            break
+                    if has_callout_fill:
+                        break
+                self.assertTrue(has_callout_fill)
 
 
 if __name__ == "__main__":

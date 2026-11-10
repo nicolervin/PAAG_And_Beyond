@@ -18,17 +18,22 @@ def filter_table(
     *,
     key: str,
     dropdown_columns: Iterable[str] = (),
+    always_visible_dropdown_columns: Iterable[str] = (),
+    dropdown_options: dict[str, Iterable[object]] | None = None,
     search_columns: Iterable[str] | None = None,
     labels: dict[str, str] | None = None,
     reset_widget_keys: Iterable[str] = (),
     multi_value_columns: Iterable[str] = (),
     universal_values: dict[str, Iterable[str]] | None = None,
     keyword_container=None,
+    caption_container=None,
 ) -> pd.DataFrame:
     """Render consistent keyword/dropdown controls and return the visible rows."""
     if dataframe.empty:
         return dataframe.reset_index(drop=True)
     labels = labels or {}
+    dropdown_options = dropdown_options or {}
+    always_visible_set = {str(col) for col in (always_visible_dropdown_columns or ())}
     multi_value_columns = set(multi_value_columns)
     universal_values = universal_values or {}
     valid_dropdowns = [column for column in dropdown_columns if column in dataframe.columns]
@@ -57,9 +62,23 @@ def filter_table(
                     not in {str(marker).strip().casefold() for marker in universal_values.get(column, ())}
                 )
             )
+            values = sorted(values, key=lambda value: str(value).casefold())
+        elif column in dropdown_options:
+            explicit_vals = [
+                v for v in (dropdown_options.get(column) or ())
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            col_vals = [
+                v for v in dataframe[column].dropna().unique().tolist()
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            values = list(dict.fromkeys([*explicit_vals, *col_vals]))
         else:
-            values = dataframe[column].dropna().unique().tolist()
-        values = sorted(values, key=lambda value: str(value).casefold())
+            values = [
+                v for v in dataframe[column].dropna().unique().tolist()
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            values = sorted(values, key=lambda value: str(value).casefold())
         widget_key = f"{key}_{column}"
         saved_col_key = f"_saved_filter_col_{widget_key}"
         if widget_key not in st.session_state and saved_col_key in st.session_state:
@@ -75,7 +94,8 @@ def filter_table(
         ]
         if not isinstance(stored_selection, list) or stored_selection != normalized_selection:
             st.session_state[widget_key] = normalized_selection
-        selected[column] = controls.multiselect(
+        dropdown_host = keyword_host if str(column) in always_visible_set else controls
+        selected[column] = dropdown_host.multiselect(
             labels.get(column, column.replace("_", " ").capitalize()),
             options=values,
             placeholder="All",
@@ -119,7 +139,56 @@ def filter_table(
     )
     signature_key = f"{key}_visible_rows"
     prev_identity = st.session_state.get(signature_key)
-    if prev_identity != row_identity:
+    combined_filter_draft: dict[str, dict[str, Any]] = {}
+    if "id" in dataframe.columns and isinstance(prev_identity, tuple) and prev_identity:
+        for widget_key in reset_widget_keys:
+            logical_widget_key = logical_table_editor_key(widget_key)
+            if (
+                st.session_state.get(f"_reset_table_editor_{logical_widget_key}")
+                and not st.session_state.get(f"_pending_undo_last_edit_{logical_widget_key}")
+                and not st.session_state.get(f"_preserve_filter_draft_{logical_widget_key}")
+            ):
+                st.session_state.pop(f"_table_filter_id_draft_{logical_widget_key}", None)
+                continue
+            id_draft: dict[str, dict[str, Any]] = deepcopy(
+                st.session_state.get(f"_table_filter_id_draft_{logical_widget_key}") or {}
+            )
+            prior_widget_state = get_effective_table_editor_state(widget_key)
+            inst_key = _resolve_editor_instance_key(widget_key)
+            authoritative_visible = (
+                inst_key in st.session_state
+                or bool(st.session_state.get(f"_just_undid_last_edit_{logical_widget_key}"))
+            )
+            prior_edited = (
+                (prior_widget_state.get("edited_rows") or {})
+                if isinstance(prior_widget_state, dict)
+                else {}
+            )
+            for old_pos, raw_rid in enumerate(prev_identity):
+                rid = str(raw_rid).strip()
+                if not rid:
+                    continue
+                raw_changes = (
+                    prior_edited.get(old_pos)
+                    if old_pos in prior_edited
+                    else prior_edited.get(str(old_pos))
+                )
+                if isinstance(raw_changes, dict) and raw_changes:
+                    id_draft[rid] = deepcopy(dict(raw_changes))
+                elif authoritative_visible:
+                    id_draft.pop(rid, None)
+            if id_draft:
+                st.session_state[f"_table_filter_id_draft_{logical_widget_key}"] = id_draft
+                for rid_k, chg_v in id_draft.items():
+                    if isinstance(chg_v, dict) and chg_v:
+                        combined_filter_draft.setdefault(str(rid_k).strip(), {}).update(
+                            deepcopy(chg_v)
+                        )
+            else:
+                st.session_state.pop(f"_table_filter_id_draft_{logical_widget_key}", None)
+    if prev_identity is None:
+        st.session_state[signature_key] = row_identity
+    elif prev_identity != row_identity:
         st.session_state[signature_key] = row_identity
         same_visible_id_set = (
             "id" in visible.columns
@@ -133,23 +202,33 @@ def filter_table(
                 if "id" in visible.columns
                 else {}
             )
+            prev_id_set = (
+                {str(rid).strip() for rid in prev_identity if str(rid).strip()}
+                if isinstance(prev_identity, tuple)
+                else set()
+            )
             for widget_key in reset_widget_keys:
                 logical_widget_key = logical_table_editor_key(widget_key)
                 st.session_state.pop(f"_select_all_{logical_widget_key}", None)
                 prior_widget_state = get_effective_table_editor_state(widget_key)
                 st.session_state.pop(widget_key, None)
-                if isinstance(prior_widget_state, dict) and (
-                    prior_widget_state.get("added_rows")
-                    or prior_widget_state.get("edited_rows")
-                    or prior_widget_state.get("deleted_rows")
-                ):
-                    if (
-                        "id" in visible.columns
+                id_draft = (
+                    st.session_state.get(f"_table_filter_id_draft_{logical_widget_key}")
+                    or {}
+                )
+                remapped_edited: dict[int, dict[str, Any]] = {}
+                if "id" in visible.columns and new_pos_by_id:
+                    if isinstance(id_draft, dict) and id_draft:
+                        for rid, changes in id_draft.items():
+                            new_pos = new_pos_by_id.get(str(rid).strip())
+                            if new_pos is not None and isinstance(changes, dict) and changes:
+                                remapped_edited[new_pos] = deepcopy(changes)
+                    elif (
+                        isinstance(prior_widget_state, dict)
+                        and prior_widget_state.get("edited_rows")
                         and isinstance(prev_identity, tuple)
                         and prev_identity
-                        and new_pos_by_id
                     ):
-                        remapped_edited: dict[int, dict[str, Any]] = {}
                         for raw_pos, changes in (prior_widget_state.get("edited_rows") or {}).items():
                             try:
                                 old_pos = int(raw_pos)
@@ -160,28 +239,103 @@ def filter_table(
                                 new_pos = new_pos_by_id.get(rid)
                                 if new_pos is not None:
                                     remapped_edited[new_pos] = deepcopy(changes)
-                        remapped_deleted: list[int] = []
-                        for raw_pos in (prior_widget_state.get("deleted_rows") or []):
-                            try:
-                                old_pos = int(raw_pos)
-                            except (TypeError, ValueError):
-                                continue
-                            if 0 <= old_pos < len(prev_identity):
-                                rid = str(prev_identity[old_pos]).strip()
-                                new_pos = new_pos_by_id.get(rid)
-                                if new_pos is not None and new_pos not in remapped_deleted:
-                                    remapped_deleted.append(new_pos)
-                        remapped_added = deepcopy(prior_widget_state.get("added_rows") or [])
-                        if remapped_edited or remapped_deleted or remapped_added:
-                            st.session_state[f"_table_undo_seed_{logical_widget_key}"] = {
-                                "edited_rows": remapped_edited,
-                                "added_rows": remapped_added,
-                                "deleted_rows": remapped_deleted,
-                            }
-                            st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
-                    request_table_editor_reset(widget_key)
-    st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
-    return visible.copy().reset_index(drop=True)
+                remapped_deleted: list[int] = []
+                if (
+                    isinstance(prior_widget_state, dict)
+                    and prior_widget_state.get("deleted_rows")
+                    and "id" in visible.columns
+                    and isinstance(prev_identity, tuple)
+                    and prev_identity
+                    and new_pos_by_id
+                ):
+                    for raw_pos in (prior_widget_state.get("deleted_rows") or []):
+                        try:
+                            old_pos = int(raw_pos)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= old_pos < len(prev_identity):
+                            rid = str(prev_identity[old_pos]).strip()
+                            new_pos = new_pos_by_id.get(rid)
+                            if new_pos is not None and new_pos not in remapped_deleted:
+                                remapped_deleted.append(new_pos)
+                remapped_added = (
+                    deepcopy(prior_widget_state.get("added_rows") or [])
+                    if isinstance(prior_widget_state, dict)
+                    else []
+                )
+                hidden_visible_draft: dict[int, dict[str, Any]] = {}
+                if isinstance(id_draft, dict) and id_draft and new_pos_by_id:
+                    for rid, changes in id_draft.items():
+                        rid_s = str(rid).strip()
+                        if rid_s not in prev_id_set and rid_s in new_pos_by_id and isinstance(changes, dict) and changes:
+                            hidden_visible_draft[new_pos_by_id[rid_s]] = deepcopy(changes)
+                old_history = st.session_state.get(f"_table_undo_history_{logical_widget_key}")
+                new_history: list[dict[str, Any]] = [_empty_editor_state()]
+                if hidden_visible_draft:
+                    new_history.append(
+                        {
+                            "edited_rows": deepcopy(hidden_visible_draft),
+                            "added_rows": [],
+                            "deleted_rows": [],
+                        }
+                    )
+                if isinstance(old_history, list) and isinstance(prev_identity, tuple) and prev_identity:
+                    for hist_item in old_history:
+                        norm_hist = _normalize_editor_state(hist_item)
+                        if not _editor_state_has_changes(norm_hist):
+                            continue
+                        mapped_ed = deepcopy(hidden_visible_draft)
+                        for old_pos, ch in (norm_hist.get("edited_rows") or {}).items():
+                            if 0 <= int(old_pos) < len(prev_identity) and isinstance(ch, dict) and ch:
+                                rid_s = str(prev_identity[int(old_pos)]).strip()
+                                np = new_pos_by_id.get(rid_s)
+                                if np is not None:
+                                    mapped_ed[np] = deepcopy(ch)
+                        mapped_del: list[int] = []
+                        for old_pos in norm_hist.get("deleted_rows") or []:
+                            if 0 <= int(old_pos) < len(prev_identity):
+                                rid_s = str(prev_identity[int(old_pos)]).strip()
+                                np = new_pos_by_id.get(rid_s)
+                                if np is not None and np not in mapped_del:
+                                    mapped_del.append(np)
+                        mapped_state = {
+                            "edited_rows": mapped_ed,
+                            "added_rows": deepcopy(norm_hist.get("added_rows") or []),
+                            "deleted_rows": mapped_del,
+                        }
+                        if _editor_state_has_changes(mapped_state) and mapped_state != new_history[-1]:
+                            new_history.append(mapped_state)
+                if remapped_edited or remapped_deleted or remapped_added:
+                    next_seed = {
+                        "edited_rows": remapped_edited,
+                        "added_rows": remapped_added,
+                        "deleted_rows": remapped_deleted,
+                    }
+                    if new_history[-1] != next_seed:
+                        new_history.append(deepcopy(next_seed))
+                    st.session_state[f"_table_undo_history_{logical_widget_key}"] = new_history
+                    st.session_state.pop(f"_table_redo_history_{logical_widget_key}", None)
+                    st.session_state[f"_table_undo_seed_{logical_widget_key}"] = next_seed
+                    st.session_state[f"_table_subtab_draft_{logical_widget_key}"] = deepcopy(next_seed)
+                    st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
+                else:
+                    st.session_state[f"_table_undo_history_{logical_widget_key}"] = [_empty_editor_state()]
+                    st.session_state.pop(f"_table_redo_history_{logical_widget_key}", None)
+                    st.session_state.pop(f"_table_undo_seed_{logical_widget_key}", None)
+                    st.session_state.pop(f"_table_subtab_draft_{logical_widget_key}", None)
+                    if id_draft:
+                        st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
+                st.session_state[f"_preserve_filter_draft_{logical_widget_key}"] = True
+                request_table_editor_reset(widget_key)
+    caption_host = caption_container if caption_container is not None else st
+    caption_host.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
+    visible_out = visible.copy().reset_index(drop=True)
+    visible_out.attrs["_filter_editor_keys"] = [
+        logical_table_editor_key(k) for k in reset_widget_keys
+    ]
+    if combined_filter_draft:
+        visible_out.attrs["_filter_id_draft"] = deepcopy(combined_filter_draft)
+    return visible_out
 
 
 def split_filter_values(value) -> list[str]:
@@ -217,6 +371,34 @@ def merge_filtered_edits(
         return edited_dataframe.copy()
     visible_ids = set(filtered_dataframe[id_column].dropna().astype(str))
     hidden = full_dataframe[~full_dataframe[id_column].fillna("").astype(str).isin(visible_ids)].copy()
+    if not hidden.empty:
+        combined_draft: dict[str, dict[str, Any]] = {}
+        attr_draft = filtered_dataframe.attrs.get("_filter_id_draft")
+        if isinstance(attr_draft, dict):
+            for rid, chg in attr_draft.items():
+                if isinstance(chg, dict):
+                    combined_draft.setdefault(str(rid).strip(), {}).update(deepcopy(chg))
+        for lk in filtered_dataframe.attrs.get("_filter_editor_keys") or []:
+            ss_draft = st.session_state.get(f"_table_filter_id_draft_{lk}")
+            if isinstance(ss_draft, dict):
+                for rid, chg in ss_draft.items():
+                    if isinstance(chg, dict):
+                        combined_draft.setdefault(str(rid).strip(), {}).update(deepcopy(chg))
+        if combined_draft:
+            for h_idx in hidden.index:
+                raw_hid = hidden.at[h_idx, id_column]
+                hid_str = "" if raw_hid is None or pd.isna(raw_hid) else str(raw_hid).strip()
+                if not hid_str and "id" in hidden.columns:
+                    raw_id_col = hidden.at[h_idx, "id"]
+                    hid_str = "" if raw_id_col is None or pd.isna(raw_id_col) else str(raw_id_col).strip()
+                row_patch = combined_draft.get(hid_str)
+                if isinstance(row_patch, dict):
+                    for col_name, col_val in row_patch.items():
+                        if col_name in hidden.columns and col_name not in (id_column, "id", "selected"):
+                            try:
+                                hidden.at[h_idx, col_name] = col_val
+                            except Exception:
+                                pass
     return pd.concat([hidden, edited_dataframe], ignore_index=True, sort=False)
 
 
@@ -371,6 +553,21 @@ def _resolve_editor_instance_key(key: str) -> str:
         for existing_key in list(st.session_state.keys()):
             if str(existing_key).startswith(f"{key_str}_"):
                 return str(existing_key)
+        logical_part, inst_rest = key_str.split(_EDITOR_INSTANCE_MARKER, 1)
+        suffix_part = ""
+        if "_" in inst_rest:
+            _, suf = inst_rest.split("_", 1)
+            suffix_part = f"_{suf}"
+        gen_key = f"_table_editor_generation_{logical_part}"
+        if gen_key in st.session_state:
+            gen = int(st.session_state.get(gen_key, 0) or 0)
+            rotated = f"{logical_part}{_EDITOR_INSTANCE_MARKER}{gen}{suffix_part}"
+            if rotated in st.session_state:
+                return rotated
+            for existing_key in list(st.session_state.keys()):
+                if str(existing_key).startswith(f"{rotated}_"):
+                    return str(existing_key)
+            return rotated
         return key_str
     if key_str in st.session_state:
         return key_str
@@ -752,6 +949,37 @@ def last_table_undo_redo_message(key: str, default: str = "") -> str:
     return default
 
 
+def _sync_filter_id_draft_from_display_df(
+    logical_key: str,
+    display_df: pd.DataFrame | None,
+    edited_rows: dict[Any, Any] | None,
+) -> None:
+    if not isinstance(display_df, pd.DataFrame) or "id" not in display_df.columns:
+        return
+    id_draft: dict[str, dict[str, Any]] = deepcopy(
+        st.session_state.get(f"_table_filter_id_draft_{logical_key}") or {}
+    )
+    edited_map = edited_rows if isinstance(edited_rows, dict) else {}
+    for pos_i in range(len(display_df)):
+        rid_val = display_df.iloc[pos_i].get("id")
+        rid_str = "" if rid_val is None or pd.isna(rid_val) else str(rid_val).strip()
+        if not rid_str:
+            continue
+        raw_changes = (
+            edited_map.get(pos_i)
+            if pos_i in edited_map
+            else edited_map.get(str(pos_i))
+        )
+        if isinstance(raw_changes, dict) and raw_changes:
+            id_draft[rid_str] = deepcopy(dict(raw_changes))
+        else:
+            id_draft.pop(rid_str, None)
+    if id_draft:
+        st.session_state[f"_table_filter_id_draft_{logical_key}"] = id_draft
+    else:
+        st.session_state.pop(f"_table_filter_id_draft_{logical_key}", None)
+
+
 def undo_last_table_edit(key: str) -> bool:
     """Step back one edit in the table's unsaved edit history and queue a remount."""
     logical_key = logical_table_editor_key(key)
@@ -777,6 +1005,11 @@ def undo_last_table_edit(key: str) -> bool:
         )
     )
     st.session_state[f"_table_undo_history_{logical_key}"] = history
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        target_state.get("edited_rows"),
+    )
     if _editor_state_has_changes(target_state):
         st.session_state[f"_table_undo_seed_{logical_key}"] = deepcopy(target_state)
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(target_state)
@@ -841,6 +1074,11 @@ def redo_last_table_edit(key: str) -> bool:
     )
     history.append(deepcopy(target_state))
     st.session_state[f"_table_undo_history_{logical_key}"] = history
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        target_state.get("edited_rows"),
+    )
     if _editor_state_has_changes(target_state):
         st.session_state[f"_table_undo_seed_{logical_key}"] = deepcopy(target_state)
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(target_state)
@@ -953,7 +1191,19 @@ def _wrap_data_editor(data, *args, **kwargs):
     if not key or not isinstance(data, pd.DataFrame):
         return _ORIG_DATA_EDITOR(data, *args, **kwargs)
 
-    logical_key = logical_table_editor_key(str(key))
+    key_str = str(key)
+    logical_key = logical_table_editor_key(key_str)
+    if st.session_state.get(f"_reset_table_editor_{logical_key}"):
+        suffix_part = ""
+        if _EDITOR_INSTANCE_MARKER in key_str:
+            _, inst_rest = key_str.split(_EDITOR_INSTANCE_MARKER, 1)
+            if "_" in inst_rest:
+                _, suf = inst_rest.split("_", 1)
+                suffix_part = f"_{suf}"
+        rotated_base = apply_pending_table_editor_reset(logical_key)
+        key = f"{rotated_base}{suffix_part}"
+        kwargs["key"] = key
+
     id_draft_patches = st.session_state.pop("_pending_id_draft_patches", None)
     id_draft_live_cells = st.session_state.pop("_pending_id_draft_live_cells", None)
     live_df = data.copy()
@@ -1189,6 +1439,11 @@ def _wrap_data_editor(data, *args, **kwargs):
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(effective_after)
     else:
         st.session_state.pop(f"_table_subtab_draft_{logical_key}", None)
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        display_df,
+        effective_after.get("edited_rows"),
+    )
     st.session_state.pop(f"_just_undid_last_edit_{logical_key}", None)
     return result_df
 
@@ -1199,12 +1454,20 @@ st.data_editor = _wrap_data_editor
 def has_unsaved_table_changes(key: str) -> bool:
     """Return whether a data editor currently contains pending cell or row changes."""
     logical_key = logical_table_editor_key(key)
-    if st.session_state.get(f"_reset_table_editor_{logical_key}") and not st.session_state.get(
-        f"_pending_undo_last_edit_{logical_key}"
+    if (
+        st.session_state.get(f"_reset_table_editor_{logical_key}")
+        and not st.session_state.get(f"_pending_undo_last_edit_{logical_key}")
+        and not st.session_state.get(f"_preserve_filter_draft_{logical_key}")
     ):
         return False
     state = get_effective_table_editor_state(key)
-    return bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
+    if state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"):
+        return True
+    filter_draft = st.session_state.get(f"_table_filter_id_draft_{logical_key}")
+    return bool(
+        isinstance(filter_draft, dict)
+        and any(isinstance(changes, dict) and bool(changes) for changes in filter_draft.values())
+    )
 
 
 def logical_table_editor_key(key: str) -> str:
@@ -1236,6 +1499,11 @@ def reset_table_editor_selection(key: str, *, column: str = "selected") -> None:
         filtered_row = {col: val for col, val in row.items() if col != column}
         if filtered_row:
             cleaned_added.append(deepcopy(filtered_row))
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        cleaned_edited,
+    )
     has_other_edits = bool(cleaned_edited or cleaned_added)
     if has_other_edits:
         next_seed = {
@@ -1251,6 +1519,7 @@ def reset_table_editor_selection(key: str, *, column: str = "selected") -> None:
         st.session_state.pop(f"_table_subtab_draft_{logical_key}", None)
         st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", None)
     st.session_state[f"_preserve_select_all_{logical_key}"] = True
+    st.session_state[f"_preserve_filter_draft_{logical_key}"] = True
     request_table_editor_reset(logical_key)
 
 
@@ -1268,6 +1537,9 @@ def apply_pending_table_editor_reset(key: str) -> str:
     if st.session_state.pop(f"_reset_table_editor_{logical_key}", False):
         preserve_select_all = bool(
             st.session_state.pop(f"_preserve_select_all_{logical_key}", False)
+        )
+        preserve_filter_draft = bool(
+            st.session_state.pop(f"_preserve_filter_draft_{logical_key}", False)
         )
         is_undo_reset = bool(
             st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", False)
@@ -1304,6 +1576,8 @@ def apply_pending_table_editor_reset(key: str) -> str:
             st.session_state.pop(f"_table_live_df_{logical_key}", None)
             st.session_state.pop(f"_table_display_df_{logical_key}", None)
             st.session_state.pop(f"_table_id_draft_{logical_key}", None)
+            if not preserve_filter_draft:
+                st.session_state.pop(f"_table_filter_id_draft_{logical_key}", None)
             st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
             st.session_state.pop(f"_confirm_save_conflict_overwrite_{logical_key}", None)
             st.session_state.pop(f"_confirm_save_conflict_discard_{logical_key}", None)
