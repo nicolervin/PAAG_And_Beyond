@@ -29,9 +29,9 @@ if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 14:
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 15:
     _importlib.reload(_sys.modules["utils.process_pitch_visual"])
-if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
+if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 7:
     _importlib.reload(_sys.modules["utils.image_annotator"])
 if "utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_REV_20261103", 0) < 1:
     _importlib.reload(_sys.modules["utils.yamazumi_store"])
