@@ -15,6 +15,7 @@ from utils.equipment_store import (
     EQUIPMENT_TIERS,
     UNIT_ORIENTATION_OPTIONS,
     attach_equipment_to_function,
+    clear_equipment_origin_flag,
     clear_unlinked_equipment_process_links,
     conveyor_zones,
     delete_conveyor_zone_image,
@@ -27,10 +28,13 @@ from utils.equipment_store import (
     equipment_assets,
     equipment_deletion_impact,
     equipment_needs_vs_placements_matrix,
+    equipment_origin_flags,
     equipment_pitch_options,
     equipment_placement_detail,
     equipment_placement_mismatches,
+    equipment_prerequisite_violations,
     equipment_process_options,
+    equipment_scenario_process_options,
     equipment_torque_compatibility_warnings,
     equipment_torque_published_specifications,
     equipment_torque_requirement_ids,
@@ -114,8 +118,12 @@ def _editor_name() -> str:
 
 def _pitch_label(row: pd.Series | dict) -> str:
     number = _text(row.get("pitch_number")) or "Unassigned"
+    if number == "Unassigned":
+        return number
     name = _text(row.get("pitch_name"))
-    return f"{number} — {name}" if name else number
+    area = _text(row.get("area_name") or row.get("pitch_area_name"))
+    base = f"{number} — {name}" if name else number
+    return f"{base} ({area})" if area and area.casefold() != name.casefold() else base
 
 
 def _equipment_export(frame: pd.DataFrame) -> pd.DataFrame:
@@ -128,22 +136,35 @@ def _equipment_export(frame: pd.DataFrame) -> pd.DataFrame:
     export["Model"] = export.get("model", "")
     export["Station / Pitch"] = (
         [
-            f"{_text(num) or 'Unassigned'} — {_text(nm)}"
-            if _text(nm)
-            else (_text(num) or "Unassigned")
-            for num, nm in zip(
+            _pitch_label(
+                {
+                    "pitch_number": num,
+                    "pitch_name": nm,
+                    "pitch_area_name": area,
+                }
+            )
+            for num, nm, area in zip(
                 export.get("pitch_number", []),
                 export.get("pitch_name", []),
+                export.get("pitch_area_name", [""] * len(export)),
             )
         ]
         if not export.empty
         else ""
     )
+    export["Linked Pitch Details"] = export.get("linked_pitches", "")
+    export["Monument / Permanently Fixed"] = (
+        ["Yes" if bool(v) else "No" for v in export.get("is_monument", [])]
+        if not export.empty
+        else ""
+    )
+    export["Linked Process Functions"] = export.get("linked_processes", "")
     export["Notes"] = export.get("notes", "")
     return export.reindex(
         columns=[
             "Equipment name", "Tier", "Equipment Type", "Description", "Manufacturer",
-            "Model", "Station / Pitch", "Notes",
+            "Model", "Station / Pitch", "Monument / Permanently Fixed",
+            "Linked Pitch Details", "Linked Process Functions", "Notes",
         ]
     )
 
@@ -427,7 +448,11 @@ def _render_equipment_table(
         editor_source,
         key=f"equipment_assets_filters_{project_id}_{functional_area}_{suffix}",
         dropdown_columns=["equipment_tier", "equipment_type_id", "pitch_id"],
-        search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
+        search_columns=[
+            "name", "equipment_tier", "equipment_type", "description",
+            "manufacturer", "model", "notes", "pitch_number", "pitch_name",
+            "pitch_area_name", "linked_pitches", "linked_processes",
+        ],
         labels={"equipment_tier": "Tier", "equipment_type_id": "Equipment Type", "pitch_id": "Station / Pitch"},
         reset_widget_keys=[editor_key],
     )
@@ -447,11 +472,14 @@ def _render_equipment_table(
         hide_index=True,
         column_order=[
             "name", "equipment_tier", "equipment_type_id", "description", "manufacturer", "model",
-            "pitch_id", "notes", "image", "process_link_count", "torque_requirement_count",
+            "pitch_id", "is_monument", "linked_pitches", "linked_processes",
+            "notes", "image", "process_link_count", "torque_requirement_count",
         ],
         disabled=[
             "id", "project_id", "equipment_tier", "equipment_type", "image_path", "functional_areas",
-            "placement_id", "pitch_number", "pitch_name", "process_link_count",
+            "placement_id", "pitch_number", "pitch_name", "pitch_area_name",
+            "origin_pitch_id", "origin_pitch_snapshot", "move_confirmed",
+            "linked_pitches", "linked_processes", "process_link_count",
             "torque_requirement_count", "created_at", "updated_at", "image",
             *(["equipment_type_id"] if equipment_type_id else []),
             *(["pitch_id"] if not scenario_id else []),
@@ -464,6 +492,10 @@ def _render_equipment_table(
             "placement_id": None,
             "pitch_number": None,
             "pitch_name": None,
+            "pitch_area_name": None,
+            "origin_pitch_id": None,
+            "origin_pitch_snapshot": None,
+            "move_confirmed": None,
             "image_path": None,
             "created_at": None,
             "updated_at": None,
@@ -491,6 +523,21 @@ def _render_equipment_table(
                 options=["", *pitch_labels],
                 format_func=lambda value: "Unassigned" if not _text(value) else pitch_labels.get(str(value), "Unavailable Pitch"),
                 help="The scenario-specific physical Pitch where this equipment is currently placed.",
+            ),
+            "is_monument": st.column_config.CheckboxColumn(
+                "Monument / Fixed",
+                default=False,
+                help="Flag equipment as a Monument / Permanently Fixed asset that will not move when operations are rebalanced.",
+            ),
+            "linked_pitches": st.column_config.TextColumn(
+                "Linked Pitch Details",
+                width="medium",
+                help="Detailed Station / Pitch placement (Pitch Number, Pitch Name, Area), Monument flag, and any origin-pitch relocation history.",
+            ),
+            "linked_processes": st.column_config.TextColumn(
+                "Linked Process Functions",
+                width="large",
+                help="PAAG Process Functions (Op ID — Work Element), Prerequisite Operations, and Torque Requirement links.",
             ),
             "notes": st.column_config.TextColumn("Notes", width="large"),
             "image": st.column_config.TextColumn("Primary image"),
@@ -697,29 +744,74 @@ def _render_equipment_detail(
             st.info("Select an active planning scenario to place equipment or link Process Functions.")
         else:
             placement = equipment_placement_detail(project_id, scenario_id, selected_id)
+            origin_snap = _text(placement.get("origin_pitch_snapshot"))
+            if origin_snap:
+                origin_col, clear_origin_col = st.columns([3.5, 1.5])
+                origin_col.info(
+                    f"📍 **Relocated Tool Flag:** This equipment moved with its process step from **{origin_snap}**.",
+                )
+                if clear_origin_col.button(
+                    "Acknowledge / Clear origin flag",
+                    icon=":material/check_circle:",
+                    key=f"clear_eq_origin_flag_detail_{project_id}_{scenario_id}_{selected_id}",
+                ):
+                    clear_equipment_origin_flag(project_id, scenario_id, selected_id, _editor_name())
+                    st.toast("Cleared origin pitch flag.", icon=":material/check_circle:")
+                    st.rerun()
+
             pitches = equipment_pitch_options(project_id, scenario_id)
             pitch_labels = {
                 _text(row["id"]): _pitch_label(row) for _, row in pitches.iterrows()
             }
+            all_scenario_ops = equipment_scenario_process_options(project_id, scenario_id)
+            all_op_labels: dict[str, str] = {}
+            op_pitch_map: dict[str, str] = {}
+            for _, row in all_scenario_ops.iterrows():
+                wid = _text(row["id"])
+                pid = _text(row.get("pitch_id"))
+                p_lbl = _pitch_label(
+                    {
+                        "pitch_number": row.get("pitch_number", ""),
+                        "pitch_name": row.get("pitch_name", ""),
+                        "pitch_area_name": row.get("pitch_area_name", ""),
+                    }
+                )
+                op_pitch_map[wid] = pid
+                all_op_labels[wid] = (
+                    f"{row['op_id']} — {row['work_element']}"
+                    + (f" [{p_lbl}]" if p_lbl and p_lbl != "Unassigned" else " [Unassigned Pitch]")
+                )
+
             selected_pitch = st.selectbox(
-                "Station / Pitch",
+                "Station / Pitch (optional if selecting Process Function first)",
                 options=["", *pitch_labels],
                 index=(
                     ["", *pitch_labels].index(_text(placement["pitch_id"]))
                     if _text(placement["pitch_id"]) in ["", *pitch_labels] else 0
                 ),
-                format_func=lambda value: "Unassigned" if not _text(value) else pitch_labels.get(str(value), "Unavailable Pitch"),
+                format_func=lambda value: (
+                    "Auto-derive from Linked Process Function (or Unassigned)"
+                    if not _text(value)
+                    else pitch_labels.get(str(value), "Unavailable Pitch")
+                ),
                 key=f"equipment_detail_pitch_{project_id}_{scenario_id}_{selected_id}",
-                help="One equipment placement belongs to at most one Pitch in a planning scenario.",
+                help=(
+                    "Process-First linking: You may leave Station / Pitch blank and select Linked Process Functions first — "
+                    "the tool's single physical Station / Pitch will be derived automatically from the selected operation(s)."
+                ),
             )
-            process_options = (
-                equipment_process_options(project_id, scenario_id, str(selected_pitch))
-                if selected_pitch else pd.DataFrame()
-            )
-            process_labels = {
-                _text(row["id"]): f"{row['op_id']} — {row['work_element']}"
-                for _, row in process_options.iterrows()
-            }
+            if selected_pitch:
+                process_options = equipment_process_options(project_id, scenario_id, str(selected_pitch))
+                process_labels = {
+                    _text(row["id"]): f"{row['op_id']} — {row['work_element']}"
+                    for _, row in process_options.iterrows()
+                }
+                for existing_wid in placement["work_element_ids"]:
+                    if existing_wid not in process_labels and existing_wid in all_op_labels:
+                        process_labels[existing_wid] = all_op_labels[existing_wid]
+            else:
+                process_labels = dict(all_op_labels)
+
             valid_defaults = [
                 value for value in placement["work_element_ids"] if value in process_labels
             ]
@@ -762,14 +854,58 @@ def _render_equipment_detail(
                     except ValueError as exc:
                         st.error(str(exc))
             selected_work = st.multiselect(
-                "Linked Process Functions",
+                "Linked Process Functions (Primary — at Equipment's Pitch)",
                 options=list(process_labels),
                 default=valid_defaults,
                 format_func=lambda value: process_labels.get(str(value), "Unavailable Process Function"),
-                key=f"equipment_detail_process_{project_id}_{scenario_id}_{selected_id}_{selected_pitch or 'none'}",
-                disabled=not selected_pitch,
-                help="Only Process Functions currently assigned to the selected Pitch can be linked.",
+                key=f"equipment_detail_process_{project_id}_{scenario_id}_{selected_id}_{selected_pitch or 'auto'}",
+                help=(
+                    "Select the Process Function(s) performed by this physical tool. "
+                    "A single physical tool can only exist in one Pitch; if Station / Pitch is blank, it will auto-derive from your selection."
+                ),
             )
+            if not selected_pitch and selected_work:
+                derived_pitches = {op_pitch_map.get(str(w), "") for w in selected_work if op_pitch_map.get(str(w), "")}
+                if len(derived_pitches) == 1:
+                    derived_pid = next(iter(derived_pitches))
+                    st.caption(
+                        f"🎯 **Auto-derived Station / Pitch:** {pitch_labels.get(derived_pid, derived_pid)}"
+                    )
+                elif len(derived_pitches) > 1:
+                    st.warning(
+                        "⚠️ Physical single-pitch rule: The selected primary Process Functions span multiple Pitches. "
+                        "Each physical tool can only exist in one Pitch — please select steps within a single Pitch."
+                    )
+
+            prereq_options = {
+                wid: lbl for wid, lbl in all_op_labels.items() if wid not in set(selected_work)
+            }
+            valid_prereq_defaults = [
+                value for value in placement.get("prerequisite_work_element_ids", []) if value in prereq_options
+            ]
+            selected_prereq = st.multiselect(
+                "Prerequisite Operations (must occur before this equipment's Pitch)",
+                options=list(prereq_options),
+                default=valid_prereq_defaults,
+                format_func=lambda value: prereq_options.get(str(value), "Unavailable Process Function"),
+                key=f"equipment_detail_prereq_{project_id}_{scenario_id}_{selected_id}",
+                help=(
+                    "Optional upstream operations (e.g., part prep, adhesive apply, pre-stage) that must happen "
+                    "in an earlier (upstream) Pitch or earlier in the same Pitch before this equipment's operation."
+                ),
+            )
+
+            default_monument = bool(placement.get("is_monument", asset.get("is_monument", False)))
+            is_monument_val = st.checkbox(
+                "Monument / Permanently Fixed Equipment (cannot easily move with rebalanced process steps)",
+                value=default_monument,
+                key=f"equipment_detail_monument_{project_id}_{scenario_id}_{selected_id}",
+                help=(
+                    "Flag this equipment as a Monument or Permanently Fixed asset. "
+                    "If its linked process step is moved to another Pitch, automatic tool movement is blocked and a Monument constraint alert is raised."
+                ),
+            )
+
             is_station_tier = _text(asset.get("equipment_tier")) == "Station/Pitch Equipment"
             mark_pitch_blocked = False
             if is_station_tier and selected_pitch:
@@ -794,6 +930,8 @@ def _render_equipment_detail(
                         list(selected_work),
                         _editor_name(),
                         mark_pitch_blocked=mark_pitch_blocked,
+                        prerequisite_work_element_ids=list(selected_prereq),
+                        is_monument=bool(is_monument_val),
                     )
                     st.toast(
                         "Saved the equipment placement"
@@ -807,6 +945,8 @@ def _render_equipment_detail(
             placement_unsaved = (
                 str(selected_pitch or "") != _text(placement["pitch_id"])
                 or list(selected_work) != list(valid_defaults)
+                or list(selected_prereq) != list(valid_prereq_defaults)
+                or bool(is_monument_val) != bool(default_monument)
                 or bool(mark_pitch_blocked)
             )
             trigger_place_save, trigger_place_discard = register_unsaved_source(
@@ -816,9 +956,11 @@ def _render_equipment_detail(
             if trigger_place_discard:
                 st.session_state.pop(f"equipment_detail_pitch_{project_id}_{scenario_id}_{selected_id}", None)
                 st.session_state.pop(
-                    f"equipment_detail_process_{project_id}_{scenario_id}_{selected_id}_{selected_pitch or 'none'}",
+                    f"equipment_detail_process_{project_id}_{scenario_id}_{selected_id}_{selected_pitch or 'auto'}",
                     None,
                 )
+                st.session_state.pop(f"equipment_detail_prereq_{project_id}_{scenario_id}_{selected_id}", None)
+                st.session_state.pop(f"equipment_detail_monument_{project_id}_{scenario_id}_{selected_id}", None)
                 st.session_state.pop(
                     f"equipment_block_pitch_{project_id}_{scenario_id}_{selected_id}_{selected_pitch}",
                     None,
@@ -835,6 +977,8 @@ def _render_equipment_detail(
                         list(selected_work),
                         _editor_name(),
                         mark_pitch_blocked=mark_pitch_blocked,
+                        prerequisite_work_element_ids=list(selected_prereq),
+                        is_monument=bool(is_monument_val),
                     )
                     st.toast(
                         "Saved the equipment placement"
@@ -1100,39 +1244,155 @@ def _render_mismatch_review(
                 except ValueError as exc:
                     st.error(str(exc))
 
+    origin_df = equipment_origin_flags(project_id, scenario_id)
+    if not origin_df.empty:
+        origin_df = origin_df.loc[origin_df["equipment_id"].astype(str).isin(allowed_ids)].copy()
+    if not origin_df.empty:
+        with st.expander(
+            f"📍 Relocated equipment origin flags ({len(origin_df)}) — Moved with process steps",
+            expanded=True,
+            icon=":material/location_on:",
+        ):
+            st.info(
+                "These tools moved to a new Station / Pitch along with their linked Process Function(s). "
+                "Review the originating section and acknowledge/clear the flag once physical tool relocation is complete."
+            )
+            origin_display = origin_df.rename(
+                columns={
+                    "equipment_name": "Equipment name",
+                    "equipment_type": "Equipment type",
+                    "origin_pitch": "Origin Station / Pitch",
+                    "current_pitch": "Current Station / Pitch",
+                }
+            )[["Equipment name", "Equipment type", "Origin Station / Pitch", "Current Station / Pitch"]]
+            selectable_dataframe(
+                origin_display,
+                key=f"equipment_origin_flags_table_{project_id}_{scenario_id}_{functional_area}",
+                hide_index=True,
+            )
+            origin_choices = {
+                str(r["equipment_id"]): f"{r['equipment_name']} (Moved from {r['origin_pitch']} → {r['current_pitch']})"
+                for _, r in origin_df.iterrows()
+            }
+            col_orig_sel, col_orig_one, col_orig_all = st.columns([2.6, 1.3, 1.3])
+            chosen_orig_eq = col_orig_sel.selectbox(
+                "Relocated equipment flag",
+                options=list(origin_choices.keys()),
+                format_func=lambda eid: origin_choices.get(str(eid), str(eid)),
+                key=f"eq_origin_flag_select_{project_id}_{scenario_id}_{functional_area}",
+            )
+            if col_orig_one.button(
+                "Acknowledge selected",
+                icon=":material/check:",
+                key=f"eq_origin_flag_clear_one_{project_id}_{scenario_id}_{functional_area}",
+            ):
+                clear_equipment_origin_flag(project_id, scenario_id, str(chosen_orig_eq), _editor_name())
+                st.toast("Acknowledged and cleared origin pitch flag.", icon=":material/check_circle:")
+                st.rerun()
+            if col_orig_all.button(
+                "Acknowledge all",
+                icon=":material/done_all:",
+                key=f"eq_origin_flag_clear_all_{project_id}_{scenario_id}_{functional_area}",
+            ):
+                for eid in origin_choices:
+                    clear_equipment_origin_flag(project_id, scenario_id, str(eid), _editor_name())
+                st.toast("Cleared all origin pitch flags in this view.", icon=":material/check_circle:")
+                st.rerun()
+
+    prereq_df = equipment_prerequisite_violations(project_id, scenario_id)
+    if not prereq_df.empty:
+        prereq_df = prereq_df.loc[prereq_df["equipment_id"].astype(str).isin(allowed_ids)].copy()
+    if not prereq_df.empty:
+        with st.expander(
+            f"⚠️ Prerequisite operation sequence violations ({len(prereq_df)})",
+            expanded=True,
+            icon=":material/rule:",
+        ):
+            st.error(
+                "One or more Prerequisite Operations linked to equipment are scheduled in a Pitch *after* "
+                "(downstream of) the equipment's Pitch, or are unassigned. Prerequisite operations must occur before the equipment's Pitch."
+            )
+            prereq_display = prereq_df.rename(
+                columns={
+                    "equipment_name": "Equipment name",
+                    "equipment_pitch": "Equipment Pitch",
+                    "prerequisite_operation": "Prerequisite Operation",
+                    "prerequisite_pitch": "Prerequisite Current Pitch",
+                    "reason": "Sequence Issue",
+                }
+            )[
+                [
+                    "Equipment name",
+                    "Equipment Pitch",
+                    "Prerequisite Operation",
+                    "Prerequisite Current Pitch",
+                    "Sequence Issue",
+                ]
+            ]
+            selectable_dataframe(
+                prereq_display,
+                key=f"equipment_prereq_violations_table_{project_id}_{scenario_id}_{functional_area}",
+                hide_index=True,
+            )
+
     mismatches = equipment_placement_mismatches(project_id, scenario_id)
     mismatches = mismatches.loc[mismatches["equipment_id"].astype(str).isin(allowed_ids)]
     if mismatches.empty:
         return
     with st.expander("Equipment placement review", expanded=True, icon=":material/warning:"):
         st.warning(
-            "These linked Process Functions no longer match the equipment's saved Station / Pitch."
+            "These linked Process Functions were moved to a different Station / Pitch than the equipment's saved placement. "
+            "Movable tools can be confirmed to move with the process step (leaving an Origin Flag on the original pitch), "
+            "while **Monument / Permanently Fixed** equipment cannot move automatically."
         )
-        display = mismatches.rename(
+        mismatches_view = mismatches.copy()
+        mismatches_view["monument_status"] = [
+            "🏛️ Monument / Fixed (Cannot auto-move)" if bool(v) else "Movable (Confirm to move)"
+            for v in mismatches_view.get("is_monument", [False] * len(mismatches_view))
+        ]
+        display = mismatches_view.rename(
             columns={
                 "name": "Equipment name",
-                "saved_pitch": "Saved Pitch",
+                "monument_status": "Mobility / Constraint",
+                "saved_pitch": "Origin / Saved Pitch",
                 "process_function": "Linked Process Function",
-                "current_pitch": "Current Pitch",
+                "current_pitch": "Process Current Pitch",
             }
-        )[["Equipment name", "Saved Pitch", "Linked Process Function", "Current Pitch"]]
+        )[["Equipment name", "Mobility / Constraint", "Origin / Saved Pitch", "Linked Process Function", "Process Current Pitch"]]
         selectable_dataframe(
             display,
             key=f"equipment_mismatch_table_{project_id}_{scenario_id}_{functional_area}",
             hide_index=True,
         )
         movable: dict[str, str] = {}
+        monument_blocked: list[str] = []
+        all_mismatch_names: dict[str, str] = {}
         for equipment_id, group in mismatches.groupby("equipment_id", sort=False):
+            eq_name = _text(group.iloc[0]["name"])
+            all_mismatch_names[str(equipment_id)] = eq_name
+            is_mon = bool(group.iloc[0].get("is_monument", False))
+            if is_mon:
+                monument_blocked.append(f"**{eq_name}** (at {_text(group.iloc[0]['saved_pitch'])})")
+                continue
             current_ids = {_text(value) for value in group["current_pitch_id"]}
             if "" not in current_ids and len(current_ids) == 1:
-                movable[str(equipment_id)] = _text(group.iloc[0]["name"])
+                movable[str(equipment_id)] = (
+                    f"{eq_name} ({_text(group.iloc[0]['saved_pitch'])} → {_text(group.iloc[0]['current_pitch'])})"
+                )
+        if monument_blocked:
+            st.error(
+                "🏛️ **Monument / Permanently Fixed Constraint:** "
+                + ", ".join(monument_blocked)
+                + " cannot be moved automatically with rebalanced operations. "
+                "Move the operation back to the Monument's pitch in Yamazumi, or unlink the moved operation below."
+            )
         pending_unlink_key = f"equipment_mismatch_pending_unlink_{project_id}_{scenario_id}_{functional_area}"
 
         @st.dialog("Unlink moved Process operations?", dismissible=False)
         def confirm_unlink_moved_ops() -> None:
             target_eq_id = _text(st.session_state.get(pending_unlink_key))
             is_all = target_eq_id == "__ALL__"
-            target_label = "all mismatched equipment assets" if is_all else movable.get(target_eq_id, "this equipment asset")
+            target_label = "all mismatched equipment assets" if is_all else all_mismatch_names.get(target_eq_id, "this equipment asset")
             st.warning(
                 f"Unlink moved Process operations from **{target_label}** so the equipment remains anchored at its saved Station / Pitch?"
             )
@@ -1165,7 +1425,8 @@ def _render_mismatch_review(
 
         if not movable:
             st.info(
-                "The linked Process Functions are split across Pitches or include an unassigned step. "
+                "No movable single-pitch equipment is eligible for automatic relocation (either flagged as Monument / Permanently Fixed, "
+                "or linked Process Functions are split across Pitches). "
                 "You can unlink the moved operations below to keep equipment anchored at its saved Station / Pitch."
             )
             if st.button(
@@ -1179,7 +1440,7 @@ def _render_mismatch_review(
                 confirm_unlink_moved_ops()
             return
         selected_id = st.selectbox(
-            "Equipment eligible for reconciliation",
+            "Movable equipment eligible to follow its Process Function",
             options=list(movable),
             format_func=lambda value: movable.get(str(value), "Unavailable equipment"),
             key=f"equipment_mismatch_move_choice_{project_id}_{scenario_id}_{functional_area}",
@@ -1187,10 +1448,11 @@ def _render_mismatch_review(
         pending_key = f"equipment_mismatch_pending_move_{project_id}_{scenario_id}_{functional_area}"
         col_act1, col_act2 = st.columns(2)
         if col_act1.button(
-            "Move equipment to current Pitch",
+            "Confirm & Move tool with Process Step",
+            type="primary",
             icon=":material/move_item:",
             key=f"equipment_mismatch_move_{project_id}_{scenario_id}_{functional_area}",
-            help="Move this equipment asset to follow its linked process steps.",
+            help="Confirm moving this tool to the new Pitch and leave an Origin Flag on the originating section.",
         ):
             st.session_state[pending_key] = str(selected_id)
 
@@ -1205,19 +1467,19 @@ def _render_mismatch_review(
         if st.session_state.get(pending_unlink_key):
             confirm_unlink_moved_ops()
 
-        @st.dialog("Move equipment to current Pitch?", dismissible=False)
+        @st.dialog("Confirm moving equipment with Process Step?", dismissible=False)
         def confirm_move() -> None:
             equipment_id = _text(st.session_state.get(pending_key))
             st.warning(
-                f"Move {movable.get(equipment_id, 'this equipment')} to the one current Pitch "
-                "shared by all of its linked Process Functions?"
+                f"Confirm moving **{movable.get(equipment_id, 'this equipment')}** to follow its linked Process Function(s)?\n\n"
+                "An **Origin Flag** will be placed on the originating section/pitch so the team knows where this tool originated."
             )
             actions = st.container(horizontal=True)
             if actions.button("Cancel", key=f"cancel_equipment_pitch_move_{equipment_id}"):
                 st.session_state.pop(pending_key, None)
                 st.rerun()
             if actions.button(
-                "Move equipment",
+                "Confirm & Move equipment",
                 type="primary",
                 icon=":material/move_item:",
                 key=f"destructive_confirm_equipment_pitch_move_{equipment_id}",
@@ -1227,7 +1489,7 @@ def _render_mismatch_review(
                         project_id, scenario_id, equipment_id, _editor_name()
                     )
                     st.session_state.pop(pending_key, None)
-                    st.toast("Moved equipment to the current Pitch", icon=":material/check_circle:")
+                    st.toast("Moved equipment to the current Pitch and flagged origin section.", icon=":material/check_circle:")
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -2288,6 +2550,7 @@ def render_equipment_overview(
 
         mismatches_df = equipment_placement_mismatches(project_id, scenario_id)
         mismatch_count = len(mismatches_df)
+        prereq_violation_count = len(equipment_prerequisite_violations(project_id, scenario_id))
         torque_warning_count = 0
         if not all_assets.empty:
             for _, r in all_assets.iterrows():
@@ -2312,6 +2575,7 @@ def render_equipment_overview(
         missing_needs = 0
         need_pct = 0.0
         mismatch_count = 0
+        prereq_violation_count = 0
         torque_warning_count = 0
         zone_count = 0
         zone_assigned_pitches = 0
@@ -2319,7 +2583,7 @@ def render_equipment_overview(
         helper_pitches = 0
         growth_pitches = 0
 
-    total_warnings = mismatch_count + torque_warning_count
+    total_warnings = mismatch_count + prereq_violation_count + torque_warning_count
 
     kpi_cols = st.columns(5)
 
@@ -2488,7 +2752,11 @@ def render_equipment_overview(
                 key=f"equipment_overview_filters_{project_id}",
                 dropdown_columns=["equipment_tier", "equipment_type", "functional_areas", "pitch_number"],
                 multi_value_columns=["functional_areas"],
-                search_columns=["name", "equipment_tier", "equipment_type", "description", "manufacturer", "model", "notes", "pitch_number", "pitch_name"],
+                search_columns=[
+                    "name", "equipment_tier", "equipment_type", "description",
+                    "manufacturer", "model", "notes", "pitch_number", "pitch_name",
+                    "pitch_area_name", "linked_pitches", "linked_processes",
+                ],
                 labels={
                     "equipment_tier": "Tier",
                     "equipment_type": "Equipment Type",
@@ -2499,12 +2767,17 @@ def render_equipment_overview(
             display = visible.copy()
             if not display.empty:
                 display["station_pitch"] = [
-                    f"{_text(num) or 'Unassigned'} — {_text(nm)}"
-                    if _text(nm)
-                    else (_text(num) or "Unassigned")
-                    for num, nm in zip(
+                    _pitch_label(
+                        {
+                            "pitch_number": num,
+                            "pitch_name": nm,
+                            "pitch_area_name": area,
+                        }
+                    )
+                    for num, nm, area in zip(
                         display.get("pitch_number", []),
                         display.get("pitch_name", []),
+                        display.get("pitch_area_name", [""] * len(display)),
                     )
                 ]
                 display["functional_areas_display"] = [", ".join(values) for values in display["functional_areas"]]
@@ -2523,26 +2796,42 @@ def render_equipment_overview(
                 hide_index=True,
                 disabled=list(display.columns),
                 column_order=[
-                    "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
-                    "station_pitch", "functional_areas_display", "notes", "image",
+                    "name", "equipment_tier", "equipment_type", "is_monument", "description", "manufacturer", "model",
+                    "station_pitch", "linked_pitches", "linked_processes",
+                    "functional_areas_display", "notes", "image",
                     "process_link_count", "torque_requirement_count",
                 ],
                 column_config={
                     column: None
                     for column in display.columns
                     if column not in {
-                        "name", "equipment_tier", "equipment_type", "description", "manufacturer", "model",
-                        "station_pitch", "functional_areas_display", "notes", "image",
+                        "name", "equipment_tier", "equipment_type", "is_monument", "description", "manufacturer", "model",
+                        "station_pitch", "linked_pitches", "linked_processes",
+                        "functional_areas_display", "notes", "image",
                         "process_link_count", "torque_requirement_count",
                     }
                 } | {
                     "name": "Equipment name",
                     "equipment_tier": "Tier",
                     "equipment_type": "Equipment Type",
+                    "is_monument": st.column_config.CheckboxColumn(
+                        "Monument / Fixed",
+                        help="When checked, this equipment is permanently fixed and will not easily move if linked process steps are rebalanced.",
+                    ),
                     "description": "Description",
                     "manufacturer": "Manufacturer",
                     "model": "Model",
                     "station_pitch": "Station / Pitch",
+                    "linked_pitches": st.column_config.TextColumn(
+                        "Linked Pitch Details",
+                        width="medium",
+                        help="Detailed Station / Pitch placement (Pitch Number, Pitch Name, Area) and any pitches from linked Process Functions.",
+                    ),
+                    "linked_processes": st.column_config.TextColumn(
+                        "Linked Process Functions",
+                        width="large",
+                        help="PAAG Process Functions (Op ID — Work Element) linked to this equipment directly or via assigned Torque Requirements.",
+                    ),
                     "functional_areas_display": "Functional Reviews",
                     "notes": "Notes",
                     "image": "Primary image",

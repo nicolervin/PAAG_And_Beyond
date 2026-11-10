@@ -2426,6 +2426,158 @@ metrics.metric("Line Balance Efficiency", f"{efficiency:.1f}%", border=True)
 metrics.metric("Bottleneck Pitch", bottleneck, border=True)
 metrics.metric("Takt", format_seconds(takt, takt_time_unit), border=True)
 
+if scenario_id:
+    from utils.equipment_store import (
+        clear_equipment_origin_flag,
+        equipment_origin_flags,
+        equipment_placement_mismatches,
+        equipment_prerequisite_violations,
+        move_equipment_to_linked_pitch,
+        unlink_moved_equipment_links,
+    )
+
+    _active_area_set = {str(a) for a in selected_area_ids if str(a).strip()}
+    _origin_flags_df = equipment_origin_flags(project_id, scenario_id)
+    if not _origin_flags_df.empty and _active_area_set:
+        _area_origin_flags = _origin_flags_df.loc[
+            _origin_flags_df["origin_area_id"].astype(str).isin(_active_area_set)
+            | _origin_flags_df["current_area_id"].astype(str).isin(_active_area_set)
+        ].copy()
+    else:
+        _area_origin_flags = _origin_flags_df
+    if not _area_origin_flags.empty:
+        with st.expander(
+            f"📍 Equipment Origin Section Flag ({len(_area_origin_flags)}) — Tools relocated from their original pitch",
+            expanded=True,
+            icon=":material/location_on:",
+        ):
+            st.info(
+                "The following equipment moved with its linked Process Function(s) out of its originating pitch in this section. "
+                "Acknowledge/clear the flag once physical tool relocation is verified."
+            )
+            for _, _of_row in _area_origin_flags.iterrows():
+                _of_eq_id = str(_of_row["equipment_id"])
+                _of_col1, _of_col2 = st.columns([4.0, 1.2])
+                _of_col1.markdown(
+                    f"- **{_of_row['equipment_name']}** ({_of_row['equipment_type']}): "
+                    f"Originated at **{_of_row['origin_pitch']}** → Moved to **{_of_row['current_pitch']}**"
+                )
+                if _of_col2.button(
+                    "Clear Flag",
+                    icon=":material/check:",
+                    key=f"yamazumi_clear_origin_flag_{project_id}_{scenario_id}_{area_id}_{_of_eq_id}",
+                ):
+                    clear_equipment_origin_flag(
+                        project_id,
+                        scenario_id,
+                        _of_eq_id,
+                        str(st.session_state.get("current_editor", "")),
+                    )
+                    st.toast("Cleared equipment origin flag.", icon=":material/check_circle:")
+                    st.rerun()
+
+    _eq_mismatches_df = equipment_placement_mismatches(project_id, scenario_id)
+    if not _eq_mismatches_df.empty and _active_area_set:
+        _area_mismatches = _eq_mismatches_df.loc[
+            _eq_mismatches_df["saved_area_id"].astype(str).isin(_active_area_set)
+            | _eq_mismatches_df["current_area_id"].astype(str).isin(_active_area_set)
+        ].copy()
+    else:
+        _area_mismatches = _eq_mismatches_df
+    if not _area_mismatches.empty:
+        with st.expander(
+            f"🔧 Equipment Move Confirmation Required ({_area_mismatches['equipment_id'].nunique()} tool(s))",
+            expanded=True,
+            icon=":material/build_circle:",
+        ):
+            st.warning(
+                "Work element(s) with linked Equipment were moved to a different Pitch. "
+                "Please confirm whether movable tools should follow the process step (which leaves an Origin Flag on the originating section), "
+                "or keep the tool anchored at its original Pitch."
+            )
+            for _m_eq_id, _m_grp in _area_mismatches.groupby("equipment_id", sort=False):
+                _m_first = _m_grp.iloc[0]
+                _m_name = str(_m_first["name"])
+                _m_saved_pitch = str(_m_first["saved_pitch"])
+                _m_is_monument = bool(_m_first.get("is_monument", False))
+                _m_ops = ", ".join(str(v) for v in _m_grp["process_function"].tolist())
+                _m_curr_pitches = sorted({str(v) for v in _m_grp["current_pitch"].tolist() if str(v).strip()})
+                _m_curr_ids = {str(v).strip() for v in _m_grp["current_pitch_id"].tolist()}
+                if _m_is_monument:
+                    _mon_c1, _mon_c2 = st.columns([3.8, 1.4])
+                    _mon_c1.error(
+                        f"🏛️ **{_m_name}** is flagged as **Monument / Permanently Fixed** at **{_m_saved_pitch}** "
+                        f"and cannot move automatically with `{_m_ops}` (now at {', '.join(_m_curr_pitches) or 'Unassigned'})."
+                    )
+                    if _mon_c2.button(
+                        "Unlink moved step",
+                        icon=":material/link_off:",
+                        key=f"yamazumi_unlink_monument_{project_id}_{scenario_id}_{area_id}_{_m_eq_id}",
+                    ):
+                        unlink_moved_equipment_links(
+                            project_id,
+                            scenario_id,
+                            str(_m_eq_id),
+                            str(st.session_state.get("current_editor", "")),
+                        )
+                        st.toast(f"Unlinked moved step from Monument {_m_name}.", icon=":material/check_circle:")
+                        st.rerun()
+                else:
+                    _mov_c1, _mov_c2, _mov_c3 = st.columns([3.2, 1.3, 1.3])
+                    _mov_c1.markdown(
+                        f"- **{_m_name}** at **{_m_saved_pitch}** → Linked step `{_m_ops}` moved to **{', '.join(_m_curr_pitches) or 'Unassigned'}**"
+                    )
+                    _can_move_single = ("" not in _m_curr_ids and len(_m_curr_ids) == 1)
+                    if _mov_c2.button(
+                        "Confirm Move Tool",
+                        type="primary",
+                        icon=":material/move_item:",
+                        disabled=not _can_move_single,
+                        key=f"yamazumi_confirm_eq_move_{project_id}_{scenario_id}_{area_id}_{_m_eq_id}",
+                        help="Move this tool to the new Pitch with its process step and flag the originating section.",
+                    ):
+                        try:
+                            move_equipment_to_linked_pitch(
+                                project_id,
+                                scenario_id,
+                                str(_m_eq_id),
+                                str(st.session_state.get("current_editor", "")),
+                            )
+                            st.toast(
+                                f"Moved {_m_name} and placed an Origin Flag on {_m_saved_pitch}.",
+                                icon=":material/check_circle:",
+                            )
+                            st.rerun()
+                        except ValueError as _exc:
+                            st.error(str(_exc))
+                    if _mov_c3.button(
+                        "Keep Tool at Origin",
+                        icon=":material/link_off:",
+                        key=f"yamazumi_keep_eq_origin_{project_id}_{scenario_id}_{area_id}_{_m_eq_id}",
+                        help="Keep this tool at its original pitch and unlink the moved process step.",
+                    ):
+                        unlink_moved_equipment_links(
+                            project_id,
+                            scenario_id,
+                            str(_m_eq_id),
+                            str(st.session_state.get("current_editor", "")),
+                        )
+                        st.toast(f"Kept {_m_name} at {_m_saved_pitch} and unlinked moved step.", icon=":material/check_circle:")
+                        st.rerun()
+
+    _prereq_viol_df = equipment_prerequisite_violations(project_id, scenario_id)
+    if not _prereq_viol_df.empty:
+        with st.expander(
+            f"⚠️ Equipment Prerequisite Sequence Violation ({len(_prereq_viol_df)})",
+            expanded=True,
+            icon=":material/rule:",
+        ):
+            for _, _pv in _prereq_viol_df.iterrows():
+                st.error(
+                    f"**{_pv['equipment_name']}** (at **{_pv['equipment_pitch']}**): "
+                    f"Prerequisite operation `{_pv['prerequisite_operation']}` is at **{_pv['prerequisite_pitch']}** — {_pv['reason']}"
+                )
+
 board_key = f"yamazumi_board_{project_id}_{area_id}"
 board_draft_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{area_id}"
 board_draft_error_key = f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{area_id}"

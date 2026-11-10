@@ -70,7 +70,9 @@ EQUIPMENT_TYPE_COLUMNS = [
 EQUIPMENT_COLUMNS = [
     "id", "project_id", "equipment_type_id", "equipment_type", "equipment_tier", "name",
     "description", "manufacturer", "model", "notes", "image_path",
-    "functional_areas", "placement_id", "pitch_id", "pitch_number", "pitch_name",
+    "is_monument", "functional_areas", "placement_id", "pitch_id", "pitch_number", "pitch_name",
+    "pitch_area_name", "origin_pitch_id", "origin_pitch_snapshot", "move_confirmed",
+    "linked_pitches", "linked_processes",
     "process_link_count", "torque_requirement_count", "created_at", "updated_at",
 ]
 
@@ -120,7 +122,7 @@ def _require_editor(editor_name: str) -> str:
 
 def init_equipment_schema(conn: sqlite3.Connection) -> None:
     """Create the approved Equipment tables and seed each project once."""
-    if not is_schema_initialized(conn, "equipment_schema_v1", "equipment_process_links"):
+    if not is_schema_initialized(conn, "equipment_schema_v2", "equipment_process_links"):
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS equipment_types (
@@ -152,6 +154,7 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
                 model TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 image_path TEXT NOT NULL DEFAULT '',
+                is_monument INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, name)
@@ -172,6 +175,10 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
                 scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 equipment_id TEXT NOT NULL REFERENCES equipment_assets(id) ON DELETE CASCADE,
                 pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                is_monument INTEGER NOT NULL DEFAULT 0,
+                origin_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL,
+                origin_pitch_snapshot TEXT NOT NULL DEFAULT '',
+                move_confirmed INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(scenario_id, equipment_id)
@@ -182,6 +189,7 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
                 scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                 placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
                 work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                link_role TEXT NOT NULL DEFAULT 'primary',
                 process_operation_snapshot TEXT NOT NULL DEFAULT '',
                 process_description_snapshot TEXT NOT NULL DEFAULT '',
                 station_pitch_snapshot TEXT NOT NULL DEFAULT '',
@@ -254,6 +262,22 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
                                    'Platform', 'Pit', 'Operator Lift', 'Ergo Lift Assists')"""
             )
 
+        # Check and upgrade equipment_assets for is_monument
+        asset_cols = {row[1] for row in conn.execute("PRAGMA table_info(equipment_assets)").fetchall()}
+        if "is_monument" not in asset_cols:
+            conn.execute("ALTER TABLE equipment_assets ADD COLUMN is_monument INTEGER NOT NULL DEFAULT 0")
+
+        # Check and upgrade equipment_placements for is_monument and origin pitch tracking
+        place_cols = {row[1] for row in conn.execute("PRAGMA table_info(equipment_placements)").fetchall()}
+        if "is_monument" not in place_cols:
+            conn.execute("ALTER TABLE equipment_placements ADD COLUMN is_monument INTEGER NOT NULL DEFAULT 0")
+        if "origin_pitch_id" not in place_cols:
+            conn.execute("ALTER TABLE equipment_placements ADD COLUMN origin_pitch_id TEXT REFERENCES yamazumi_pitches(id) ON DELETE SET NULL")
+        if "origin_pitch_snapshot" not in place_cols:
+            conn.execute("ALTER TABLE equipment_placements ADD COLUMN origin_pitch_snapshot TEXT NOT NULL DEFAULT ''")
+        if "move_confirmed" not in place_cols:
+            conn.execute("ALTER TABLE equipment_placements ADD COLUMN move_confirmed INTEGER NOT NULL DEFAULT 1")
+
         # Check and upgrade yamazumi_pitches for platform and pit ergonomics
         cursor = conn.execute("PRAGMA table_info(yamazumi_pitches)")
         pitch_cols = [row[1] for row in cursor.fetchall()]
@@ -265,7 +289,7 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE yamazumi_pitches ADD COLUMN conveyor_zone_id TEXT REFERENCES conveyor_zones(id) ON DELETE SET NULL")
 
         _ensure_equipment_process_links_schema(conn)
-        mark_schema_initialized(conn, "equipment_schema_v1")
+        mark_schema_initialized(conn, "equipment_schema_v2")
 
     for project in conn.execute("SELECT id FROM projects").fetchall():
         pid = str(project["id"])
@@ -275,9 +299,11 @@ def init_equipment_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
-    """Ensure equipment_process_links has nullable work_element_id (ON DELETE SET NULL) and snapshot columns."""
+    """Ensure equipment_process_links has nullable work_element_id (ON DELETE SET NULL), link_role, and snapshot columns."""
     link_info = conn.execute("PRAGMA table_info(equipment_process_links)").fetchall()
     link_cols = {row[1] for row in link_info}
+    if "link_role" not in link_cols:
+        conn.execute("ALTER TABLE equipment_process_links ADD COLUMN link_role TEXT NOT NULL DEFAULT 'primary'")
     if "process_operation_snapshot" not in link_cols:
         conn.execute("ALTER TABLE equipment_process_links ADD COLUMN process_operation_snapshot TEXT NOT NULL DEFAULT ''")
     if "process_description_snapshot" not in link_cols:
@@ -310,6 +336,7 @@ def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
                     scenario_id TEXT NOT NULL REFERENCES planning_scenarios(id) ON DELETE CASCADE,
                     placement_id TEXT NOT NULL REFERENCES equipment_placements(id) ON DELETE CASCADE,
                     work_element_id TEXT REFERENCES work_elements(id) ON DELETE SET NULL,
+                    link_role TEXT NOT NULL DEFAULT 'primary',
                     process_operation_snapshot TEXT NOT NULL DEFAULT '',
                     process_description_snapshot TEXT NOT NULL DEFAULT '',
                     station_pitch_snapshot TEXT NOT NULL DEFAULT '',
@@ -319,12 +346,13 @@ def _ensure_equipment_process_links_schema(conn: sqlite3.Connection) -> None:
                     UNIQUE(placement_id, work_element_id)
                 );
                 INSERT INTO equipment_process_links_new (
-                    id, project_id, scenario_id, placement_id, work_element_id,
+                    id, project_id, scenario_id, placement_id, work_element_id, link_role,
                     process_operation_snapshot, process_description_snapshot,
                     station_pitch_snapshot, unlinked_at, created_at, updated_at
                 )
                 SELECT
                     id, project_id, scenario_id, placement_id, NULLIF(work_element_id, ''),
+                    COALESCE(NULLIF(link_role, ''), 'primary'),
                     COALESCE(process_operation_snapshot, ''),
                     COALESCE(process_description_snapshot, ''),
                     COALESCE(station_pitch_snapshot, ''),
@@ -597,6 +625,314 @@ def delete_equipment_types(
     return {"row_count": len(normalized), "timestamp": timestamp}
 
 
+def _format_pitch_summary(
+    pitch_number: object,
+    pitch_name: object = "",
+    area_name: object = "",
+) -> str:
+    num = _text(pitch_number)
+    name = _text(pitch_name)
+    area = _text(area_name)
+    if not num and not name:
+        return ""
+    base = f"{num} — {name}" if (num and name) else (num or name)
+    if area and area.casefold() != name.casefold():
+        return f"{base} ({area})"
+    return base
+
+
+def _enrich_equipment_assets_links(
+    store,
+    frame: pd.DataFrame,
+    project_id: str,
+    scenario_id: str | None,
+) -> pd.DataFrame:
+    if frame.empty:
+        frame["pitch_area_name"] = pd.Series(dtype="string")
+        frame["linked_pitches"] = pd.Series(dtype="string")
+        frame["linked_processes"] = pd.Series(dtype="string")
+        return frame
+
+    if not scenario_id:
+        frame["linked_pitches"] = [
+            _format_pitch_summary(num, nm, area)
+            for num, nm, area in zip(
+                frame.get("pitch_number", []),
+                frame.get("pitch_name", []),
+                frame.get("pitch_area_name", []),
+            )
+        ]
+        frame["linked_processes"] = ""
+        return frame
+
+    proc_rows = store.query(
+        """SELECT process_link.placement_id,
+                  process_link.work_element_id,
+                  COALESCE(NULLIF(process_link.link_role, ''), 'primary') AS link_role,
+                  process_link.process_operation_snapshot,
+                  process_link.process_description_snapshot,
+                  process_link.station_pitch_snapshot,
+                  COALESCE(NULLIF(TRIM(yamazumi.description), ''), work.operation, '') AS work_element,
+                  COALESCE(step_pitch.id, '') AS step_pitch_id,
+                  COALESCE(step_pitch.pitch_number, work.station, '') AS step_pitch_number,
+                  COALESCE(step_pitch.pitch_name, '') AS step_pitch_name,
+                  COALESCE(step_area.name, '') AS step_area_name,
+                  COALESCE(step_pitch.sequence, 0) AS step_pitch_seq
+           FROM equipment_process_links process_link
+           LEFT JOIN work_elements work
+             ON work.id=process_link.work_element_id
+            AND work.project_id=process_link.project_id
+            AND work.scenario_id=process_link.scenario_id
+           LEFT JOIN yamazumi_elements yamazumi
+             ON yamazumi.process_element_id=process_link.work_element_id
+            AND yamazumi.project_id=process_link.project_id
+           LEFT JOIN yamazumi_areas step_area
+             ON step_area.id=yamazumi.area_id
+            AND step_area.project_id=yamazumi.project_id
+            AND step_area.scenario_id=process_link.scenario_id
+           LEFT JOIN yamazumi_pitches step_pitch
+             ON step_pitch.id=yamazumi.pitch_id
+            AND step_pitch.project_id=yamazumi.project_id
+           WHERE process_link.project_id=? AND process_link.scenario_id=?
+           ORDER BY process_link.created_at, process_link.id""",
+        (project_id, scenario_id),
+    )
+
+    torque_rows = store.query(
+        """SELECT torque_link.equipment_id,
+                  req.unique_identifier,
+                  req.description AS req_description,
+                  assign.work_element_id,
+                  COALESCE(NULLIF(TRIM(yamazumi.description), ''), work.operation, '') AS work_element,
+                  COALESCE(step_pitch.id, '') AS step_pitch_id,
+                  COALESCE(step_pitch.pitch_number, work.station, '') AS step_pitch_number,
+                  COALESCE(step_pitch.pitch_name, '') AS step_pitch_name,
+                  COALESCE(step_area.name, '') AS step_area_name
+           FROM equipment_torque_requirement_links torque_link
+           JOIN quality_requirements req
+             ON req.id=torque_link.quality_requirement_id AND req.project_id=torque_link.project_id
+           LEFT JOIN quality_requirement_assignments assign
+             ON assign.quality_requirement_id=req.id
+            AND assign.project_id=torque_link.project_id
+            AND assign.scenario_id=?
+           LEFT JOIN work_elements work
+             ON work.id=assign.work_element_id
+            AND work.project_id=assign.project_id
+            AND work.scenario_id=assign.scenario_id
+           LEFT JOIN yamazumi_elements yamazumi
+             ON yamazumi.process_element_id=assign.work_element_id
+            AND yamazumi.project_id=assign.project_id
+           LEFT JOIN yamazumi_areas step_area
+             ON step_area.id=yamazumi.area_id
+            AND step_area.project_id=yamazumi.project_id
+            AND step_area.scenario_id=assign.scenario_id
+           LEFT JOIN yamazumi_pitches step_pitch
+             ON step_pitch.id=yamazumi.pitch_id
+            AND step_pitch.project_id=yamazumi.project_id
+           WHERE torque_link.project_id=?
+           ORDER BY req.unique_identifier COLLATE NOCASE, COALESCE(work.sequence, 0), assign.id""",
+        (scenario_id, project_id),
+    )
+
+    all_work_ids = list(
+        dict.fromkeys(
+            _text(r.get("work_element_id"))
+            for r in (*proc_rows, *torque_rows)
+            if _text(r.get("work_element_id"))
+        )
+    )
+    contexts = (
+        store.work_element_op_contexts(project_id, scenario_id, all_work_ids)
+        if all_work_ids
+        else {}
+    )
+
+    # Also build pitch walk-order rank map for prerequisite sequence checking
+    pitch_rank_by_id: dict[str, int] = {}
+    for idx, prow in enumerate(
+        store.query(
+            """SELECT pitch.id
+               FROM yamazumi_pitches pitch
+               JOIN yamazumi_areas area ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+               LEFT JOIN assembly_sections sec ON sec.id=area.section_id
+               WHERE pitch.project_id=? AND area.scenario_id=?
+               ORDER BY COALESCE(sec.sequence, 999999), area.name COLLATE NOCASE, pitch.sequence, pitch.pitch_number COLLATE NOCASE""",
+            (project_id, scenario_id),
+        )
+    ):
+        pitch_rank_by_id[str(prow["id"])] = idx
+
+    proc_by_placement: dict[str, list[dict]] = {}
+    for row in proc_rows:
+        pid = _text(row.get("placement_id"))
+        if pid:
+            proc_by_placement.setdefault(pid, []).append(dict(row))
+
+    torque_by_equipment: dict[str, list[dict]] = {}
+    for row in torque_rows:
+        eid = _text(row.get("equipment_id"))
+        if eid:
+            torque_by_equipment.setdefault(eid, []).append(dict(row))
+
+    linked_pitches_col: list[str] = []
+    linked_processes_col: list[str] = []
+
+    for _, asset_row in frame.iterrows():
+        eq_id = _text(asset_row.get("id"))
+        placement_id = _text(asset_row.get("placement_id"))
+        placed_pitch_id = _text(asset_row.get("pitch_id"))
+        placed_pitch_num = _text(asset_row.get("pitch_number"))
+        placed_pitch_name = _text(asset_row.get("pitch_name"))
+        placed_area_name = _text(asset_row.get("pitch_area_name"))
+        is_monument = bool(asset_row.get("is_monument"))
+        origin_snap = _text(asset_row.get("origin_pitch_snapshot"))
+
+        pitch_entries: list[str] = []
+        placed_summary = _format_pitch_summary(
+            placed_pitch_num, placed_pitch_name, placed_area_name
+        )
+        if placed_summary:
+            if is_monument:
+                pitch_entries.append(f"🏛️ Monument @ {placed_summary}")
+            else:
+                pitch_entries.append(placed_summary)
+        if origin_snap and origin_snap != placed_summary:
+            pitch_entries.append(f"📍 Moved from {origin_snap}")
+
+        direct_links = proc_by_placement.get(placement_id, []) if placement_id else []
+        eq_torque_links = torque_by_equipment.get(eq_id, [])
+
+        # Map work_element_id -> list of torque UIDs assigned to that step for this equipment
+        torque_uids_by_work: dict[str, list[str]] = {}
+        for trow in eq_torque_links:
+            wid = _text(trow.get("work_element_id"))
+            uid = _text(trow.get("unique_identifier"))
+            if wid and uid:
+                if uid not in torque_uids_by_work.setdefault(wid, []):
+                    torque_uids_by_work[wid].append(uid)
+
+        active_proc_items: list[tuple[int, str]] = []
+        prereq_proc_items: list[tuple[int, str]] = []
+        direct_work_ids: set[str] = set()
+        unlinked_proc_items: list[str] = []
+
+        # Determine minimum sort_order of primary operations for prerequisite checking
+        primary_sort_orders = [
+            int(contexts.get(_text(d.get("work_element_id")), {}).get("sort_order", 10**9))
+            for d in direct_links
+            if _text(d.get("work_element_id")) and _text(d.get("link_role") or "primary") == "primary"
+        ]
+        min_primary_sort = min(primary_sort_orders) if primary_sort_orders else None
+        placed_pitch_rank = pitch_rank_by_id.get(placed_pitch_id) if placed_pitch_id else None
+
+        for drow in direct_links:
+            wid = _text(drow.get("work_element_id"))
+            role = _text(drow.get("link_role")) or "primary"
+            if wid:
+                direct_work_ids.add(wid)
+                ctx = contexts.get(wid, {})
+                op_id = _text(ctx.get("op_id")) or "Op ID unavailable"
+                sort_order = int(ctx.get("sort_order", 10**9))
+                work_elem = _text(drow.get("work_element")) or "(Unnamed step)"
+                step_pitch_id = _text(drow.get("step_pitch_id"))
+                step_pitch_num = _text(drow.get("step_pitch_number"))
+                step_pitch_name = _text(drow.get("step_pitch_name"))
+                step_area_name = _text(drow.get("step_area_name"))
+
+                if role == "prerequisite":
+                    step_rank = pitch_rank_by_id.get(step_pitch_id) if step_pitch_id else None
+                    is_after = False
+                    if placed_pitch_rank is not None and step_rank is not None and step_rank > placed_pitch_rank:
+                        is_after = True
+                    elif (
+                        placed_pitch_id
+                        and step_pitch_id == placed_pitch_id
+                        and min_primary_sort is not None
+                        and sort_order > min_primary_sort
+                    ):
+                        is_after = True
+                    prefix = "⚠️ Prereq AFTER tool pitch" if is_after else "Prereq (before tool)"
+                    pitch_tag = f" @ {step_pitch_num}" if step_pitch_num else ""
+                    prereq_proc_items.append((sort_order, f"[{prefix}: {op_id} — {work_elem}{pitch_tag}]"))
+                else:
+                    label = f"{op_id} — {work_elem}"
+                    t_uids = torque_uids_by_work.get(wid, [])
+                    if t_uids:
+                        label += f" [Torque: {', '.join(t_uids)}]"
+                    if placed_pitch_id and step_pitch_id and step_pitch_id != placed_pitch_id:
+                        if is_monument:
+                            label += f" 🏛️⚠️ (Step moved to {step_pitch_num or 'other pitch'} away from Monument)"
+                        else:
+                            label += f" ⚠️ (Step moved to {step_pitch_num or 'other pitch'} — confirm tool move)"
+                    active_proc_items.append((sort_order, label))
+
+                    step_pitch_summary = _format_pitch_summary(
+                        step_pitch_num, step_pitch_name, step_area_name
+                    )
+                    if step_pitch_summary and step_pitch_summary not in pitch_entries:
+                        if placed_pitch_id and step_pitch_id and step_pitch_id != placed_pitch_id:
+                            pitch_entries.append(f"⚠️ Step moved to {step_pitch_summary}")
+                        else:
+                            pitch_entries.append(step_pitch_summary)
+            else:
+                op_snap = _text(drow.get("process_operation_snapshot")) or _text(
+                    drow.get("process_description_snapshot")
+                )
+                if op_snap:
+                    unlinked_proc_items.append(f"[Unlinked: {op_snap}]")
+
+        # Also check Torque Requirements assigned to PAAG steps not yet directly linked
+        indirect_proc_items: list[tuple[int, str]] = []
+        unassigned_torque_uids: list[str] = []
+        seen_indirect_keys: set[tuple[str, str]] = set()
+        for trow in eq_torque_links:
+            wid = _text(trow.get("work_element_id"))
+            uid = _text(trow.get("unique_identifier")) or _text(trow.get("req_description"))
+            if wid and wid not in direct_work_ids:
+                if (wid, uid) in seen_indirect_keys:
+                    continue
+                seen_indirect_keys.add((wid, uid))
+                ctx = contexts.get(wid, {})
+                op_id = _text(ctx.get("op_id")) or "Op ID unavailable"
+                sort_order = int(ctx.get("sort_order", 10**9))
+                work_elem = _text(trow.get("work_element")) or "(Unnamed step)"
+                step_pitch_num = _text(trow.get("step_pitch_number"))
+                step_pitch_name = _text(trow.get("step_pitch_name"))
+                step_area_name = _text(trow.get("step_area_name"))
+                indirect_proc_items.append(
+                    (sort_order, f"{op_id} — {work_elem} (via Torque: {uid})")
+                )
+                step_pitch_summary = _format_pitch_summary(
+                    step_pitch_num, step_pitch_name, step_area_name
+                )
+                if step_pitch_summary and step_pitch_summary not in pitch_entries:
+                    pitch_entries.append(f"{step_pitch_summary} (via Torque)")
+            elif not wid and uid and uid not in unassigned_torque_uids:
+                unassigned_torque_uids.append(uid)
+
+        active_proc_items.sort(key=lambda item: (item[0], item[1]))
+        prereq_proc_items.sort(key=lambda item: (item[0], item[1]))
+        indirect_proc_items.sort(key=lambda item: (item[0], item[1]))
+
+        ordered_proc_labels = (
+            [label for _, label in active_proc_items]
+            + [label for _, label in prereq_proc_items]
+            + [label for _, label in indirect_proc_items]
+            + unlinked_proc_items
+        )
+        if not ordered_proc_labels and unassigned_torque_uids:
+            ordered_proc_labels.append(
+                f"Torque Req: {', '.join(unassigned_torque_uids)} (not yet assigned to PAAG)"
+            )
+
+        linked_pitches_col.append("; ".join(pitch_entries))
+        linked_processes_col.append("; ".join(ordered_proc_labels))
+
+    frame["linked_pitches"] = linked_pitches_col
+    frame["linked_processes"] = linked_processes_col
+    return frame
+
+
 @cached_store_read
 def equipment_assets(
     project_id: str,
@@ -614,33 +950,49 @@ def equipment_assets(
         where.append("asset.equipment_type_id=?")
         params.append(equipment_type_id)
     rows = store.query(
-        f"""SELECT asset.*, type.label AS equipment_type,
+        f"""SELECT asset.id, asset.project_id, asset.equipment_type_id,
+                   type.label AS equipment_type,
                    COALESCE(type.tier, 'Handheld Tools') AS equipment_tier,
+                   asset.name, asset.description, asset.manufacturer, asset.model,
+                   asset.notes, asset.image_path,
+                   COALESCE(placement.is_monument, asset.is_monument, 0) AS is_monument,
                    COALESCE((SELECT GROUP_CONCAT(link.functional_area, ', ')
                              FROM equipment_function_links link
                              WHERE link.equipment_id=asset.id), '') AS functional_areas,
                    placement.id AS placement_id, placement.pitch_id,
                    COALESCE(pitch.pitch_number, '') AS pitch_number,
                    COALESCE(pitch.pitch_name, '') AS pitch_name,
+                   COALESCE(area.name, '') AS pitch_area_name,
+                   COALESCE(placement.origin_pitch_id, '') AS origin_pitch_id,
+                   COALESCE(placement.origin_pitch_snapshot, '') AS origin_pitch_snapshot,
+                   COALESCE(placement.move_confirmed, 1) AS move_confirmed,
+                   '' AS linked_pitches,
+                   '' AS linked_processes,
                    (SELECT COUNT(*) FROM equipment_process_links process_link
                     WHERE process_link.placement_id=placement.id
                       AND process_link.work_element_id IS NOT NULL) AS process_link_count,
                    (SELECT COUNT(*) FROM equipment_torque_requirement_links torque_link
-                    WHERE torque_link.equipment_id=asset.id) AS torque_requirement_count
+                    WHERE torque_link.equipment_id=asset.id) AS torque_requirement_count,
+                   asset.created_at, asset.updated_at
             FROM equipment_assets asset
             JOIN equipment_types type ON type.id=asset.equipment_type_id
             LEFT JOIN equipment_placements placement
               ON placement.equipment_id=asset.id AND placement.scenario_id=?
             LEFT JOIN yamazumi_pitches pitch ON pitch.id=placement.pitch_id
+            LEFT JOIN yamazumi_areas area
+              ON area.id=pitch.area_id AND area.project_id=pitch.project_id
             WHERE {' AND '.join(where)}
             ORDER BY type.tier COLLATE NOCASE, type.label COLLATE NOCASE, asset.name COLLATE NOCASE, asset.id""",
         tuple(params),
     )
     frame = pd.DataFrame(rows, columns=EQUIPMENT_COLUMNS)
     if not frame.empty:
+        frame["is_monument"] = pd.to_numeric(frame["is_monument"], errors="coerce").fillna(0).astype(int).astype(bool)
+        frame["move_confirmed"] = pd.to_numeric(frame["move_confirmed"], errors="coerce").fillna(1).astype(int).astype(bool)
         frame["functional_areas"] = frame["functional_areas"].map(_list)
         frame["process_link_count"] = pd.to_numeric(frame["process_link_count"], errors="coerce").fillna(0).astype(int)
         frame["torque_requirement_count"] = pd.to_numeric(frame["torque_requirement_count"], errors="coerce").fillna(0).astype(int)
+    frame = _enrich_equipment_assets_links(store, frame, project_id, scenario_id)
     return frame
 
 
@@ -711,6 +1063,13 @@ def save_function_equipment_rows(
         if key in names:
             raise ValueError("Equipment names must be unique within the project.")
         names.add(key)
+        raw_monument = record.get("is_monument")
+        is_monument = False
+        if raw_monument is not None:
+            try:
+                is_monument = False if bool(pd.isna(raw_monument)) else bool(raw_monument)
+            except (TypeError, ValueError):
+                is_monument = bool(raw_monument)
         cleaned.append({
             "id": _text(record.get("id")),
             "equipment_type_id": type_id,
@@ -720,6 +1079,7 @@ def save_function_equipment_rows(
             "model": _text(record.get("model")),
             "notes": _text(record.get("notes")),
             "pitch_id": _text(record.get("pitch_id")),
+            "is_monument": int(is_monument),
         })
     changed_ids: list[str] = []
     created_ids: list[str] = []
@@ -763,25 +1123,29 @@ def save_function_equipment_rows(
                     if torque_count:
                         raise ValueError("Remove linked Torque requirements before changing this equipment from Torque tool.")
                 fields = ["equipment_type_id", "name", "description", "manufacturer", "model", "notes"]
-                changed = any(_text(existing[field]) != record[field] for field in fields)
+                existing_monument = int(existing["is_monument"] or 0) if "is_monument" in existing.keys() else 0
+                changed = (
+                    any(_text(existing[field]) != record[field] for field in fields)
+                    or existing_monument != int(record["is_monument"])
+                )
                 if changed:
                     conn.execute(
                         """UPDATE equipment_assets
-                           SET equipment_type_id=?, name=?, description=?, manufacturer=?, model=?, notes=?, updated_at=?
+                           SET equipment_type_id=?, name=?, description=?, manufacturer=?, model=?, notes=?, is_monument=?, updated_at=?
                            WHERE id=? AND project_id=?""",
-                        tuple(record[field] for field in fields) + (timestamp, asset_id, project_id),
+                        tuple(record[field] for field in fields) + (int(record["is_monument"]), timestamp, asset_id, project_id),
                     )
                     changed_ids.append(asset_id)
             else:
                 conn.execute(
                     """INSERT INTO equipment_assets
                        (id, project_id, equipment_type_id, name, description, manufacturer,
-                        model, notes, image_path, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)""",
+                        model, notes, image_path, is_monument, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
                     (
                         asset_id, project_id, record["equipment_type_id"], record["name"],
                         record["description"], record["manufacturer"], record["model"],
-                        record["notes"], timestamp, timestamp,
+                        record["notes"], int(record["is_monument"]), timestamp, timestamp,
                     ),
                 )
                 conn.execute(
@@ -800,39 +1164,51 @@ def save_function_equipment_rows(
                     "SELECT * FROM equipment_placements WHERE equipment_id=? AND scenario_id=?",
                     (asset_id, scenario_id),
                 ).fetchone()
-                if placement and _text(placement["pitch_id"]) != (pitch_id or ""):
-                    linked_work = conn.execute(
-                        """SELECT process_link.work_element_id, element.pitch_id AS current_pitch_id
-                           FROM equipment_process_links process_link
-                           LEFT JOIN yamazumi_elements element
-                             ON element.process_element_id=process_link.work_element_id
-                            AND element.project_id=process_link.project_id
-                           LEFT JOIN yamazumi_areas area ON area.id=element.area_id
-                            AND area.scenario_id=process_link.scenario_id
-                           WHERE process_link.placement_id=?
-                             AND process_link.work_element_id IS NOT NULL""",
-                        (placement["id"],),
-                    ).fetchall()
-                    if linked_work and any(
-                        _text(link["current_pitch_id"]) != (pitch_id or "")
-                        for link in linked_work
-                    ):
-                        raise ValueError(
-                            "Station / Pitch cannot be changed in the chart while linked "
-                            "Process Functions belong elsewhere. Reconcile the selected "
-                            "equipment's placement and Process links first."
+                if placement:
+                    place_monument = int(placement["is_monument"] or 0) if "is_monument" in placement.keys() else 0
+                    if _text(placement["pitch_id"]) != (pitch_id or ""):
+                        linked_work = conn.execute(
+                            """SELECT process_link.work_element_id, element.pitch_id AS current_pitch_id
+                               FROM equipment_process_links process_link
+                               LEFT JOIN yamazumi_elements element
+                                 ON element.process_element_id=process_link.work_element_id
+                                AND element.project_id=process_link.project_id
+                               LEFT JOIN yamazumi_areas area ON area.id=element.area_id
+                                AND area.scenario_id=process_link.scenario_id
+                               WHERE process_link.placement_id=?
+                                 AND process_link.work_element_id IS NOT NULL
+                                 AND COALESCE(NULLIF(process_link.link_role, ''), 'primary')='primary'""",
+                            (placement["id"],),
+                        ).fetchall()
+                        if linked_work and any(
+                            _text(link["current_pitch_id"]) != (pitch_id or "")
+                            for link in linked_work
+                        ):
+                            raise ValueError(
+                                "Station / Pitch cannot be changed in the chart while linked "
+                                "Process Functions belong elsewhere. Reconcile the selected "
+                                "equipment's placement and Process links first."
+                            )
+                        conn.execute(
+                            "UPDATE equipment_placements SET pitch_id=?, is_monument=?, updated_at=? WHERE id=?",
+                            (pitch_id, int(record["is_monument"]), timestamp, placement["id"]),
                         )
-                    conn.execute(
-                        "UPDATE equipment_placements SET pitch_id=?, updated_at=? WHERE id=?",
-                        (pitch_id, timestamp, placement["id"]),
-                    )
-                    changed_ids.append(asset_id)
-                elif not placement and pitch_id:
+                        changed_ids.append(asset_id)
+                    elif place_monument != int(record["is_monument"]):
+                        conn.execute(
+                            "UPDATE equipment_placements SET is_monument=?, updated_at=? WHERE id=?",
+                            (int(record["is_monument"]), timestamp, placement["id"]),
+                        )
+                        changed_ids.append(asset_id)
+                elif pitch_id or int(record["is_monument"]):
                     conn.execute(
                         """INSERT INTO equipment_placements
-                           (id, project_id, scenario_id, equipment_id, pitch_id, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (str(uuid4()), project_id, scenario_id, asset_id, pitch_id, timestamp, timestamp),
+                           (id, project_id, scenario_id, equipment_id, pitch_id, is_monument, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid4()), project_id, scenario_id, asset_id, pitch_id,
+                            int(record["is_monument"]), timestamp, timestamp,
+                        ),
                     )
                     changed_ids.append(asset_id)
         updated_only_ids = [cid for cid in dict.fromkeys(changed_ids) if cid not in created_ids]
@@ -1029,10 +1405,55 @@ def equipment_process_options(project_id: str, scenario_id: str, pitch_id: str) 
 
 
 @cached_store_read
+def equipment_scenario_process_options(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return all PAAG Process Functions in the scenario for Process-First equipment linking."""
+    store = _store_module()
+    _ = equipment_pitch_options(project_id, scenario_id)
+    rows = store.query(
+        """SELECT work.id, work.sequence, work.operation,
+                  COALESCE(NULLIF(TRIM(yamazumi.description), ''), work.operation) AS work_element,
+                  COALESCE(pitch.id, '') AS pitch_id,
+                  COALESCE(pitch.pitch_number, work.station, '') AS pitch_number,
+                  COALESCE(pitch.pitch_name, '') AS pitch_name,
+                  COALESCE(area.name, '') AS area_name
+           FROM work_elements work
+           LEFT JOIN yamazumi_elements yamazumi
+             ON yamazumi.process_element_id=work.id
+            AND yamazumi.project_id=work.project_id
+           LEFT JOIN yamazumi_areas area
+             ON area.id=yamazumi.area_id
+            AND area.project_id=work.project_id
+            AND area.scenario_id=work.scenario_id
+           LEFT JOIN yamazumi_pitches pitch
+             ON pitch.id=yamazumi.pitch_id
+            AND pitch.project_id=work.project_id
+           WHERE work.project_id=? AND work.scenario_id=?
+           GROUP BY work.id
+           ORDER BY work.sequence, work.id""",
+        (project_id, scenario_id),
+    )
+    cols = ["id", "sequence", "operation", "work_element", "pitch_id", "pitch_number", "pitch_name", "area_name"]
+    frame = pd.DataFrame(rows, columns=cols)
+    if not frame.empty:
+        contexts = store.work_element_op_contexts(project_id, scenario_id, frame["id"].astype(str).tolist())
+        frame["op_id"] = frame["id"].astype(str).map(lambda value: str(contexts.get(value, {}).get("op_id") or "Op ID unavailable"))
+        frame["sort_order"] = frame["id"].astype(str).map(lambda value: int(contexts.get(value, {}).get("sort_order", 10**9)))
+        frame = frame.sort_values(["sort_order", "sequence", "id"], kind="stable").reset_index(drop=True)
+    else:
+        frame["op_id"] = pd.Series(dtype="string")
+        frame["sort_order"] = pd.Series(dtype="int64")
+    return frame
+
+
+@cached_store_read
 def equipment_placement_detail(project_id: str, scenario_id: str, equipment_id: str) -> dict[str, object]:
     store = _store_module()
     rows = store.query(
-        """SELECT placement.id, placement.pitch_id
+        """SELECT placement.id, placement.pitch_id,
+                  COALESCE(placement.is_monument, asset.is_monument, 0) AS is_monument,
+                  COALESCE(placement.origin_pitch_id, '') AS origin_pitch_id,
+                  COALESCE(placement.origin_pitch_snapshot, '') AS origin_pitch_snapshot,
+                  COALESCE(placement.move_confirmed, 1) AS move_confirmed
            FROM equipment_assets asset
            LEFT JOIN equipment_placements placement
              ON placement.equipment_id=asset.id AND placement.scenario_id=?
@@ -1042,29 +1463,39 @@ def equipment_placement_detail(project_id: str, scenario_id: str, equipment_id: 
     if not rows:
         raise ValueError("That equipment record no longer exists.")
     placement_id = _text(rows[0].get("id"))
-    work_ids = []
+    is_monument = bool(int(rows[0].get("is_monument") or 0))
+    origin_pitch_id = _text(rows[0].get("origin_pitch_id"))
+    origin_pitch_snapshot = _text(rows[0].get("origin_pitch_snapshot"))
+    move_confirmed = bool(int(rows[0].get("move_confirmed") if rows[0].get("move_confirmed") is not None else 1))
+    work_ids: list[str] = []
+    prereq_work_ids: list[str] = []
     unlinked_links: list[dict[str, str]] = []
     if placement_id:
-        work_ids = [
-            str(row["work_element_id"])
-            for row in store.query(
-                """SELECT work_element_id FROM equipment_process_links
-                   WHERE project_id=? AND scenario_id=? AND placement_id=?
-                     AND work_element_id IS NOT NULL
-                   ORDER BY created_at, id""",
-                (project_id, scenario_id, placement_id),
-            )
-        ]
+        for row in store.query(
+            """SELECT work_element_id, COALESCE(NULLIF(link_role, ''), 'primary') AS link_role
+               FROM equipment_process_links
+               WHERE project_id=? AND scenario_id=? AND placement_id=?
+                 AND work_element_id IS NOT NULL
+               ORDER BY created_at, id""",
+            (project_id, scenario_id, placement_id),
+        ):
+            wid = str(row["work_element_id"])
+            if _text(row.get("link_role")) == "prerequisite":
+                prereq_work_ids.append(wid)
+            else:
+                work_ids.append(wid)
         unlinked_links = [
             {
                 "id": str(row["id"]),
+                "link_role": _text(row.get("link_role")) or "primary",
                 "process_operation_snapshot": _text(row.get("process_operation_snapshot")),
                 "process_description_snapshot": _text(row.get("process_description_snapshot")),
                 "station_pitch_snapshot": _text(row.get("station_pitch_snapshot")),
                 "unlinked_at": _text(row.get("unlinked_at")),
             }
             for row in store.query(
-                """SELECT id, process_operation_snapshot, process_description_snapshot,
+                """SELECT id, COALESCE(NULLIF(link_role, ''), 'primary') AS link_role,
+                          process_operation_snapshot, process_description_snapshot,
                           station_pitch_snapshot, unlinked_at
                    FROM equipment_process_links
                    WHERE project_id=? AND scenario_id=? AND placement_id=?
@@ -1076,9 +1507,29 @@ def equipment_placement_detail(project_id: str, scenario_id: str, equipment_id: 
     return {
         "placement_id": placement_id,
         "pitch_id": _text(rows[0].get("pitch_id")),
+        "is_monument": is_monument,
+        "origin_pitch_id": origin_pitch_id,
+        "origin_pitch_snapshot": origin_pitch_snapshot,
+        "move_confirmed": move_confirmed,
         "work_element_ids": work_ids,
+        "prerequisite_work_element_ids": prereq_work_ids,
         "unlinked_links": unlinked_links,
     }
+
+
+def _pitch_summary_for_id(conn: sqlite3.Connection, project_id: str, pitch_id: str) -> str:
+    if not pitch_id:
+        return ""
+    prow = conn.execute(
+        """SELECT pitch.pitch_number, pitch.pitch_name, COALESCE(area.name, '') AS area_name
+           FROM yamazumi_pitches pitch
+           LEFT JOIN yamazumi_areas area ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+           WHERE pitch.id=? AND pitch.project_id=?""",
+        (pitch_id, project_id),
+    ).fetchone()
+    if not prow:
+        return ""
+    return _format_pitch_summary(prow["pitch_number"], prow["pitch_name"], prow["area_name"])
 
 
 def save_equipment_placement(
@@ -1089,17 +1540,23 @@ def save_equipment_placement(
     work_element_ids: list[str],
     editor_name: str,
     mark_pitch_blocked: bool = False,
+    prerequisite_work_element_ids: list[str] | None = None,
+    is_monument: bool | None = None,
 ) -> dict[str, object]:
     store = _store_module()
     editor = _require_editor(editor_name)
     normalized_pitch = _text(pitch_id) or None
     normalized_work = list(dict.fromkeys(_text(value) for value in work_element_ids if _text(value)))
-    if normalized_work and not normalized_pitch:
-        raise ValueError("Choose Station / Pitch before linking Process Functions.")
+    normalized_prereq = [
+        wid
+        for wid in dict.fromkeys(_text(value) for value in (prerequisite_work_element_ids or []) if _text(value))
+        if wid not in normalized_work
+    ]
     timestamp = store.now_iso()
     with store.connection() as conn:
         asset = conn.execute(
-            "SELECT id FROM equipment_assets WHERE id=? AND project_id=?", (equipment_id, project_id)
+            "SELECT id, COALESCE(is_monument, 0) AS is_monument FROM equipment_assets WHERE id=? AND project_id=?",
+            (equipment_id, project_id),
         ).fetchone()
         if not asset:
             raise ValueError("That equipment record no longer exists.")
@@ -1109,7 +1566,23 @@ def save_equipment_placement(
             raise ValueError("The active planning scenario no longer exists.")
         if normalized_pitch:
             _require_pitch(conn, project_id, scenario_id, normalized_pitch)
+
+        placement = conn.execute(
+            "SELECT * FROM equipment_placements WHERE equipment_id=? AND scenario_id=?",
+            (equipment_id, scenario_id),
+        ).fetchone()
+        effective_monument = (
+            bool(is_monument)
+            if is_monument is not None
+            else bool(
+                int(placement["is_monument"] or 0)
+                if (placement and "is_monument" in placement.keys())
+                else int(asset["is_monument"] or 0)
+            )
+        )
+
         work_snapshots_by_id: dict[str, tuple[str, str, str]] = {}
+        derived_primary_pitches: set[str] = set()
         for work_id in normalized_work:
             work = conn.execute(
                 "SELECT id, operation, description, station FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
@@ -1131,33 +1604,128 @@ def save_equipment_placement(
                    ORDER BY element.sequence, element.id LIMIT 1""",
                 (scenario_id, project_id, work_id),
             ).fetchone()
-            if not link_pitch or str(link_pitch["id"]) != normalized_pitch:
+            if link_pitch and _text(link_pitch["id"]):
+                derived_primary_pitches.add(str(link_pitch["id"]))
+            elif normalized_pitch:
                 raise ValueError("Every linked Process Function must currently belong to the selected Station / Pitch.")
-        placement = conn.execute(
-            "SELECT * FROM equipment_placements WHERE equipment_id=? AND scenario_id=?",
-            (equipment_id, scenario_id),
-        ).fetchone()
-        before_pitch = _text(placement["pitch_id"]) if placement else ""
-        before_work = {
-            str(row["work_element_id"])
-            for row in conn.execute(
-                "SELECT work_element_id FROM equipment_process_links WHERE placement_id=? AND work_element_id IS NOT NULL",
-                (placement["id"],),
+
+        # Process-First linking & Single-Pitch Physical Rule
+        if len(derived_primary_pitches) > 1:
+            raise ValueError(
+                "Each physical tool can only exist in one Station / Pitch. "
+                "All Primary Process Functions must belong to the same Station / Pitch "
+                "(use Prerequisite Operations for upstream steps required before this Pitch)."
+            )
+        if len(derived_primary_pitches) == 1:
+            single_step_pitch = next(iter(derived_primary_pitches))
+            if not normalized_pitch:
+                normalized_pitch = single_step_pitch
+            elif normalized_pitch != single_step_pitch:
+                raise ValueError("Every linked Process Function must currently belong to the selected Station / Pitch.")
+        elif normalized_work and not normalized_pitch:
+            raise ValueError("Choose Station / Pitch before linking Process Functions that are not yet assigned to a Yamazumi Pitch.")
+
+        # Validate Prerequisite Operations (must occur before or at the equipment's Pitch)
+        pitch_rank_by_id: dict[str, int] = {}
+        for idx, prow in enumerate(
+            conn.execute(
+                """SELECT pitch.id
+                   FROM yamazumi_pitches pitch
+                   JOIN yamazumi_areas area ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+                   LEFT JOIN assembly_sections sec ON sec.id=area.section_id
+                   WHERE pitch.project_id=? AND area.scenario_id=?
+                   ORDER BY COALESCE(sec.sequence, 999999), area.name COLLATE NOCASE, pitch.sequence, pitch.pitch_number COLLATE NOCASE""",
+                (project_id, scenario_id),
             ).fetchall()
-        } if placement else set()
+        ):
+            pitch_rank_by_id[str(prow["id"])] = idx
+        target_pitch_rank = pitch_rank_by_id.get(normalized_pitch) if normalized_pitch else None
+
+        for prereq_id in normalized_prereq:
+            pwork = conn.execute(
+                "SELECT id, operation, description, station FROM work_elements WHERE id=? AND project_id=? AND scenario_id=?",
+                (prereq_id, project_id, scenario_id),
+            ).fetchone()
+            if not pwork:
+                raise ValueError("One selected Prerequisite Operation is outside the active scenario.")
+            work_snapshots_by_id[prereq_id] = (
+                _text(pwork["operation"]),
+                _text(pwork["description"]),
+                _text(pwork["station"]),
+            )
+            prereq_pitch = conn.execute(
+                """SELECT pitch.id, pitch.pitch_number FROM yamazumi_elements element
+                   JOIN yamazumi_areas area ON area.id=element.area_id
+                     AND area.project_id=element.project_id AND area.scenario_id=?
+                   JOIN yamazumi_pitches pitch ON pitch.id=element.pitch_id
+                   WHERE element.project_id=? AND element.process_element_id=?
+                   ORDER BY element.sequence, element.id LIMIT 1""",
+                (scenario_id, project_id, prereq_id),
+            ).fetchone()
+            if prereq_pitch and target_pitch_rank is not None:
+                prereq_rank = pitch_rank_by_id.get(str(prereq_pitch["id"]))
+                if prereq_rank is not None and prereq_rank > target_pitch_rank:
+                    raise ValueError(
+                        f"Prerequisite Operation '{pwork['operation']}' is at Pitch {prereq_pitch['pitch_number']}, "
+                        "which occurs AFTER the equipment's Station / Pitch. Prerequisite operations must happen before or at the equipment's Pitch."
+                    )
+
+        before_pitch = _text(placement["pitch_id"]) if placement else ""
+        before_monument = (
+            bool(int(placement["is_monument"] or 0))
+            if (placement and "is_monument" in placement.keys())
+            else bool(int(asset["is_monument"] or 0))
+        )
+        before_work: set[str] = set()
+        before_prereq: set[str] = set()
+        if placement:
+            for row in conn.execute(
+                """SELECT work_element_id, COALESCE(NULLIF(link_role, ''), 'primary') AS link_role
+                   FROM equipment_process_links
+                   WHERE placement_id=? AND work_element_id IS NOT NULL""",
+                (placement["id"],),
+            ).fetchall():
+                if _text(row["link_role"]) == "prerequisite":
+                    before_prereq.add(str(row["work_element_id"]))
+                else:
+                    before_work.add(str(row["work_element_id"]))
+
+        if is_monument is not None and int(effective_monument) != int(asset["is_monument"] or 0):
+            conn.execute(
+                "UPDATE equipment_assets SET is_monument=?, updated_at=? WHERE id=? AND project_id=?",
+                (int(effective_monument), timestamp, equipment_id, project_id),
+            )
+
+        origin_pitch_id = _text(placement["origin_pitch_id"]) if (placement and "origin_pitch_id" in placement.keys()) else ""
+        origin_pitch_snap = _text(placement["origin_pitch_snapshot"]) if (placement and "origin_pitch_snapshot" in placement.keys()) else ""
+        if before_pitch and normalized_pitch and before_pitch != normalized_pitch:
+            origin_pitch_id = before_pitch
+            origin_pitch_snap = _pitch_summary_for_id(conn, project_id, before_pitch)
+
         if not placement:
             placement_id = str(uuid4())
             conn.execute(
                 """INSERT INTO equipment_placements
-                   (id, project_id, scenario_id, equipment_id, pitch_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (placement_id, project_id, scenario_id, equipment_id, normalized_pitch, timestamp, timestamp),
+                   (id, project_id, scenario_id, equipment_id, pitch_id, is_monument,
+                    origin_pitch_id, origin_pitch_snapshot, move_confirmed, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (
+                    placement_id, project_id, scenario_id, equipment_id, normalized_pitch,
+                    int(effective_monument), origin_pitch_id or None, origin_pitch_snap,
+                    timestamp, timestamp,
+                ),
             )
         else:
             placement_id = str(placement["id"])
             conn.execute(
-                "UPDATE equipment_placements SET pitch_id=?, updated_at=? WHERE id=?",
-                (normalized_pitch, timestamp, placement_id),
+                """UPDATE equipment_placements
+                   SET pitch_id=?, is_monument=?, origin_pitch_id=?, origin_pitch_snapshot=?, move_confirmed=1, updated_at=?
+                   WHERE id=?""",
+                (
+                    normalized_pitch, int(effective_monument),
+                    origin_pitch_id or None, origin_pitch_snap,
+                    timestamp, placement_id,
+                ),
             )
             conn.execute(
                 "DELETE FROM equipment_process_links WHERE placement_id=? AND work_element_id IS NOT NULL",
@@ -1167,12 +1735,25 @@ def save_equipment_placement(
             op_snap, desc_snap, pitch_snap = work_snapshots_by_id.get(work_id, ("", "", ""))
             conn.execute(
                 """INSERT INTO equipment_process_links
-                   (id, project_id, scenario_id, placement_id, work_element_id,
+                   (id, project_id, scenario_id, placement_id, work_element_id, link_role,
                     process_operation_snapshot, process_description_snapshot,
                     station_pitch_snapshot, unlinked_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, 'primary', ?, ?, ?, '', ?, ?)""",
                 (
                     str(uuid4()), project_id, scenario_id, placement_id, work_id,
+                    op_snap, desc_snap, pitch_snap, timestamp, timestamp,
+                ),
+            )
+        for prereq_id in normalized_prereq:
+            op_snap, desc_snap, pitch_snap = work_snapshots_by_id.get(prereq_id, ("", "", ""))
+            conn.execute(
+                """INSERT INTO equipment_process_links
+                   (id, project_id, scenario_id, placement_id, work_element_id, link_role,
+                    process_operation_snapshot, process_description_snapshot,
+                    station_pitch_snapshot, unlinked_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'prerequisite', ?, ?, ?, '', ?, ?)""",
+                (
+                    str(uuid4()), project_id, scenario_id, placement_id, prereq_id,
                     op_snap, desc_snap, pitch_snap, timestamp, timestamp,
                 ),
             )
@@ -1181,7 +1762,12 @@ def save_equipment_placement(
                 "UPDATE yamazumi_pitches SET status='Blocked', updated_at=? WHERE id=? AND project_id=?",
                 (timestamp, normalized_pitch, project_id),
             )
-        changed = before_pitch != (normalized_pitch or "") or before_work != set(normalized_work)
+        changed = (
+            before_pitch != (normalized_pitch or "")
+            or before_work != set(normalized_work)
+            or before_prereq != set(normalized_prereq)
+            or before_monument != effective_monument
+        )
         if changed:
             store.record_audit_event(
                 project_id, "Equipment placements", "Save & Refresh", 1, editor,
@@ -1190,12 +1776,14 @@ def save_equipment_placement(
                     "equipment_id": equipment_id,
                     "old_pitch_id": before_pitch,
                     "new_pitch_id": normalized_pitch or "",
+                    "is_monument": effective_monument,
                     "work_element_ids": normalized_work,
+                    "prerequisite_work_element_ids": normalized_prereq,
                     "store_timestamp": timestamp,
                 },
                 _conn=conn,
             )
-    return {"row_count": int(changed), "placement_id": placement_id, "timestamp": timestamp}
+    return {"row_count": int(changed), "placement_id": placement_id, "pitch_id": normalized_pitch or "", "timestamp": timestamp}
 
 
 @cached_store_read
@@ -1203,16 +1791,23 @@ def equipment_placement_mismatches(project_id: str, scenario_id: str) -> pd.Data
     store = _store_module()
     rows = store.query(
         """SELECT asset.id AS equipment_id, asset.name,
+                  COALESCE(placement.is_monument, asset.is_monument, 0) AS is_monument,
                   placement.id AS placement_id, placement.pitch_id AS saved_pitch_id,
                   COALESCE(saved_pitch.pitch_number, 'Unassigned') AS saved_pitch,
+                  COALESCE(saved_area.id, '') AS saved_area_id,
+                  COALESCE(saved_area.name, '') AS saved_area_name,
                   process_link.work_element_id,
                   current_pitch.id AS current_pitch_id,
                   COALESCE(current_pitch.pitch_number, 'Unassigned') AS current_pitch,
+                  COALESCE(area.id, '') AS current_area_id,
+                  COALESCE(area.name, '') AS current_area_name,
                   COALESCE(NULLIF(TRIM(element.description), ''), work.operation) AS process_function
            FROM equipment_placements placement
            JOIN equipment_assets asset ON asset.id=placement.equipment_id
            LEFT JOIN yamazumi_pitches saved_pitch ON saved_pitch.id=placement.pitch_id
+           LEFT JOIN yamazumi_areas saved_area ON saved_area.id=saved_pitch.area_id
            JOIN equipment_process_links process_link ON process_link.placement_id=placement.id
+             AND COALESCE(NULLIF(process_link.link_role, ''), 'primary')='primary'
            JOIN work_elements work ON work.id=process_link.work_element_id
              AND work.project_id=placement.project_id AND work.scenario_id=placement.scenario_id
            LEFT JOIN yamazumi_elements element ON element.process_element_id=work.id
@@ -1224,10 +1819,15 @@ def equipment_placement_mismatches(project_id: str, scenario_id: str) -> pd.Data
            ORDER BY asset.name COLLATE NOCASE, work.sequence, work.id""",
         (project_id, scenario_id),
     )
-    return pd.DataFrame(rows, columns=[
-        "equipment_id", "name", "placement_id", "saved_pitch_id", "saved_pitch",
-        "work_element_id", "current_pitch_id", "current_pitch", "process_function",
+    frame = pd.DataFrame(rows, columns=[
+        "equipment_id", "name", "is_monument", "placement_id", "saved_pitch_id", "saved_pitch",
+        "saved_area_id", "saved_area_name",
+        "work_element_id", "current_pitch_id", "current_pitch",
+        "current_area_id", "current_area_name", "process_function",
     ])
+    if not frame.empty:
+        frame["is_monument"] = pd.to_numeric(frame["is_monument"], errors="coerce").fillna(0).astype(int).astype(bool)
+    return frame
 
 
 def move_equipment_to_linked_pitch(
@@ -1239,6 +1839,10 @@ def move_equipment_to_linked_pitch(
     rows = mismatches.loc[mismatches["equipment_id"].astype(str).eq(equipment_id)]
     if rows.empty:
         raise ValueError("This equipment no longer has a Pitch mismatch.")
+    if bool(rows.iloc[0].get("is_monument")):
+        raise ValueError(
+            f"'{rows.iloc[0]['name']}' is flagged as Monument / Permanently Fixed and cannot move automatically with a process step."
+        )
     current_ids = {_text(value) for value in rows["current_pitch_id"]}
     if "" in current_ids or len(current_ids) != 1:
         raise ValueError("Linked Process Functions are split across Pitches. Reconcile them manually.")
@@ -1252,16 +1856,205 @@ def move_equipment_to_linked_pitch(
         ).fetchone()
         if not placement:
             raise ValueError("The equipment placement no longer exists.")
+        old_pitch_id = _text(placement["pitch_id"])
+        origin_snap = _pitch_summary_for_id(conn, project_id, old_pitch_id) if old_pitch_id else ""
         conn.execute(
-            "UPDATE equipment_placements SET pitch_id=?, updated_at=? WHERE id=?",
-            (target_pitch_id, timestamp, placement["id"]),
+            """UPDATE equipment_placements
+               SET pitch_id=?, origin_pitch_id=?, origin_pitch_snapshot=?, move_confirmed=1, updated_at=?
+               WHERE id=?""",
+            (target_pitch_id, old_pitch_id or None, origin_snap, timestamp, placement["id"]),
         )
         store.record_audit_event(
             project_id, "Equipment placements", "Move equipment to current Pitch", 1, editor,
-            {"scenario_id": scenario_id, "equipment_id": equipment_id, "old_pitch_id": _text(placement["pitch_id"]), "new_pitch_id": target_pitch_id, "store_timestamp": timestamp},
+            {
+                "scenario_id": scenario_id,
+                "equipment_id": equipment_id,
+                "old_pitch_id": old_pitch_id,
+                "origin_pitch_snapshot": origin_snap,
+                "new_pitch_id": target_pitch_id,
+                "store_timestamp": timestamp,
+            },
             _conn=conn,
         )
-    return {"row_count": 1, "pitch_id": target_pitch_id, "timestamp": timestamp}
+    return {"row_count": 1, "pitch_id": target_pitch_id, "origin_pitch_snapshot": origin_snap, "timestamp": timestamp}
+
+
+@cached_store_read
+def equipment_origin_flags(
+    project_id: str,
+    scenario_id: str,
+    area_id: str | None = None,
+) -> pd.DataFrame:
+    """Return equipment assets that were relocated from an origin pitch and still carry an active origin flag."""
+    store = _store_module()
+    rows = store.query(
+        """SELECT asset.id AS equipment_id,
+                  asset.name AS equipment_name,
+                  COALESCE(eqtype.label, '') AS equipment_type,
+                  placement.id AS placement_id,
+                  COALESCE(placement.origin_pitch_id, '') AS origin_pitch_id,
+                  COALESCE(placement.origin_pitch_snapshot, '') AS origin_pitch_snapshot,
+                  COALESCE(origin_pitch.area_id, '') AS origin_area_id,
+                  COALESCE(origin_area.name, '') AS origin_area_name,
+                  COALESCE(placement.pitch_id, '') AS current_pitch_id,
+                  COALESCE(curr_pitch.pitch_number, 'Unassigned') AS current_pitch_number,
+                  COALESCE(curr_pitch.pitch_name, '') AS current_pitch_name,
+                  COALESCE(curr_area.id, '') AS current_area_id,
+                  COALESCE(curr_area.name, '') AS current_area_name,
+                  placement.updated_at
+           FROM equipment_placements placement
+           JOIN equipment_assets asset ON asset.id=placement.equipment_id
+           LEFT JOIN equipment_types eqtype ON eqtype.id=asset.equipment_type_id
+           LEFT JOIN yamazumi_pitches origin_pitch ON origin_pitch.id=placement.origin_pitch_id
+           LEFT JOIN yamazumi_areas origin_area ON origin_area.id=origin_pitch.area_id
+           LEFT JOIN yamazumi_pitches curr_pitch ON curr_pitch.id=placement.pitch_id
+           LEFT JOIN yamazumi_areas curr_area ON curr_area.id=curr_pitch.area_id
+           WHERE placement.project_id=? AND placement.scenario_id=?
+             AND TRIM(COALESCE(placement.origin_pitch_snapshot, ''))<>''
+             AND COALESCE(placement.origin_pitch_id, '')<>COALESCE(placement.pitch_id, '')
+           ORDER BY placement.updated_at DESC, asset.name COLLATE NOCASE""",
+        (project_id, scenario_id),
+    )
+    cols = [
+        "equipment_id", "equipment_name", "equipment_type", "placement_id",
+        "origin_pitch_id", "origin_pitch_snapshot", "origin_pitch", "origin_area_id", "origin_area_name",
+        "current_pitch_id", "current_pitch_number", "current_pitch_name", "current_pitch",
+        "current_area_id", "current_area_name", "updated_at",
+    ]
+    enriched_rows = []
+    for r in rows:
+        d = dict(r)
+        d["origin_pitch"] = _text(d.get("origin_pitch_snapshot")) or "Unassigned"
+        d["current_pitch"] = (
+            _format_pitch_summary(
+                _text(d.get("current_pitch_number")),
+                _text(d.get("current_pitch_name")),
+                _text(d.get("current_area_name")),
+            )
+            or _text(d.get("current_pitch_number"))
+            or "Unassigned"
+        )
+        enriched_rows.append(d)
+    frame = pd.DataFrame(enriched_rows, columns=cols)
+    if not frame.empty and area_id:
+        clean_area = _text(area_id)
+        frame = frame.loc[
+            frame["origin_area_id"].astype(str).eq(clean_area)
+            | frame["current_area_id"].astype(str).eq(clean_area)
+        ].reset_index(drop=True)
+    return frame
+
+
+def clear_equipment_origin_flag(
+    project_id: str,
+    scenario_id: str,
+    equipment_id: str | None,
+    editor_name: str,
+) -> dict[str, object]:
+    """Acknowledge and clear the origin-pitch relocation flag on one or all equipment placements in a scenario."""
+    store = _store_module()
+    editor = _require_editor(editor_name)
+    timestamp = store.now_iso()
+    with store.connection() as conn:
+        if equipment_id:
+            cur = conn.execute(
+                """UPDATE equipment_placements
+                   SET origin_pitch_id=NULL, origin_pitch_snapshot='', move_confirmed=1, updated_at=?
+                   WHERE project_id=? AND scenario_id=? AND equipment_id=?
+                     AND TRIM(COALESCE(origin_pitch_snapshot, ''))<>''""",
+                (timestamp, project_id, scenario_id, equipment_id),
+            )
+        else:
+            cur = conn.execute(
+                """UPDATE equipment_placements
+                   SET origin_pitch_id=NULL, origin_pitch_snapshot='', move_confirmed=1, updated_at=?
+                   WHERE project_id=? AND scenario_id=?
+                     AND TRIM(COALESCE(origin_pitch_snapshot, ''))<>''""",
+                (timestamp, project_id, scenario_id),
+            )
+        count = int(cur.rowcount or 0)
+        if count:
+            store.record_audit_event(
+                project_id, "Equipment placements", "Acknowledge Origin Relocation Flag", count, editor,
+                {"scenario_id": scenario_id, "equipment_id": equipment_id or "all", "store_timestamp": timestamp},
+                _conn=conn,
+            )
+    return {"row_count": count, "timestamp": timestamp}
+
+
+@cached_store_read
+def equipment_prerequisite_violations(project_id: str, scenario_id: str) -> pd.DataFrame:
+    """Return Prerequisite Operations that are currently scheduled AFTER the equipment's placed Pitch."""
+    store = _store_module()
+    pitch_rank_by_id: dict[str, int] = {}
+    for idx, prow in enumerate(
+        store.query(
+            """SELECT pitch.id
+               FROM yamazumi_pitches pitch
+               JOIN yamazumi_areas area ON area.id=pitch.area_id AND area.project_id=pitch.project_id
+               LEFT JOIN assembly_sections sec ON sec.id=area.section_id
+               WHERE pitch.project_id=? AND area.scenario_id=?
+               ORDER BY COALESCE(sec.sequence, 999999), area.name COLLATE NOCASE, pitch.sequence, pitch.pitch_number COLLATE NOCASE""",
+            (project_id, scenario_id),
+        )
+    ):
+        pitch_rank_by_id[str(prow["id"])] = idx
+
+    rows = store.query(
+        """SELECT asset.id AS equipment_id, asset.name AS equipment_name,
+                  placement.pitch_id AS equipment_pitch_id,
+                  COALESCE(eq_pitch.pitch_number, 'Unassigned') AS equipment_pitch,
+                  link.work_element_id,
+                  COALESCE(step_pitch.id, '') AS step_pitch_id,
+                  COALESCE(step_pitch.pitch_number, 'Unassigned') AS step_pitch,
+                  COALESCE(NULLIF(TRIM(element.description), ''), work.operation) AS prerequisite_operation
+           FROM equipment_process_links link
+           JOIN equipment_placements placement ON placement.id=link.placement_id
+           JOIN equipment_assets asset ON asset.id=placement.equipment_id
+           LEFT JOIN yamazumi_pitches eq_pitch ON eq_pitch.id=placement.pitch_id
+           JOIN work_elements work ON work.id=link.work_element_id
+             AND work.project_id=link.project_id AND work.scenario_id=link.scenario_id
+           LEFT JOIN yamazumi_elements element ON element.process_element_id=work.id
+             AND element.project_id=work.project_id
+           LEFT JOIN yamazumi_areas area ON area.id=element.area_id AND area.scenario_id=work.scenario_id
+           LEFT JOIN yamazumi_pitches step_pitch ON step_pitch.id=element.pitch_id
+           WHERE link.project_id=? AND link.scenario_id=?
+             AND COALESCE(NULLIF(link.link_role, ''), 'primary')='prerequisite'
+             AND link.work_element_id IS NOT NULL""",
+        (project_id, scenario_id),
+    )
+    violations: list[dict] = []
+    contexts = store.work_element_op_contexts(project_id, scenario_id) if rows else {}
+    for row in rows:
+        eq_pid = _text(row.get("equipment_pitch_id"))
+        st_pid = _text(row.get("step_pitch_id"))
+        eq_rank = pitch_rank_by_id.get(eq_pid) if eq_pid else None
+        st_rank = pitch_rank_by_id.get(st_pid) if st_pid else None
+        reason = ""
+        if not st_pid:
+            reason = "Prerequisite operation is not assigned to a Pitch"
+        elif eq_rank is not None and st_rank is not None and st_rank > eq_rank:
+            reason = "Prerequisite operation is scheduled downstream (after) the equipment's Pitch"
+        if reason:
+            wid = _text(row.get("work_element_id"))
+            op_id = _text(contexts.get(wid, {}).get("op_id")) or "Op ID unavailable"
+            step_pitch_str = str(row["step_pitch"])
+            violations.append({
+                "equipment_id": str(row["equipment_id"]),
+                "equipment_name": str(row["equipment_name"]),
+                "equipment_pitch": str(row["equipment_pitch"]),
+                "work_element_id": wid,
+                "op_id": op_id,
+                "prerequisite_operation": f"{op_id} — {row['prerequisite_operation']}",
+                "step_pitch": step_pitch_str,
+                "prerequisite_pitch": step_pitch_str,
+                "reason": reason,
+            })
+    return pd.DataFrame(violations, columns=[
+        "equipment_id", "equipment_name", "equipment_pitch",
+        "work_element_id", "op_id", "prerequisite_operation",
+        "step_pitch", "prerequisite_pitch", "reason",
+    ])
 
 
 def unlink_moved_equipment_links(
@@ -1836,11 +2629,21 @@ def clone_equipment_scenario(
         new_pitch_id = pitch_id_map.get(old_pitch_id) if old_pitch_id else None
         if old_pitch_id and not new_pitch_id:
             raise ValueError("An Equipment Station / Pitch could not be remapped while cloning the scenario.")
+        src_monument = int(source["is_monument"] or 0) if "is_monument" in source.keys() else 0
+        old_origin_id = _text(source["origin_pitch_id"]) if "origin_pitch_id" in source.keys() else ""
+        new_origin_id = pitch_id_map.get(old_origin_id) if old_origin_id else None
+        origin_snap = _text(source["origin_pitch_snapshot"]) if "origin_pitch_snapshot" in source.keys() else ""
+        move_conf = int(source["move_confirmed"] if ("move_confirmed" in source.keys() and source["move_confirmed"] is not None) else 1)
         conn.execute(
             """INSERT INTO equipment_placements
-               (id, project_id, scenario_id, equipment_id, pitch_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (new_placement_id, project_id, target_scenario_id, source["equipment_id"], new_pitch_id, timestamp, timestamp),
+               (id, project_id, scenario_id, equipment_id, pitch_id, is_monument,
+                origin_pitch_id, origin_pitch_snapshot, move_confirmed, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_placement_id, project_id, target_scenario_id, source["equipment_id"],
+                new_pitch_id, src_monument, new_origin_id, origin_snap, move_conf,
+                timestamp, timestamp,
+            ),
         )
         for link in links_by_placement.get(old_placement_id, []):
             raw_work_id = _text(link["work_element_id"])
@@ -1850,18 +2653,20 @@ def clone_equipment_scenario(
                     raise ValueError("An Equipment Process Function could not be remapped while cloning the scenario.")
             else:
                 new_work_id = None
+            link_role = _text(link["link_role"]) if "link_role" in link.keys() else "primary"
             conn.execute(
                 """INSERT INTO equipment_process_links
-                   (id, project_id, scenario_id, placement_id, work_element_id,
+                   (id, project_id, scenario_id, placement_id, work_element_id, link_role,
                     process_operation_snapshot, process_description_snapshot,
                     station_pitch_snapshot, unlinked_at, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(uuid4()),
                     project_id,
                     target_scenario_id,
                     new_placement_id,
                     new_work_id,
+                    link_role or "primary",
                     _text(link["process_operation_snapshot"]) if "process_operation_snapshot" in link.keys() else "",
                     _text(link["process_description_snapshot"]) if "process_description_snapshot" in link.keys() else "",
                     _text(link["station_pitch_snapshot"]) if "station_pitch_snapshot" in link.keys() else "",
@@ -1963,42 +2768,62 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
         work_ids = [str(r["id"]) for r in work_rows]
         op_contexts = store.work_element_op_contexts(project_id, scenario_id, work_ids)
 
+        step_pitch_by_work: dict[str, str] = {}
+        for srow in conn.execute(
+            """SELECT element.process_element_id AS work_element_id, COALESCE(element.pitch_id, '') AS pitch_id
+               FROM yamazumi_elements element
+               JOIN yamazumi_areas area ON area.id=element.area_id
+                 AND area.project_id=element.project_id AND area.scenario_id=?
+               WHERE element.project_id=? AND element.process_element_id IS NOT NULL""",
+            (scenario_id, project_id),
+        ).fetchall():
+            wid = _text(srow["work_element_id"])
+            if wid and wid not in step_pitch_by_work:
+                step_pitch_by_work[wid] = _text(srow["pitch_id"])
+
         placed_rows = conn.execute(
-            """SELECT link.work_element_id, asset.id AS equipment_id, asset.name AS asset_name,
+            """SELECT link.work_element_id,
+                      COALESCE(NULLIF(link.link_role, ''), 'primary') AS link_role,
+                      COALESCE(placement.pitch_id, '') AS placed_pitch_id,
+                      COALESCE(p.pitch_number, '') AS placed_pitch_number,
+                      asset.id AS equipment_id, asset.name AS asset_name,
                       eqtype.label AS equipment_type
                FROM equipment_process_links link
                JOIN equipment_placements placement
                  ON placement.id = link.placement_id
                 AND placement.project_id = link.project_id
                 AND placement.scenario_id = link.scenario_id
+               LEFT JOIN yamazumi_pitches p ON p.id = placement.pitch_id
                JOIN equipment_assets asset
                  ON asset.id = placement.equipment_id
                 AND asset.project_id = link.project_id
-                JOIN equipment_types eqtype
-                  ON eqtype.id = asset.equipment_type_id
-                 AND eqtype.project_id = link.project_id
-                WHERE link.project_id=? AND link.scenario_id=? AND link.work_element_id IS NOT NULL""",
+               JOIN equipment_types eqtype
+                 ON eqtype.id = asset.equipment_type_id
+                AND eqtype.project_id = link.project_id
+               WHERE link.project_id=? AND link.scenario_id=? AND link.work_element_id IS NOT NULL""",
             (project_id, scenario_id),
         ).fetchall()
 
         placed_by_work: dict[str, list[dict]] = {}
         for r in placed_rows:
-            placed_by_work.setdefault(str(r["work_element_id"]), []).append(dict(r))
+            if _text(r["link_role"]) == "primary":
+                placed_by_work.setdefault(str(r["work_element_id"]), []).append(dict(r))
 
-        torque_assets_by_req_id: dict[str, list[str]] = {}
+        torque_assets_by_req_id: dict[str, list[dict]] = {}
         for tr in conn.execute(
-            """SELECT link.quality_requirement_id, asset.name
+            """SELECT link.quality_requirement_id, asset.id AS equipment_id, asset.name,
+                      COALESCE(placement.pitch_id, '') AS placed_pitch_id,
+                      COALESCE(p.pitch_number, '') AS placed_pitch_number
                FROM equipment_torque_requirement_links link
                JOIN equipment_assets asset ON asset.id = link.equipment_id
+               LEFT JOIN equipment_placements placement
+                 ON placement.equipment_id = asset.id AND placement.scenario_id=?
+               LEFT JOIN yamazumi_pitches p ON p.id = placement.pitch_id
                WHERE link.project_id=?""",
-            (project_id,),
+            (scenario_id, project_id),
         ).fetchall():
             req_key = str(tr["quality_requirement_id"])
-            aname = _text(tr["name"])
-            if aname:
-                bucket = torque_assets_by_req_id.setdefault(req_key, [])
-                if aname not in bucket:
-                    bucket.append(aname)
+            torque_assets_by_req_id.setdefault(req_key, []).append(dict(tr))
 
         assignments = conn.execute(
             """SELECT a.id AS assignment_id, a.work_element_id, a.quality_requirement_id,
@@ -2011,6 +2836,7 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
 
         matrix_records: list[dict] = []
         drawing_matched_keys: set[tuple[str, str]] = set()
+        torque_reqs_by_work: dict[str, list[dict]] = {}
 
         for a in assignments:
             work_id = str(a["work_element_id"])
@@ -2025,6 +2851,7 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
             expected_type = ""
             if req_type.casefold() == "torque" or "torque" in desc.casefold():
                 expected_type = "Torque tool"
+                torque_reqs_by_work.setdefault(work_id, []).append(dict(a))
             elif "vision" in req_type.casefold() or "vision" in desc.casefold():
                 expected_type = "Vision equipment"
             elif "esd" in req_type.casefold() or "esd" in desc.casefold():
@@ -2041,22 +2868,45 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
             op_id = _text(op_ctx.get("op_id")) or "Op ID unavailable"
             pitch_st = _text(op_ctx.get("pitch_number")) or _text(op_ctx.get("station")) or "Unassigned"
             op_text = _text(op_ctx.get("operation"))
+            step_pitch_id = step_pitch_by_work.get(work_id, "")
 
             spec_parts = [p for p in [uid, desc, target, tol, unit] if p]
             spec_str = " — ".join(spec_parts) if spec_parts else f"{req_type} Requirement"
 
             placed_assets = placed_by_work.get(work_id, [])
-            matching_assets = [
-                eq["asset_name"] for eq in placed_assets
+            type_matched_at_step = [
+                eq for eq in placed_assets
                 if _text(eq.get("equipment_type")).casefold() == expected_type.casefold()
                 or (expected_type == "Torque tool" and "torque" in _text(eq.get("equipment_type")).casefold())
             ]
-            if expected_type == "Torque tool":
-                for aname in torque_assets_by_req_id.get(req_id, ()):
-                    if aname not in matching_assets:
-                        matching_assets.append(aname)
+            valid_pitch_assets = [
+                eq["asset_name"] for eq in type_matched_at_step
+                if not step_pitch_id or _text(eq.get("placed_pitch_id")) == step_pitch_id
+            ]
+            mismatched_pitch_assets = [
+                f"{eq['asset_name']} (@ {eq.get('placed_pitch_number') or 'Unassigned'})"
+                for eq in type_matched_at_step
+                if step_pitch_id and _text(eq.get("placed_pitch_id")) != step_pitch_id
+            ]
 
-            is_satisfied = len(matching_assets) > 0
+            is_satisfied = len(valid_pitch_assets) > 0
+            if is_satisfied:
+                linked_names = ", ".join(valid_pitch_assets)
+                cov_status = "Satisfied"
+            elif mismatched_pitch_assets:
+                linked_names = f"⚠️ Pitch mismatch: {', '.join(mismatched_pitch_assets)}"
+                cov_status = "Pitch Mismatch on Linked Tool"
+            elif expected_type == "Torque tool" and torque_assets_by_req_id.get(req_id):
+                unlinked_tools = [
+                    f"{t['name']} (@ {t.get('placed_pitch_number') or 'Unassigned'})"
+                    for t in torque_assets_by_req_id.get(req_id, [])
+                ]
+                linked_names = f"⚠️ Not linked to this step/pitch: {', '.join(unlinked_tools)}"
+                cov_status = "Missing Process / Pitch Link"
+            else:
+                linked_names = "⚠️ [No Asset Attached]"
+                cov_status = "Missing Equipment"
+
             matrix_records.append({
                 "work_element_id": work_id,
                 "op_id": op_id,
@@ -2065,8 +2915,8 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
                 "source_stage": "Drawing Requirement",
                 "requirement_control_desc": spec_str,
                 "expected_equipment_type": expected_type,
-                "linked_asset_names": ", ".join(matching_assets) if is_satisfied else "⚠️ [No Asset Attached]",
-                "coverage_status": "Satisfied" if is_satisfied else "Missing Equipment",
+                "linked_asset_names": linked_names,
+                "coverage_status": cov_status,
                 "is_satisfied": is_satisfied,
             })
             drawing_matched_keys.add((work_id, expected_type.casefold()))
@@ -2083,7 +2933,11 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
             item_dict = dict(item)
             work_id = str(item_dict.get("work_element_id") or "")
             method = _text(item_dict.get("control_method"))
-            if not method:
+            prod_char = _text(item_dict.get("product_characteristic"))
+            proc_char = _text(item_dict.get("process_characteristic"))
+            spec_tol = _text(item_dict.get("specification_tolerance"))
+            combined_text = f"{method} {prod_char} {proc_char} {spec_tol}".lower()
+            if not method and not prod_char and not proc_char:
                 continue
 
             m_lower = method.lower()
@@ -2096,8 +2950,10 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
                 expected_type = "Poka-Yoke / Fixture equipment"
             elif "esd" in m_lower or "frm-ap1-qys-029" in m_lower:
                 expected_type = "ESD equipment"
-            elif "torque" in m_lower:
+            elif "torque" in m_lower or "dc tool" in m_lower or "torque" in combined_text:
                 expected_type = "Torque tool"
+            elif "gauge" in m_lower or "caliper" in m_lower or "micrometer" in m_lower or "dimensional" in m_lower:
+                expected_type = "Dimensional measurement equipment"
             elif "test" in m_lower:
                 expected_type = "Test equipment"
 
@@ -2111,24 +2967,52 @@ def equipment_needs_vs_placements_matrix(project_id: str, scenario_id: str) -> p
             op_id = _text(op_ctx.get("op_id")) or "Op ID unavailable"
             pitch_st = _text(op_ctx.get("pitch_number")) or _text(op_ctx.get("station")) or "Unassigned"
             op_text = _text(op_ctx.get("operation")) or _text(item_dict.get("process_operation_snapshot"))
+            step_pitch_id = step_pitch_by_work.get(work_id, "")
 
             placed_assets = placed_by_work.get(work_id, [])
-            matching_assets = [
-                eq["asset_name"] for eq in placed_assets
+            type_matched_at_step = [
+                eq for eq in placed_assets
                 if _text(eq.get("equipment_type")).casefold() == expected_type.casefold()
+                or (expected_type == "Torque tool" and "torque" in _text(eq.get("equipment_type")).casefold())
             ]
-            is_satisfied = len(matching_assets) > 0
+            valid_pitch_assets = [
+                eq["asset_name"] for eq in type_matched_at_step
+                if not step_pitch_id or _text(eq.get("placed_pitch_id")) == step_pitch_id
+            ]
+            mismatched_pitch_assets = [
+                f"{eq['asset_name']} (@ {eq.get('placed_pitch_number') or 'Unassigned'})"
+                for eq in type_matched_at_step
+                if step_pitch_id and _text(eq.get("placed_pitch_id")) != step_pitch_id
+            ]
 
+            # For Control Plan rows calling out Torque, also check if a Torque Requirement is assigned to the step
+            has_step_torque_req = bool(torque_reqs_by_work.get(work_id))
+            is_satisfied = len(valid_pitch_assets) > 0
+            if is_satisfied:
+                linked_names = ", ".join(valid_pitch_assets)
+                cov_status = "Satisfied"
+            elif mismatched_pitch_assets:
+                linked_names = f"⚠️ Pitch mismatch: {', '.join(mismatched_pitch_assets)}"
+                cov_status = "Pitch Mismatch on Linked Tool"
+            else:
+                linked_names = "⚠️ [No Asset Attached to Step/Pitch]"
+                cov_status = (
+                    "Missing Torque Tool & Requirement Link"
+                    if (expected_type == "Torque tool" and not has_step_torque_req)
+                    else "Missing Equipment"
+                )
+
+            desc_label = method or prod_char or proc_char
             matrix_records.append({
                 "work_element_id": work_id,
                 "op_id": op_id,
                 "pitch_station": pitch_st,
                 "operation": op_text,
                 "source_stage": "PFMEA Control",
-                "requirement_control_desc": method,
+                "requirement_control_desc": desc_label,
                 "expected_equipment_type": expected_type,
-                "linked_asset_names": ", ".join(matching_assets) if is_satisfied else "⚠️ [No Asset Attached]",
-                "coverage_status": "Satisfied" if is_satisfied else "Missing Equipment",
+                "linked_asset_names": linked_names,
+                "coverage_status": cov_status,
                 "is_satisfied": is_satisfied,
             })
 

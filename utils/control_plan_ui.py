@@ -813,6 +813,68 @@ def _render_pfmea_coverage_flag(
         st.dataframe(display_df, hide_index=True, width="stretch")
 
 
+def _render_control_plan_equipment_check(
+    project_id: str,
+    scenario_id: str,
+    active_cp_rows: pd.DataFrame | None = None,
+    container=None,
+) -> None:
+    """Read-only check verifying Control Plan and Torque requirements have proper equipment links at the Process Function and Pitch."""
+    try:
+        from utils.equipment_store import equipment_needs_vs_placements_matrix
+
+        matrix = equipment_needs_vs_placements_matrix(project_id, scenario_id)
+    except Exception:
+        return
+    if matrix.empty:
+        return
+    cp_work_ids: set[str] = set()
+    if active_cp_rows is not None and not active_cp_rows.empty and "work_element_id" in active_cp_rows.columns:
+        cp_work_ids = {
+            str(wid).strip()
+            for wid in active_cp_rows["work_element_id"].dropna().tolist()
+            if str(wid).strip()
+        }
+    unsatisfied = matrix.loc[~matrix["is_satisfied"].fillna(False)].copy()
+    if cp_work_ids and not unsatisfied.empty:
+        unsatisfied = unsatisfied.loc[
+            unsatisfied["work_element_id"].astype(str).isin(cp_work_ids)
+            | unsatisfied["source_stage"].astype(str).isin(["Control Plan", "PFMEA Control"])
+            | unsatisfied["expected_equipment_type"].astype(str).str.casefold().eq("torque tool")
+        ].copy()
+    if unsatisfied.empty:
+        return
+    target = container if container is not None else st
+    missing_count = len(unsatisfied)
+    step_count = int(unsatisfied["work_element_id"].nunique())
+    target.warning(
+        f"🔧 **Control Plan Equipment & Torque Link Check**: {missing_count} Torque / Equipment requirement(s) across "
+        f"{step_count} Process step(s) do not have a physical tool properly linked to that **Process Function and Station / Pitch**."
+    )
+    with target.expander(
+        f"View Unlinked / Cross-Pitch Equipment & Torque Callouts ({missing_count})",
+        expanded=False,
+        icon=":material/build_circle:",
+    ):
+        st.caption(
+            "Read-only check (no backward linking to PAAG): Each physical tool exists in one Station / Pitch. "
+            "Ensure a tool of the required type is placed at the operation's Pitch and linked to the Process Function (and Torque Requirement, where applicable)."
+        )
+        display_df = pd.DataFrame(
+            {
+                "Station / Pitch": unsatisfied["pitch_station"],
+                "Op ID": unsatisfied["op_id"],
+                "Process Function": unsatisfied["operation"],
+                "Source": unsatisfied["source_stage"],
+                "Requirement / Callout": unsatisfied["requirement_control_desc"],
+                "Required Tool Type": unsatisfied["expected_equipment_type"],
+                "Linked Asset / Pitch Status": unsatisfied["linked_asset_names"],
+                "Audit Status": unsatisfied["coverage_status"],
+            }
+        )
+        st.dataframe(display_df, hide_index=True, width="stretch")
+
+
 def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> None:
     """Render the editable Characteristics table peer view."""
     source = control_plan_projection(project_id, scenario_id)
@@ -822,6 +884,7 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
             "selected in that PFMEA entry create separate characteristic lines."
         )
         _render_pfmea_coverage_flag(project_id, scenario_id)
+        _render_control_plan_equipment_check(project_id, scenario_id)
         _render_review_area(project_id, scenario_id)
         return
     persisted_active = source.loc[~source["excluded"].fillna(False)].copy()
@@ -894,6 +957,9 @@ def _render_control_plan_characteristics(project_id: str, scenario_id: str) -> N
         active, editor_rows, edited_for_merge, id_column="projection_key"
     )
     _render_pfmea_coverage_flag(
+        project_id, scenario_id, active_cp_rows=complete, container=coverage_banner
+    )
+    _render_control_plan_equipment_check(
         project_id, scenario_id, active_cp_rows=complete, container=coverage_banner
     )
     pr_number_edited = any(
