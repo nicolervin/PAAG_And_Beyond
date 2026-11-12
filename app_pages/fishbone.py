@@ -22,6 +22,7 @@ from utils.store import (
     fishbone_assignment_assembly_impact,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    fishbone_sticky_notes,
     link_part_variants,
     move_fishbone_part_assignment,
     reorder_fishbone_part_assignments,
@@ -66,14 +67,16 @@ import utils.fishbone_visual as _fishbone_visual_mod
 import utils.fishbone_store as _fishbone_store_mod
 import utils.store as _store_mod
 
-if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 5:
+if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 6:
     _fishbone_store_mod = importlib.reload(_fishbone_store_mod)
     _store_mod = importlib.reload(_store_mod)
     add_assembly_section = _store_mod.add_assembly_section
     update_assembly_section = _store_mod.update_assembly_section
     update_assembly_section_rows = _store_mod.update_assembly_section_rows
+    fishbone_sticky_notes = _store_mod.fishbone_sticky_notes
+    save_fishbone_canvas_draft = _store_mod.save_fishbone_canvas_draft
 
-if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 12:
+if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 13:
     _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
@@ -1188,8 +1191,9 @@ if fishbone_tab.open:
             visible_sections = sections.loc[sections["active"].fillna(1).astype(bool)].copy() if not sections.empty else sections.copy()
             records = {str(r["id"]): r for r in visible_sections.to_dict(orient="records")} if not visible_sections.empty else {}
 
-            # Connections from database
+            # Connections and sticky notes from database
             connections_df = assembly_section_connections(project_id)
+            sticky_notes_df = fishbone_sticky_notes(project_id)
 
             # Canvas draft management
             canvas_draft_key = f"fishbone_canvas_draft_{project_id}"
@@ -1210,6 +1214,8 @@ if fishbone_tab.open:
                     "updated_assignments": [],
                     "deleted_assignments": set(),
                     "variant_links": [],
+                    "sticky_notes": {},
+                    "deleted_sticky_notes": set(),
                 },
             )
             if "updated_assignments" not in draft:
@@ -1218,6 +1224,10 @@ if fishbone_tab.open:
                 draft["connection_nodes"] = {}
             if "variant_links" not in draft:
                 draft["variant_links"] = []
+            if "sticky_notes" not in draft:
+                draft["sticky_notes"] = {}
+            if "deleted_sticky_notes" not in draft:
+                draft["deleted_sticky_notes"] = set()
 
             draft_before_canvas_action = copy.deepcopy(draft)
 
@@ -1265,7 +1275,27 @@ if fishbone_tab.open:
                                 "use_description": str(arow.get("use_description") or ""),
                                 "notes": str(arow.get("notes") or ""),
                             }
-                return {"positions": pos_snap, "connections": conn_snap, "assignments": asgn_snap}
+                sticky_snap = {}
+                if not sticky_notes_df.empty:
+                    for _, snrow in sticky_notes_df.iterrows():
+                        snid_s = str(snrow.get("id") or "")
+                        if snid_s:
+                            sticky_snap[snid_s] = {
+                                "text": str(snrow.get("text") or ""),
+                                "author_name": str(snrow.get("author_name") or ""),
+                                "color": str(snrow.get("color") or "yellow"),
+                                "orientation": str(snrow.get("orientation") or "square"),
+                                "canvas_x": float(snrow.get("canvas_x") or 140.0) if pd.notna(snrow.get("canvas_x")) else 140.0,
+                                "canvas_y": float(snrow.get("canvas_y") or 140.0) if pd.notna(snrow.get("canvas_y")) else 140.0,
+                                "width": float(snrow.get("width") or 200.0) if pd.notna(snrow.get("width")) else 200.0,
+                                "height": float(snrow.get("height") or 160.0) if pd.notna(snrow.get("height")) else 160.0,
+                            }
+                return {
+                    "positions": pos_snap,
+                    "connections": conn_snap,
+                    "assignments": asgn_snap,
+                    "sticky_notes": sticky_snap,
+                }
 
             live_fishbone_snap = _build_fishbone_canvas_snapshot()
             has_existing_canvas_draft = bool(
@@ -1277,6 +1307,8 @@ if fishbone_tab.open:
                 or draft.get("updated_assignments")
                 or draft["deleted_assignments"]
                 or draft.get("variant_links")
+                or draft.get("sticky_notes")
+                or draft.get("deleted_sticky_notes")
             )
             if not has_existing_canvas_draft or canvas_clean_base_key not in st.session_state:
                 st.session_state[canvas_clean_base_key] = live_fishbone_snap
@@ -2378,6 +2410,74 @@ if fishbone_tab.open:
                             st.rerun()
                         except ValueError as err:
                             st.error(str(err))
+                if p := getattr(canvas_state, "upsert_sticky_note", None):
+                    try:
+                        delattr(canvas_state, "upsert_sticky_note")
+                    except (AttributeError, TypeError):
+                        pass
+                    sn_id = str(p.get("id") or "").strip()
+                    if sn_id:
+                        draft["deleted_sticky_notes"].discard(sn_id)
+                        existing_draft_sn = draft["sticky_notes"].get(sn_id, {})
+                        db_sn = live_fishbone_snap.get("sticky_notes", {}).get(sn_id, {})
+                        draft["sticky_notes"][sn_id] = {
+                            "id": sn_id,
+                            "section_id": p.get("section_id", existing_draft_sn.get("section_id")),
+                            "text": str(
+                                p.get("text")
+                                if p.get("text") is not None
+                                else existing_draft_sn.get("text", db_sn.get("text", ""))
+                            ),
+                            "author_name": str(
+                                p.get("author_name")
+                                or existing_draft_sn.get("author_name")
+                                or db_sn.get("author_name")
+                                or st.session_state.get("current_editor", "")
+                                or "Collaborator"
+                            ).strip(),
+                            "color": str(
+                                p.get("color")
+                                or existing_draft_sn.get("color")
+                                or db_sn.get("color")
+                                or "yellow"
+                            ).strip().lower(),
+                            "orientation": str(
+                                p.get("orientation")
+                                or existing_draft_sn.get("orientation")
+                                or db_sn.get("orientation")
+                                or "square"
+                            ).strip().lower(),
+                            "canvas_x": float(
+                                p.get("canvas_x")
+                                if p.get("canvas_x") is not None
+                                else existing_draft_sn.get("canvas_x", db_sn.get("canvas_x", 140.0))
+                            ),
+                            "canvas_y": float(
+                                p.get("canvas_y")
+                                if p.get("canvas_y") is not None
+                                else existing_draft_sn.get("canvas_y", db_sn.get("canvas_y", 140.0))
+                            ),
+                            "width": float(
+                                p.get("width")
+                                if p.get("width") is not None
+                                else existing_draft_sn.get("width", db_sn.get("width", 200.0))
+                            ),
+                            "height": float(
+                                p.get("height")
+                                if p.get("height") is not None
+                                else existing_draft_sn.get("height", db_sn.get("height", 160.0))
+                            ),
+                        }
+                if p := getattr(canvas_state, "delete_sticky_note", None):
+                    try:
+                        delattr(canvas_state, "delete_sticky_note")
+                    except (AttributeError, TypeError):
+                        pass
+                    sn_id = str(p.get("id") or "").strip()
+                    if sn_id:
+                        draft["sticky_notes"].pop(sn_id, None)
+                        if not sticky_notes_df.empty and sn_id in set(sticky_notes_df["id"].astype(str)):
+                            draft["deleted_sticky_notes"].add(sn_id)
                 _record_canvas_draft_history()
 
             image_path_by_part = (
@@ -3258,6 +3358,8 @@ if fishbone_tab.open:
                 + len(draft.get("updated_assignments", []))
                 + len(draft["deleted_assignments"])
                 + len(draft.get("variant_links", []))
+                + len(draft.get("sticky_notes", {}))
+                + len(draft.get("deleted_sticky_notes", set()))
             )
             can_undo_canvas = bool(
                 canvas_undo_stack
@@ -3267,12 +3369,44 @@ if fishbone_tab.open:
             can_discard_canvas = bool(
                 canvas_unsaved_count > 0 or framework_undo_key in st.session_state
             )
+
+            visual_sticky_notes: list[dict] = []
+            seen_sticky_ids: set[str] = set()
+            deleted_sticky_set = set(draft.get("deleted_sticky_notes", set()))
+            staged_sticky_map = draft.get("sticky_notes", {})
+            if not sticky_notes_df.empty:
+                for _, sn_row in sticky_notes_df.iterrows():
+                    sn_id = str(sn_row.get("id") or "").strip()
+                    if not sn_id or sn_id in deleted_sticky_set:
+                        continue
+                    seen_sticky_ids.add(sn_id)
+                    if sn_id in staged_sticky_map:
+                        visual_sticky_notes.append(dict(staged_sticky_map[sn_id]))
+                    else:
+                        visual_sticky_notes.append({
+                            "id": sn_id,
+                            "section_id": str(sn_row.get("section_id") or "") if pd.notna(sn_row.get("section_id")) else None,
+                            "text": str(sn_row.get("text") or ""),
+                            "author_name": str(sn_row.get("author_name") or ""),
+                            "color": str(sn_row.get("color") or "yellow"),
+                            "orientation": str(sn_row.get("orientation") or "square"),
+                            "canvas_x": float(sn_row.get("canvas_x") or 140.0) if pd.notna(sn_row.get("canvas_x")) else 140.0,
+                            "canvas_y": float(sn_row.get("canvas_y") or 140.0) if pd.notna(sn_row.get("canvas_y")) else 140.0,
+                            "width": float(sn_row.get("width") or 200.0) if pd.notna(sn_row.get("width")) else 200.0,
+                            "height": float(sn_row.get("height") or 160.0) if pd.notna(sn_row.get("height")) else 160.0,
+                        })
+            for sn_id, sn_dict in staged_sticky_map.items():
+                if sn_id not in seen_sticky_ids and sn_id not in deleted_sticky_set:
+                    visual_sticky_notes.append(dict(sn_dict))
+
             canvas_output = interactive_fishbone(
                 sections=node_rows,
                 connections=conn_rows,
                 parts=visual_parts,
                 palette_items=palette_items,
                 all_sections=all_sections_list,
+                sticky_notes=visual_sticky_notes,
+                current_editor=st.session_state.get("current_editor", ""),
                 unsaved_count=canvas_unsaved_count,
                 can_undo_last=can_undo_canvas,
                 can_redo_last=can_redo_canvas,
@@ -3341,6 +3475,8 @@ if fishbone_tab.open:
                 or draft.get("updated_assignments")
                 or draft["deleted_assignments"]
                 or draft.get("variant_links")
+                or draft.get("sticky_notes")
+                or draft.get("deleted_sticky_notes")
             )
             if has_canvas_draft:
                 total_actions = (
@@ -3352,6 +3488,8 @@ if fishbone_tab.open:
                     + len(draft.get("updated_assignments", []))
                     + len(draft["deleted_assignments"])
                     + len(draft.get("variant_links", []))
+                    + len(draft.get("sticky_notes", {}))
+                    + len(draft.get("deleted_sticky_notes", set()))
                 )
                 st.info(
                     f"Unsaved canvas changes ({total_actions} staged edit{'s' if total_actions != 1 else ''}). Click Save & Refresh in the toolbar to commit."
@@ -3419,6 +3557,34 @@ if fishbone_tab.open:
                         base_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": b_summary})
                         live_rows_for_diff.append({"id": row_id, "name": f"Part {pn_label}", "Grid Position": "", "Placement / Details": l_summary})
                         draft_edited_by_id[row_id] = {"Placement / Details": "(Staged for removal)"}
+
+                # 3. Updated & deleted sticky notes in draft
+                for sn_id_k, sn_draft in (draft.get("sticky_notes") or {}).items():
+                    sn_id_str = str(sn_id_k or "").strip()
+                    if not sn_id_str:
+                        continue
+                    b_sn = base_snap.get("sticky_notes", {}).get(sn_id_str)
+                    l_sn = live_fishbone_snap.get("sticky_notes", {}).get(sn_id_str)
+                    if b_sn is None:
+                        continue
+                    row_id = f"sticky:{sn_id_str}"
+                    b_pos_str = f"({b_sn.get('canvas_x', 0):.0f}, {b_sn.get('canvas_y', 0):.0f}) · {b_sn.get('width', 200):.0f}×{b_sn.get('height', 160):.0f}"
+                    l_pos_str = (
+                        f"({l_sn.get('canvas_x', 0):.0f}, {l_sn.get('canvas_y', 0):.0f}) · {l_sn.get('width', 200):.0f}×{l_sn.get('height', 160):.0f}"
+                        if l_sn
+                        else "(Deleted by collaborator)"
+                    )
+                    d_pos_str = f"({sn_draft.get('canvas_x', 0):.0f}, {sn_draft.get('canvas_y', 0):.0f}) · {sn_draft.get('width', 200):.0f}×{sn_draft.get('height', 160):.0f}"
+                    b_det = f"{b_sn.get('color', 'yellow')}/{b_sn.get('orientation', 'square')}: {b_sn.get('text', '')}"
+                    l_det = (
+                        f"{l_sn.get('color', 'yellow')}/{l_sn.get('orientation', 'square')}: {l_sn.get('text', '')}"
+                        if l_sn
+                        else "(Deleted by collaborator)"
+                    )
+                    d_det = f"{sn_draft.get('color', 'yellow')}/{sn_draft.get('orientation', 'square')}: {sn_draft.get('text', '')}"
+                    base_rows_for_diff.append({"id": row_id, "name": f"Sticky Note ({sn_id_str[:8]})", "Grid Position": b_pos_str, "Placement / Details": b_det})
+                    live_rows_for_diff.append({"id": row_id, "name": f"Sticky Note ({sn_id_str[:8]})", "Grid Position": l_pos_str, "Placement / Details": l_det})
+                    draft_edited_by_id[row_id] = {"Grid Position": d_pos_str, "Placement / Details": d_det}
 
                 if base_rows_for_diff:
                     st.session_state[f"_table_clean_base_df_{canvas_footer_editor_key}"] = pd.DataFrame(base_rows_for_diff)
@@ -3508,6 +3674,8 @@ if fishbone_tab.open:
                         updated_assignments=draft.get("updated_assignments") if draft.get("updated_assignments") else None,
                         deleted_assignment_ids=list(draft["deleted_assignments"]) if draft["deleted_assignments"] else None,
                         variant_links=draft.get("variant_links") if draft.get("variant_links") else None,
+                        sticky_notes=list(draft["sticky_notes"].values()) if draft.get("sticky_notes") else None,
+                        deleted_sticky_note_ids=list(draft["deleted_sticky_notes"]) if draft.get("deleted_sticky_notes") else None,
                         editor_name=st.session_state.get("current_editor", ""),
                     )
                     if draft.get("connection_nodes"):
@@ -3547,6 +3715,9 @@ if fishbone_tab.open:
                         canvas_save_parts.append(f"{part_changes} part placement change(s)")
                     if draft.get("variant_links"):
                         canvas_save_parts.append(f"{len(draft['variant_links'])} variant link(s)")
+                    sticky_changes = len(draft.get("sticky_notes") or {}) + len(draft.get("deleted_sticky_notes") or set())
+                    if sticky_changes:
+                        canvas_save_parts.append(f"{sticky_changes} sticky note change(s)")
                     st.toast(
                         "Saved Fishbone canvas changes"
                         + (f" ({', '.join(canvas_save_parts)})" if canvas_save_parts else ""),

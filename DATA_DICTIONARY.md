@@ -155,6 +155,12 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`. At most one `pits_bom_occurrences` row may reference an assignment as its approved source occurrence.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
 
+### `fishbone_sticky_notes`
+
+- **Purpose:** Stores collaborative digital sticky notes placed on the Interactive Fishbone canvas, including note text, editor attribution (`author_name` displayed in the bottom corner of the note), color (`'yellow'`, `'pink'`, `'blue'`, `'green'`, `'orange'`, `'purple'`), orientation (`'square'` normal `0°` square/rectangle vs. `'diamond'` rotated `45°` diamond shape), 2D canvas coordinates (`canvas_x`, `canvas_y`), 2-direction dimensions (`width`, `height`), and timestamps.
+- **Key relationships:** Belongs to `projects` (`ON DELETE CASCADE`) and optionally references `assembly_sections` (`ON DELETE SET NULL`).
+- **Scope:** Project-wide (`All scenarios`), matching the Fishbone framework (`assembly_sections` and `assembly_section_connections`).
+
 ### `manufacturing_assemblies`
 
 - **Purpose:** Stores the project-wide catalog of real, pre-existing assembly numbers, including friendly name, parent assembly, Built section, Installed section, project-wide Make / buy classification, active state, notes, primary image path, linked completed-subassembly Parts Catalog identity, and timestamps. The parked `pits_reference` and `planning_reason` fields remain hidden from the active catalog workflow.
@@ -1978,3 +1984,33 @@ Future issued-document generation and approval (not implemented)
      - **Universal Deletion Standard:** Deactivating a scenario hides it from active scenario switchers without deleting any records.
      - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` with Current editor attribution under `"Planning scenarios"` and `"Projects"` (`"Copy project"`), exposed in the bottom **History** expander on **Project overview**.
      - **Canonical Terminology & Help Text:** Uses the canonical label **Active** for the boolean toggle column, preserves scope badges, and updates `utils/help_hub.py`.
+
+### Interactive Fishbone Digital Sticky Notes (`fishbone_sticky_notes`, `app_pages/fishbone.py`, `utils/fishbone_visual.py`, `utils/fishbone_store.py`)
+
+- **Proposed by:** Nicole Ervin (Project Owner) & Antigravity
+- **Date recorded:** November 12, 2026
+- **Approval status:** Approved by project owner on November 12, 2026 for implementation on branch `NE_Continue_Safety_Functional_Reviews`.
+- **Purpose:** Add interactive digital sticky notes to the Interactive Fishbone canvas so collaborators can leave visual annotations, reminders, and review callouts directly on the Fishbone diagram with editor attribution in the bottom corner, 2-direction resizing (`width` and `height` for square or rectangular notes), selectable note colors, orientation toggle (`square` vs. `45°` `diamond` shape), free drag-and-drop positioning, and deletion.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (`project_id -> projects.id`) with optional association to a Fishbone section (`section_id -> assembly_sections.id`).
+  2. *Critical thread relationship:* Attaches to the **Fishbone** stage of the critical thread (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance*) as collaborative visual canvas annotations that do not alter part placements, Yamazumi balancing, or Op IDs.
+  3. *Scope:* Project-wide (`All scenarios`), matching the Fishbone framework (`assembly_sections` and `assembly_section_connections`).
+  4. *Table & field requirement:* New project-owned table `fishbone_sticky_notes`:
+     - `id TEXT PRIMARY KEY` (UUID)
+     - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+     - `section_id TEXT DEFAULT NULL REFERENCES assembly_sections(id) ON DELETE SET NULL`
+     - `text TEXT NOT NULL DEFAULT ''`
+     - `author_name TEXT NOT NULL DEFAULT ''` (editor's name displayed in the bottom corner of the note)
+     - `color TEXT NOT NULL DEFAULT 'yellow'` (`'yellow'`, `'pink'`, `'blue'`, `'green'`, `'orange'`, `'purple'`)
+     - `orientation TEXT NOT NULL DEFAULT 'square'` (`'square'` normal `0°` rectangle/square vs. `'diamond'` rotated `45°` diamond shape)
+     - `canvas_x REAL NOT NULL DEFAULT 120.0`
+     - `canvas_y REAL NOT NULL DEFAULT 120.0`
+     - `width REAL NOT NULL DEFAULT 160.0`
+     - `height REAL NOT NULL DEFAULT 160.0`
+     - `created_at TEXT NOT NULL`
+     - `updated_at TEXT NOT NULL`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Universal Save Action Standard:** Sticky note additions, edits, moves, resizes, and deletions on the Fishbone canvas stage in the Fishbone canvas draft and commit atomically via **Save & Refresh** (with **Undo last edit**, **Redo last edit**, and **Discard all edits** support, plus saved-state **Undo** snapshot restoration).
+     - **Universal Deletion Standard:** Delete button on the sticky note removes unsaved notes immediately or stages saved notes for deletion, archiving deleted saved notes to the 30-day Recycle Bin (`recycle_bin_items`).
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` under `"Fishbone framework"` with Current editor attribution and exposed in the bottom **History** expander on the Fishbone page.
+     - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS["fishbone"]`).

@@ -19,6 +19,7 @@ from utils.store import (
     delete_assembly_sections,
     fishbone_part_assignments,
     fishbone_plan_snapshot,
+    fishbone_sticky_notes,
     move_assembly_section_connection,
     move_fishbone_part_assignment,
     reorder_fishbone_part_assignments,
@@ -764,6 +765,107 @@ class FishboneCanvasConnectionsTests(unittest.TestCase):
         # Sequence 25 (aid2) comes before Sequence 50 (aid1)
         self.assertEqual(list(df_after["id"]), [aid2, aid1])
         self.assertEqual(list(df_after["sequence"]), [25, 50])
+
+    def test_fishbone_sticky_notes_crud_and_snapshot(self) -> None:
+        sec = add_assembly_section(self.project_id, "Main Line", "Main spine", None, "")
+        df_empty = fishbone_sticky_notes(self.project_id)
+        self.assertTrue(df_empty.empty)
+        self.assertIn("author_name", df_empty.columns)
+        self.assertIn("orientation", df_empty.columns)
+
+        # Create two sticky notes (one square, one rotated diamond with independent 2D width/height)
+        res = save_fishbone_canvas_draft(
+            self.project_id,
+            sticky_notes=[
+                {
+                    "id": "sn-1",
+                    "section_id": sec,
+                    "text": "Verify harness routing clearance",
+                    "author_name": "Alex Rivera",
+                    "color": "yellow",
+                    "orientation": "square",
+                    "canvas_x": 180.0,
+                    "canvas_y": 220.0,
+                    "width": 240.0,
+                    "height": 150.0,
+                },
+                {
+                    "id": "sn-2",
+                    "section_id": None,
+                    "text": "Pending fixture review",
+                    "author_name": "Morgan Chen",
+                    "color": "pink",
+                    "orientation": "diamond",
+                    "canvas_x": 420.0,
+                    "canvas_y": 310.0,
+                    "width": 280.0,
+                    "height": 190.0,
+                },
+            ],
+            editor_name="Alex Rivera",
+        )
+        self.assertEqual(res["sticky_notes_saved"], 2)
+
+        df_notes = fishbone_sticky_notes(self.project_id)
+        self.assertEqual(len(df_notes), 2)
+        sn1 = df_notes.loc[df_notes["id"] == "sn-1"].iloc[0]
+        self.assertEqual(sn1["text"], "Verify harness routing clearance")
+        self.assertEqual(sn1["author_name"], "Alex Rivera")
+        self.assertEqual(sn1["color"], "yellow")
+        self.assertEqual(sn1["orientation"], "square")
+        self.assertEqual(float(sn1["width"]), 240.0)
+        self.assertEqual(float(sn1["height"]), 150.0)
+
+        sn2 = df_notes.loc[df_notes["id"] == "sn-2"].iloc[0]
+        self.assertEqual(sn2["orientation"], "diamond")
+        self.assertEqual(sn2["color"], "pink")
+        self.assertEqual(float(sn2["width"]), 280.0)
+        self.assertEqual(float(sn2["height"]), 190.0)
+
+        # Capture snapshot before modifying/deleting
+        snap = fishbone_plan_snapshot(self.project_id)
+        self.assertEqual(len(snap.get("sticky_notes", [])), 2)
+
+        # Update sn-1 (scale in 2 directions + rotate to diamond + move) and delete sn-2
+        res2 = save_fishbone_canvas_draft(
+            self.project_id,
+            sticky_notes=[
+                {
+                    "id": "sn-1",
+                    "section_id": sec,
+                    "text": "Updated note text",
+                    "author_name": "Sam Taylor",
+                    "color": "blue",
+                    "orientation": "diamond",
+                    "canvas_x": 260.0,
+                    "canvas_y": 300.0,
+                    "width": 320.0,
+                    "height": 120.0,
+                }
+            ],
+            deleted_sticky_note_ids=["sn-2"],
+            editor_name="Sam Taylor",
+        )
+        self.assertEqual(res2["sticky_notes_saved"], 1)
+        self.assertEqual(res2["sticky_notes_deleted"], 1)
+
+        df_after = fishbone_sticky_notes(self.project_id)
+        self.assertEqual(list(df_after["id"]), ["sn-1"])
+        sn1_upd = df_after.iloc[0]
+        self.assertEqual(sn1_upd["color"], "blue")
+        self.assertEqual(sn1_upd["orientation"], "diamond")
+        self.assertEqual(sn1_upd["author_name"], "Sam Taylor")
+        self.assertEqual(float(sn1_upd["width"]), 320.0)
+        self.assertEqual(float(sn1_upd["height"]), 120.0)
+
+        # Restore snapshot and verify both sticky notes are restored
+        restore_fishbone_plan_snapshot(self.project_id, snap)
+        df_restored = fishbone_sticky_notes(self.project_id)
+        self.assertEqual(set(df_restored["id"]), {"sn-1", "sn-2"})
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 

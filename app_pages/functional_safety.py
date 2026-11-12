@@ -11,6 +11,7 @@ from utils.ppe_poster import (
     get_jsa_icon_data_uri,
     get_ppe_icon_data_uri,
     jsa_poster_save_bridge,
+    render_safety_poster_print_dialog_body,
 )
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
@@ -464,10 +465,12 @@ elif review_tab.open:
                 "work_element_label": None,
                 "created_at": None,
                 "updated_at": None,
+                "is_barney_zone": None,
+                "barney_zone_ppe": None,
                 "sync_status": st.column_config.TextColumn(
                     "Sync status",
                     width="small",
-                    help="Shows whether the PAAG step has PPE assigned ('Synced'), needs PPE ('ΓÜá∩╕Å Needs PPE'), or changed upstream since last review ('ΓÜá∩╕Å Upstream change').",
+                    help="Shows whether the PAAG step has standard PPE assigned ('Synced'), requires special Barney Zone PPE ('🟣 Barney Zone'), needs PPE ('⚠️ Needs PPE'), or changed upstream ('⚠️ Upstream change').",
                 ),
                 "view_poster": st.column_config.ButtonColumn(
                     "Poster",
@@ -756,10 +759,11 @@ elif review_tab.open:
                 eff_cnt = len(info.get("effective_ppe") or [])
                 unassigned_cnt = int(info.get("unassigned_element_count") or 0)
                 tot_cnt = int(info.get("assigned_element_count") or 0) + unassigned_cnt
+                bz_tag = " · 🟣 Barney Zone" if info.get("is_barney_zone") else ""
                 status_tag = (
-                    f" · ⚠️ {unassigned_cnt}/{tot_cnt} step(s) missing PPE"
+                    f"{bz_tag} · ⚠️ {unassigned_cnt}/{tot_cnt} step(s) missing PPE"
                     if unassigned_cnt > 0
-                    else f" · {tot_cnt} step(s) · {eff_cnt} PPE icon(s)"
+                    else f"{bz_tag} · {tot_cnt} step(s) · {eff_cnt} PPE icon(s)"
                 )
                 base_lbl = f"{p_num} — {p_name}" if p_name else p_num
                 if sec:
@@ -831,6 +835,19 @@ elif review_tab.open:
             with nav_c3:
                 if not effective_items:
                     st.warning("No PPE assigned yet", icon=":material/warning:")
+                elif active_poster.get("is_barney_zone"):
+                    bz_list = active_poster.get("barney_zone_names") or []
+                    bz_str = ", ".join(str(x) for x in bz_list if str(x).strip())
+                    st.markdown(
+                        f'<div style="background:#f3e8ff;border:1.5px solid #a855f7;color:#6b21a8;'
+                        f'border-radius:8px;padding:8px 12px;font-size:0.84rem;font-weight:700;line-height:1.25;">'
+                        f'🟣 Barney Zone Pitch'
+                        + (f'<div style="font-weight:600;font-size:0.76rem;color:#581c87;margin-top:2px;">{bz_str}</div>' if bz_str else '')
+                        + '</div>',
+                        unsafe_allow_html=True,
+                    )
+                elif False:
+                    st.warning("No PPE assigned yet", icon=":material/warning:")
                 else:
                     st.info(f"{len(effective_items)} PPE item(s) on pitch", icon=":material/shield:")
 
@@ -875,6 +892,49 @@ elif review_tab.open:
                 except ValueError as exc:
                     st.error(str(exc))
 
+            jsa_print_request = (
+                getattr(jsa_bridge, "print_request", None)
+                if jsa_bridge is not None
+                else None
+            )
+            print_dlg_state_key = f"safety_poster_print_dlg_active_{scenario_id}"
+            print_dlg_type_key = f"safety_poster_print_poster_type_{scenario_id}"
+
+            if isinstance(jsa_print_request, dict) and jsa_print_request:
+                req_poster_type = _text(jsa_print_request.get("posterType")).lower()
+                if req_poster_type == "ppe":
+                    st.session_state[print_dlg_type_key] = "🛡️ 11×17 Minimum PPE Poster"
+                elif req_poster_type == "both":
+                    st.session_state[print_dlg_type_key] = "📑 Both Posters (JSA + 11×17 PPE)"
+                else:
+                    st.session_state[print_dlg_type_key] = "📋 JSA Poster (FRM-GEA-SAF-085)"
+                st.session_state[print_dlg_state_key] = True
+
+            def _close_safety_poster_print_dlg() -> None:
+                st.session_state[print_dlg_state_key] = False
+
+            @st.dialog(
+                "Export & Print JSA & PPE Posters",
+                width="large",
+                on_dismiss=_close_safety_poster_print_dlg,
+            )
+            def _open_safety_poster_print_dialog(default_mode: str = "jsa") -> None:
+                render_safety_poster_print_dialog_body(
+                    project_id=project_id,
+                    scenario_id=scenario_id,
+                    selected_pitch_id=selected_pid,
+                    poster_summaries=poster_summaries,
+                    jsa_summaries=jsa_summaries,
+                    default_poster_type=default_mode,
+                    active_section_filter=(
+                        selected_section_filter
+                        if selected_section_filter != ALL_SECTIONS_OPT
+                        else ""
+                    ),
+                    key_prefix="safety_poster_print",
+                    on_close_callback=_close_safety_poster_print_dlg,
+                )
+
             jsa_html_doc = build_jsa_poster_html(
                 pitch_id=selected_pid,
                 section_name=_text(active_jsa.get("section_name")) or _text(active_poster.get("section_name")),
@@ -905,7 +965,26 @@ elif review_tab.open:
             if st.session_state.get(poster_view_mode_key) not in POSTER_VIEW_OPTIONS:
                 st.session_state[poster_view_mode_key] = JSA_VIEW_LABEL
 
-            view_bar_c1, view_bar_c2, view_bar_c3 = st.columns([2.6, 1.2, 1.2], vertical_alignment="center")
+            view_bar_c1, view_bar_c_print, view_bar_c2, view_bar_c3 = st.columns(
+                [2.3, 1.15, 1.0, 1.0], vertical_alignment="center"
+            )
+            with view_bar_c_print:
+                if st.button(
+                    "Print / Export Posters",
+                    icon=":material/print:",
+                    type="primary",
+                    width="stretch",
+                    key=f"btn_open_safety_print_dlg_{scenario_id}_{selected_pid}",
+                    help="Open Print & Export Settings to print 1 pitch, a Fishbone section, or all pitches as physical copies, PDF, or HTML",
+                ):
+                    curr_vm = st.session_state.get(poster_view_mode_key)
+                    if curr_vm == PPE_VIEW_LABEL:
+                        st.session_state[print_dlg_type_key] = "🛡️ 11×17 Minimum PPE Poster"
+                    elif curr_vm == JSA_VIEW_LABEL:
+                        st.session_state[print_dlg_type_key] = "📋 JSA Poster (FRM-GEA-SAF-085)"
+                    else:
+                        st.session_state[print_dlg_type_key] = "📑 Both Posters (JSA + 11×17 PPE)"
+                    st.session_state[print_dlg_state_key] = True
             with view_bar_c1:
                 active_view_mode = st.segmented_control(
                     "Poster View Mode",
@@ -935,6 +1014,14 @@ elif review_tab.open:
                 )
 
             with st.container(border=True):
+                if st.session_state.get(print_dlg_state_key):
+                    default_mode_for_dlg = (
+                        "ppe"
+                        if active_view_mode == PPE_VIEW_LABEL
+                        else ("both" if active_view_mode not in {JSA_VIEW_LABEL, PPE_VIEW_LABEL} else "jsa")
+                    )
+                    _open_safety_poster_print_dialog(default_mode=default_mode_for_dlg)
+
                 if active_view_mode == JSA_VIEW_LABEL:
                     components.html(jsa_html_doc, height=1190, scrolling=False)
                 elif active_view_mode == PPE_VIEW_LABEL:

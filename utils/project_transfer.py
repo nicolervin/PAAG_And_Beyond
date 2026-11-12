@@ -41,7 +41,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("pits_record_revisions", "pits_records", "record_id"),
     TransferTable("project_models"), TransferTable("complexity_features"),
     TransferTable("model_feature_values"), TransferTable("part_feature_rules"),
-    TransferTable("assembly_sections"), TransferTable("assembly_section_connections"),
+    TransferTable("assembly_sections"), TransferTable("assembly_section_connections"), TransferTable("fishbone_sticky_notes"),
     TransferTable("fishbone_part_assignments"),
     TransferTable("pits_bom_occurrences"),
     TransferTable(

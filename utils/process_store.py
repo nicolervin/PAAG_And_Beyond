@@ -6,7 +6,12 @@ import sys as _sys
 from utils import db_core as _db_core
 from utils.cache_store import cached_store_read
 from utils.recycle_bin_store import capture_deletion_to_recycle_bin, safe_unlink_upload_path
-from utils.safety_store import parse_ppe, resolve_pitch_ppe_rollup
+from utils.safety_store import (
+    extract_barney_zone_ppe,
+    is_barney_zone_ppe_item,
+    parse_ppe,
+    resolve_pitch_ppe_rollup,
+)
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 MATERIAL_SELECTION_RULES = {"Model choice", "Choose one", "Use all", "Optional"}
@@ -1765,7 +1770,7 @@ def work_element_criticality(
             if work_element_id in result:
                 result[work_element_id].append("CTQ")
         for row in conn.execute(
-            """SELECT DISTINCT requirement.work_element_id
+            """SELECT requirement.work_element_id, COALESCE(requirement.ppe, '') AS ppe
                FROM safety_requirements requirement
                JOIN work_elements work
                  ON work.id=requirement.work_element_id
@@ -1777,7 +1782,14 @@ def work_element_criticality(
         ).fetchall():
             work_element_id = str(row["work_element_id"])
             if work_element_id in result:
-                result[work_element_id].append("Safety")
+                ppe_items = parse_ppe(row["ppe"])
+                barney_items = extract_barney_zone_ppe(ppe_items)
+                if barney_items:
+                    if "Barney Zone" not in result[work_element_id]:
+                        result[work_element_id].append("Barney Zone")
+                elif not ppe_items:
+                    if "Safety" not in result[work_element_id]:
+                        result[work_element_id].append("Safety")
     return result
 
 def delete_process_part_groups(
@@ -4563,6 +4575,7 @@ def process_pitch_visual_summary(
                     "notes": ov_note,
                     "image_path": str(eff_item.get("image_path") or ""),
                     "is_ppe": True,
+                    "is_barney_zone_ppe": bool(eff_item.get("is_barney_zone_ppe") or is_barney_zone_ppe_item(item_name)),
                     "summary_line": f"PPE: {item_name}",
                 })
                 existing_names.add(item_name.casefold())
@@ -4656,8 +4669,15 @@ def process_pitch_visual_summary(
                 if ppe_items:
                     work_ids_with_ppe.add(str(sr["work_element_id"]))
                 alerts["safety"].append({
-                    "label": f"Safety: {sr['requirement_description']}",
-                    "detail": f"Safety requirement for step '{sr['operation']}': {sr['requirement_description']}",
+                    "kind": "barney_zone" if extract_barney_zone_ppe(ppe_items) else "standard_ppe",
+                    "barney_zone": bool(extract_barney_zone_ppe(ppe_items)),
+                    "ppe_items": extract_barney_zone_ppe(ppe_items),
+                    "label": f"Barney Zone ({', '.join(extract_barney_zone_ppe(ppe_items))}): {sr['operation']}",
+                    "detail": f"Step '{sr['operation']}' requires Barney Zone PPE: {', '.join(extract_barney_zone_ppe(ppe_items))}.",
+                })
+                alerts["safety"] = [a for a in alerts["safety"] if a.get("barney_zone") or a.get("kind") != "standard_ppe"]
+                if False:
+                    alerts["safety"].append({
                 })
 
             # Check if any equipment linked to work elements has functional_area='Safety'
@@ -4683,6 +4703,8 @@ def process_pitch_visual_summary(
                     label = f"No PPE Assigned: Step {s_num} ({s_desc})" if s_desc else f"No PPE Assigned: Step {s_num}"
                     alerts["safety"].append({
                         "label": label,
+                        "kind": "missing_ppe",
+                        "barney_zone": False,
                         "detail": f"Step {s_num} ('{s_desc}') on this pitch has no PPE assigned in Safety Functional Review.",
                     })
 
@@ -4841,6 +4863,9 @@ def process_pitch_visual_summary(
         "yamazumi_elements": [dict(yel) for yel in yamazumi_pitch_elements],
         "tools": tools_list,
         "ppe_rollup": pitch_ppe_rollup,
+        "is_barney_zone": bool(pitch_ppe_rollup.get("is_barney_zone")),
+        "barney_zone_names": list(pitch_ppe_rollup.get("barney_zone_names", [])),
+        "has_standard_ppe": bool(work_ids and not pitch_ppe_rollup.get("is_barney_zone") and bool(pitch_ppe_rollup.get("effective_names"))),
         "parts": final_parts,
         "yamazumi_stacks": variant_stacks,
         "visual_media": sorted_visual_media,
@@ -5742,7 +5767,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
                          AND safety.active=1""",
                     (project_id, scenario_id),
                 ).fetchall()
-                safety_req_count = len(s_rows)
+                safety_req_count = sum(1 for sr in s_rows if extract_barney_zone_ppe(sr["ppe"] if "ppe" in sr.keys() else ""))
                 for sr in s_rows:
                     raw_ppe = sr["ppe"] if "ppe" in sr.keys() else ""
                     if parse_ppe(raw_ppe):
@@ -5799,7 +5824,7 @@ def process_readiness_metrics(project_id: str, scenario_id: str) -> dict:
         }
 
 
-_PROCESS_STORE_REV_20261102 = 23
+_PROCESS_STORE_REV_20261102 = 24
 __domain_exports__ = ['part_has_model_variants', 'sync_model_variant_placement_selections', 'catalog_part_photos_for_pitch', 'copy_part_photo_to_pitch_visual_media', 'copy_pitch_visual_media', '_YAMAZUMI_PITCH_ADDRESS_PATTERN', '_normalize_handling_type', '_normalize_fishbone_assignment_id', '_process_part_assignment_consume_count', '_validate_process_part_option_handling', 'process_part_placement_options', 'validate_process_part_option_pairings', 'yamazumi_elements_for_section', 'yamazumi_context_for_process', 'process_element_id_for_yamazumi', 'process_part_groups', 'save_process_part_group', 'set_part_weight_lb', 'set_process_part_option_handling_type', 'get_pitch_unclassified_part_options', 'get_scenario_part_handling_options', 'acknowledge_materials_upstream_changes', 'work_element_criticality', 'delete_process_part_groups', 'delete_process_part_group', 'unlink_part_from_process_group', 'pin_map_for_scenario', 'reconcile_yamazumi_to_process', '_op_id_depth_letter', 'parse_yamazumi_pitch_address', 'work_element_op_contexts', 'work_element_op_ids', 'work_element_op_id', 'work_element_validation_contexts', 'process_pitch_visual_summary', 'process_readiness_metrics', 'scenario_pitch_visual_coverage', 'update_work_element_tool_and_resource', 'replace_work_elements', 'get_pitch_visual_media', 'save_pitch_visual_media', 'save_pitch_visual_media_url', 'update_pitch_visual_media', 'update_pitch_visual_annotations', 'delete_pitch_visual_media', 'MAX_VISUAL_IMAGE_BYTES', 'MAX_VISUAL_VIDEO_BYTES', 'MAX_CAD_FILE_SIZE_BYTES', 'MAX_CAD_FILE_SIZE_MB', 'work_element_downstream_impact']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):

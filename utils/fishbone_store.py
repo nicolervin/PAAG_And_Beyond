@@ -8,7 +8,31 @@ from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
-_FISHBONE_STORE_HOT_RELOAD_REV = 5
+_FISHBONE_STORE_HOT_RELOAD_REV = 6
+
+@cached_store_read
+def fishbone_sticky_notes(project_id: str) -> pd.DataFrame:
+    rows = query(
+        "SELECT * FROM fishbone_sticky_notes WHERE project_id = ? ORDER BY created_at, id",
+        (project_id,),
+    )
+    if not rows:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
+            "text": pd.Series(dtype="string"),
+            "author_name": pd.Series(dtype="string"),
+            "color": pd.Series(dtype="string"),
+            "orientation": pd.Series(dtype="string"),
+            "canvas_x": pd.Series(dtype="float64"),
+            "canvas_y": pd.Series(dtype="float64"),
+            "width": pd.Series(dtype="float64"),
+            "height": pd.Series(dtype="float64"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+        })
+    return pd.DataFrame(rows)
 
 @cached_store_read
 def assembly_sections(project_id: str) -> pd.DataFrame:
@@ -2091,6 +2115,10 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
                 "SELECT * FROM assembly_section_connections WHERE project_id=?",
                 (project_id,),
             ).fetchall()],
+            "sticky_notes": [dict(row) for row in conn.execute(
+                "SELECT * FROM fishbone_sticky_notes WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
         }
 
 @cached_store_read
@@ -2173,6 +2201,7 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
             )
         conn.execute("DELETE FROM assembly_section_connections WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM fishbone_sticky_notes WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
         section_rows = [{**row, "parent_id": None} for row in sections]
@@ -2187,6 +2216,18 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
         restored_assignment_ids = {str(r.get("id")) for r in assignments if r.get("id")}
         restored_section_ids = {str(r.get("id")) for r in sections if r.get("id")}
+        sticky_note_rows = [
+            {
+                **row,
+                "section_id": (
+                    row.get("section_id")
+                    if str(row.get("section_id") or "") in restored_section_ids
+                    else None
+                ),
+            }
+            for row in snapshot.get("sticky_notes", [])
+        ]
+        _insert_snapshot_rows(conn, "fishbone_sticky_notes", sticky_note_rows)
         for row in saved_option_assignments:
             aid = str(row.get("fishbone_assignment_id") or "")
             if aid in restored_assignment_ids:
@@ -2642,9 +2683,11 @@ def save_fishbone_canvas_draft(
     updated_assignments: list[dict] | None = None,
     deleted_assignment_ids: list[str] | None = None,
     variant_links: list[list[str]] | None = None,
+    sticky_notes: list[dict] | None = None,
+    deleted_sticky_note_ids: list[str] | None = None,
     editor_name: str = "",
 ) -> dict[str, int]:
-    """Atomically commit canvas positions, connections, and part assignments from a visual edit draft."""
+    """Atomically commit canvas positions, connections, part assignments, and sticky notes from a visual edit draft."""
     timestamp = now_iso()
     positions_saved = 0
     conns_saved = 0
@@ -2653,6 +2696,8 @@ def save_fishbone_canvas_draft(
     assignments_updated = 0
     assignments_deleted = 0
     variant_links_saved = 0
+    sticky_notes_saved = 0
+    sticky_notes_deleted = 0
     with connection() as conn:
         if positions:
             for section_id, coords in positions.items():
@@ -2794,6 +2839,116 @@ def save_fishbone_canvas_draft(
                         _conn=conn,
                     )
                     variant_links_saved += 1
+        if deleted_sticky_note_ids:
+            clean_deleted_note_ids = [
+                str(nid).strip()
+                for nid in dict.fromkeys(deleted_sticky_note_ids)
+                if str(nid or "").strip()
+            ]
+            if clean_deleted_note_ids:
+                note_placeholders = ", ".join("?" for _ in clean_deleted_note_ids)
+                existing_deleted_note_rows = conn.execute(
+                    f"SELECT id, text, author_name FROM fishbone_sticky_notes WHERE project_id = ? AND id IN ({note_placeholders})",
+                    (project_id, *clean_deleted_note_ids),
+                ).fetchall()
+                existing_deleted_note_ids = [str(r["id"]) for r in existing_deleted_note_rows]
+                if existing_deleted_note_ids:
+                    first_row = existing_deleted_note_rows[0]
+                    snippet = str(first_row["text"] or "").strip().splitlines()[0][:40] if str(first_row["text"] or "").strip() else "Sticky note"
+                    label = (
+                        f"{snippet} (by {first_row['author_name']})"
+                        if len(existing_deleted_note_ids) == 1 and str(first_row["author_name"] or "").strip()
+                        else (snippet if len(existing_deleted_note_ids) == 1 else f"{len(existing_deleted_note_ids)} Fishbone sticky notes")
+                    )
+                    with capture_deletion_to_recycle_bin(
+                        conn,
+                        project_id=project_id,
+                        entity_type="Fishbone Sticky Note",
+                        entity_table="fishbone_sticky_notes",
+                        entity_id=existing_deleted_note_ids[0],
+                        entity_label=label,
+                        deleted_by=str(editor_name or "").strip(),
+                    ):
+                        del_placeholders = ", ".join("?" for _ in existing_deleted_note_ids)
+                        sticky_notes_deleted = conn.execute(
+                            f"DELETE FROM fishbone_sticky_notes WHERE project_id = ? AND id IN ({del_placeholders})",
+                            (project_id, *existing_deleted_note_ids),
+                        ).rowcount
+        if sticky_notes:
+            valid_section_ids = {
+                str(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM assembly_sections WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
+            }
+            for sn in sticky_notes:
+                if not isinstance(sn, dict):
+                    continue
+                sn_id = str(sn.get("id") or uuid4()).strip()
+                if not sn_id:
+                    sn_id = str(uuid4())
+                sec_raw = str(sn.get("section_id") or "").strip()
+                sec_id = sec_raw if sec_raw in valid_section_ids else None
+                note_text = str(sn.get("text") or "")
+                author_val = str(sn.get("author_name") or editor_name or "").strip()
+                color_val = str(sn.get("color") or "yellow").strip().lower()
+                if color_val not in {"yellow", "pink", "blue", "green", "orange", "purple"}:
+                    color_val = "yellow"
+                orient_val = str(sn.get("orientation") or "square").strip().lower()
+                if orient_val not in {"square", "diamond"}:
+                    orient_val = "square"
+                try:
+                    cx = float(sn.get("canvas_x") if sn.get("canvas_x") is not None else 120.0)
+                except (TypeError, ValueError):
+                    cx = 120.0
+                try:
+                    cy = float(sn.get("canvas_y") if sn.get("canvas_y") is not None else 120.0)
+                except (TypeError, ValueError):
+                    cy = 120.0
+                try:
+                    w_val = max(110.0, min(900.0, float(sn.get("width") if sn.get("width") is not None else 200.0)))
+                except (TypeError, ValueError):
+                    w_val = 200.0
+                try:
+                    h_val = max(90.0, min(900.0, float(sn.get("height") if sn.get("height") is not None else 160.0)))
+                except (TypeError, ValueError):
+                    h_val = 160.0
+                created_val = str(sn.get("created_at") or "").strip() or timestamp
+                conn.execute(
+                    """INSERT INTO fishbone_sticky_notes (
+                           id, project_id, section_id, text, author_name, color, orientation,
+                           canvas_x, canvas_y, width, height, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           section_id = excluded.section_id,
+                           text = excluded.text,
+                           author_name = excluded.author_name,
+                           color = excluded.color,
+                           orientation = excluded.orientation,
+                           canvas_x = excluded.canvas_x,
+                           canvas_y = excluded.canvas_y,
+                           width = excluded.width,
+                           height = excluded.height,
+                           updated_at = excluded.updated_at
+                       WHERE fishbone_sticky_notes.project_id = excluded.project_id""",
+                    (
+                        sn_id,
+                        project_id,
+                        sec_id,
+                        note_text,
+                        author_val,
+                        color_val,
+                        orient_val,
+                        cx,
+                        cy,
+                        w_val,
+                        h_val,
+                        created_val,
+                        timestamp,
+                    ),
+                )
+                sticky_notes_saved += 1
         total_changes = (
             positions_saved
             + conns_saved
@@ -2802,6 +2957,8 @@ def save_fishbone_canvas_draft(
             + assignments_updated
             + assignments_deleted
             + variant_links_saved
+            + sticky_notes_saved
+            + sticky_notes_deleted
         )
         record_audit_event(
             project_id,
@@ -2817,6 +2974,8 @@ def save_fishbone_canvas_draft(
                 "assignments_updated": assignments_updated,
                 "assignments_deleted": assignments_deleted,
                 "variant_links_saved": variant_links_saved,
+                "sticky_notes_saved": sticky_notes_saved,
+                "sticky_notes_deleted": sticky_notes_deleted,
             },
             _conn=conn,
         )
@@ -2828,6 +2987,8 @@ def save_fishbone_canvas_draft(
         "assignments_updated": assignments_updated,
         "assignments_deleted": assignments_deleted,
         "variant_links_saved": variant_links_saved,
+        "sticky_notes_saved": sticky_notes_saved,
+        "sticky_notes_deleted": sticky_notes_deleted,
     }
 
 
@@ -3072,7 +3233,7 @@ def clear_interactive_fishbone(
         "process_groups_deleted": process_groups_deleted,
     }
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'update_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'set_fishbone_assignments_stack_group', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
+__domain_exports__ = ['assembly_sections', 'fishbone_sticky_notes', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'update_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'set_fishbone_assignments_stack_group', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

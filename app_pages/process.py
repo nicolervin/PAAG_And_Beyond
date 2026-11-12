@@ -15,7 +15,7 @@ if "utils.table_ui" in _sys.modules and getattr(_sys.modules["utils.table_ui"], 
     if "utils.table_filters" in _sys.modules:
         _importlib.reload(_sys.modules["utils.table_filters"])
     _importlib.reload(_sys.modules["utils.table_ui"])
-if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 23:
+if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process_store"], "_PROCESS_STORE_REV_20261102", 0) < 24:
     if "utils.image_annotator" in _sys.modules:
         _importlib.reload(_sys.modules["utils.image_annotator"])
     if "utils.db_core" in _sys.modules:
@@ -31,7 +31,7 @@ if "utils.process_store" in _sys.modules and getattr(_sys.modules["utils.process
         _sys.modules["utils.store"]._refresh_domain_modules()
     if "utils.cache_store" in _sys.modules and hasattr(_sys.modules["utils.cache_store"], "get_data_cache"):
         _sys.modules["utils.cache_store"].get_data_cache().clear()
-if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 14:
+if "utils.process_pitch_visual" in _sys.modules and getattr(_sys.modules["utils.process_pitch_visual"], "_PROCESS_PITCH_VISUAL_REV_20261102", 0) < 16:
     _importlib.reload(_sys.modules["utils.process_pitch_visual"])
 if "utils.image_annotator" in _sys.modules and getattr(_sys.modules["utils.image_annotator"], "_IMAGE_ANNOTATOR_REV_20261103", 0) < 6:
     _importlib.reload(_sys.modules["utils.image_annotator"])
@@ -44,7 +44,14 @@ if "utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazu
 
 from utils.fishbone_ui import section_breadcrumb_labels
 from utils.media_cache import cached_image_bytes, cached_image_data_url
-from utils.ppe_poster import build_jsa_poster_html, build_ppe_poster_html, jsa_poster_save_bridge
+if "utils.ppe_poster" in _sys.modules and getattr(_sys.modules["utils.ppe_poster"], "_PPE_POSTER_HOT_RELOAD_REV", 0) < 9:
+    _importlib.reload(_sys.modules["utils.ppe_poster"])
+from utils.ppe_poster import (
+    build_jsa_poster_html,
+    build_ppe_poster_html,
+    jsa_poster_save_bridge,
+    render_safety_poster_print_dialog_body,
+)
 from utils.store import (
     save_pitch_jsa_poster_full,
     ROOT,
@@ -1494,7 +1501,17 @@ def alerts_detail_dialog(
                     for it in non_unclass_items:
                         lbl = it.get("label") or "Alert"
                         det = it.get("detail") or ""
-                        st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+                        if it.get("barney_zone") or str(lbl).strip().lower().startswith("barney zone"):
+                            st.markdown(
+                                f'<div style="background:#f3e8ff;border:1.5px solid #a855f7;color:#6b21a8;'
+                                f'border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:0.9rem;">'
+                                f'🟣 <strong>{lbl}</strong>'
+                                + (f': {det}' if det and det != lbl else '')
+                                + '</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
 
                 if not unclassified_options and not non_unclass_items:
                     st.success("✓ All materials on this pitch are classified and nominal.")
@@ -1504,7 +1521,17 @@ def alerts_detail_dialog(
                     for it in items:
                         lbl = it.get("label") or "Alert"
                         det = it.get("detail") or ""
-                        st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
+                        if it.get("barney_zone") or str(lbl).strip().lower().startswith("barney zone"):
+                            st.markdown(
+                                f'<div style="background:#f3e8ff;border:1.5px solid #a855f7;color:#6b21a8;'
+                                f'border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:0.9rem;">'
+                                f'🟣 <strong>{lbl}</strong>'
+                                + (f': {det}' if det and det != lbl else '')
+                                + '</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.warning(f"**{lbl}**: {det}" if det else f"**{lbl}**")
                 else:
                     st.success("✓ No active alerts.")
 
@@ -1904,6 +1931,60 @@ def ppe_poster_slide_dialog(
         if ov_text:
             st.info(f"**Hierarchy Override Applied:** {ov_text}", icon=":material/auto_awesome:")
 
+    dlg_print_mode_key = f"paag_jsa_ppe_print_mode_{scenario_id}_{pitch_id}"
+    dlg_print_type_key = f"paag_safety_poster_print_poster_type_{scenario_id}"
+
+    dlg_jsa_bridge = jsa_poster_save_bridge(
+        key=f"dlg_jsa_poster_save_bridge_{scenario_id}_{pitch_id}"
+    )
+    dlg_print_req = (
+        getattr(dlg_jsa_bridge, "print_request", None)
+        if dlg_jsa_bridge is not None
+        else None
+    )
+    if isinstance(dlg_print_req, dict) and dlg_print_req:
+        req_pt = str(dlg_print_req.get("posterType") or "jsa").lower()
+        if req_pt == "ppe":
+            st.session_state[dlg_print_type_key] = "🛡️ 11×17 Minimum PPE Poster"
+        elif req_pt == "both":
+            st.session_state[dlg_print_type_key] = "📑 Both Posters (JSA + 11×17 PPE)"
+        else:
+            st.session_state[dlg_print_type_key] = "📋 JSA Poster (FRM-GEA-SAF-085)"
+        st.session_state[dlg_print_mode_key] = True
+
+    if st.session_state.get(dlg_print_mode_key):
+        def _exit_dlg_print_mode() -> None:
+            st.session_state[dlg_print_mode_key] = False
+
+        render_safety_poster_print_dialog_body(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            selected_pitch_id=pitch_id,
+            default_poster_type="jsa",
+            active_section_filter=section_name,
+            key_prefix="paag_safety_poster_print",
+            on_close_callback=_exit_dlg_print_mode,
+            close_button_label="← Back to Poster Editor",
+        )
+        return
+
+    dlg_top_c1, dlg_top_c2 = st.columns([3.6, 1.4], vertical_alignment="center")
+    with dlg_top_c1:
+        st.caption(
+            "Edit the pitch Job Safety Analysis (`FRM-GEA-SAF-085`) or 11\"×17\" Minimum PPE Poster below, "
+            "or open **Print / Export Settings** to print 1 pitch, a Fishbone section, or all pitches in the project."
+        )
+    with dlg_top_c2:
+        if st.button(
+            "Print / Export Settings",
+            icon=":material/print:",
+            type="primary",
+            width="stretch",
+            key=f"btn_dlg_open_safety_print_settings_{scenario_id}_{pitch_id}",
+        ):
+            st.session_state[dlg_print_mode_key] = True
+            st.rerun()
+
     dlg_jsa_tab, dlg_ppe_tab = st.tabs(
         ["📋 JSA Poster (FRM-GEA-SAF-085)", "🛡️ 11×17 PPE Poster"]
     )
@@ -1914,8 +1995,9 @@ def ppe_poster_slide_dialog(
                 "Portrait Job Safety Analysis (FRM-GEA-SAF-085) pre-populated with pitch title, "
                 "PAAG steps, potential hazards/actions, and rolled-up PPE icons."
             )
-        dlg_jsa_bridge = jsa_poster_save_bridge(
-            key=f"dlg_jsa_poster_save_bridge_{scenario_id}_{pitch_id}"
+        dlg_jsa_bridge = (dlg_jsa_bridge
+        # key=f"dlg_jsa_poster_save_bridge_{scenario_id}_{pitch_id}"
+        # )
         )
         dlg_jsa_payload = (
             getattr(dlg_jsa_bridge, "save_payload", None)
@@ -5611,8 +5693,8 @@ if tab_plan.open:
                 ),
                 "criticality": st.column_config.MultiselectColumn(
                     "Criticality",
-                    options=["CTQ", "Safety"],
-                    color=["orange", "red"],
+                    options=["CTQ", "Barney Zone", "Safety"],
+                    color=["orange", "violet", "red"],
                     disabled=True,
                     width="medium",
                     help=(

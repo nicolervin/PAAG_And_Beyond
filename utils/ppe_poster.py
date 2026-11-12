@@ -11,7 +11,10 @@ from typing import Any
 
 import streamlit as st
 
-_PPE_POSTER_HOT_RELOAD_REV = 7
+import hashlib
+import streamlit.components.v1 as components
+
+_PPE_POSTER_HOT_RELOAD_REV = 9
 
 from utils.safety_store import (
     normalize_ppe_name,
@@ -1164,6 +1167,27 @@ def build_ppe_poster_html(
     font-weight: 600;
   }}
 
+  .poster-viewport.zoomed-scroll {{
+    scrollbar-width: auto;
+    scrollbar-color: #64748b #e2e8f0;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar {{
+    width: 12px;
+    height: 12px;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-track {{
+    background: #e2e8f0;
+    border-radius: 6px;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-thumb {{
+    background: #64748b;
+    border-radius: 6px;
+    border: 2px solid #e2e8f0;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-thumb:hover {{
+    background: #475569;
+  }}
+
   .poster-viewport {{
     flex: 0 0 auto;
     min-height: 0;
@@ -1443,7 +1467,28 @@ def build_ppe_poster_html(
     .no-print {{
       display: none !important;
     }}
-    .poster-viewport {{
+    .poster-viewport.zoomed-scroll {{
+    scrollbar-width: auto;
+    scrollbar-color: #64748b #e2e8f0;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar {{
+    width: 12px;
+    height: 12px;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-track {{
+    background: #e2e8f0;
+    border-radius: 6px;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-thumb {{
+    background: #64748b;
+    border-radius: 6px;
+    border: 2px solid #e2e8f0;
+  }}
+  .poster-viewport.zoomed-scroll::-webkit-scrollbar-thumb:hover {{
+    background: #475569;
+  }}
+
+  .poster-viewport {{
       padding: 0;
       overflow: visible !important;
       height: auto !important;
@@ -2055,7 +2100,11 @@ function applyPpeZoom() {{
     const naturalW = posterPage.offsetWidth || 1584;
     const naturalH = posterPage.offsetHeight || 1008;
 
-    const availW = Math.max(300, (viewport.clientWidth || document.documentElement.clientWidth || window.innerWidth) - 20);
+    const containerW = document.documentElement.clientWidth || window.innerWidth || viewport.clientWidth || 900;
+    const availW = Math.max(260, containerW - 24);
+    const _fitScaleInit = Math.max(0.22, Math.min(1.0, availW / naturalW));
+    const fitW = Math.ceil(naturalW * _fitScaleInit);
+    const fitH = Math.ceil(naturalH * _fitScaleInit);
     const fitScale = Math.max(0.22, Math.min(1.0, availW / naturalW));
 
     if (ppeZoomMode === "fit") {{
@@ -2071,11 +2120,25 @@ function applyPpeZoom() {{
     stage.style.width = scaledW + "px";
     stage.style.height = scaledH + "px";
 
-    const isZoomedOver100 = ppeZoomScale > 1.001;
+    const isZoomedIn = ppeZoomScale > (fitScale + 0.005);
+    const targetPosterH = isZoomedIn ? fitH : scaledH;
+    const targetViewportW = isZoomedIn ? Math.min(availW, fitW + 18) : availW;
+    stage.style.margin = isZoomedIn ? "0" : "0 auto";
+    viewport.classList.toggle("zoomed-scroll", isZoomedIn);
+    viewport.style.overflowX = isZoomedIn ? "scroll" : "hidden";
+    viewport.style.overflowY = isZoomedIn ? "scroll" : "hidden";
+    viewport.style.width = isZoomedIn ? targetViewportW + "px" : "100%";
+    viewport.style.maxWidth = isZoomedIn ? targetViewportW + "px" : "none";
+    viewport.style.margin = isZoomedIn ? "0 auto" : "0";
+    viewport.style.height = (targetPosterH + (isZoomedIn ? 20 : 16)) + "px";
+    viewport.style.maxHeight = isZoomedIn ? (targetPosterH + 20) + "px" : "none";
+    if (false) {{
+      const isZoomedOver100 = ppeZoomScale > 1.001;
     const targetPosterH = isZoomedOver100 ? naturalH : scaledH;
     viewport.style.overflow = isZoomedOver100 ? "auto" : "hidden";
     viewport.style.height = (targetPosterH + 16) + "px";
     viewport.style.maxHeight = isZoomedOver100 ? (naturalH + 16) + "px" : "none";
+    }}
 
     const viewportTop = viewport.offsetTop || 64;
     const desiredIframeH = Math.ceil(viewportTop + targetPosterH + 24);
@@ -2100,7 +2163,10 @@ function applyPpeZoom() {{
 
 function stepPpeZoom(delta) {{
   ppeZoomMode = "manual";
-  ppeZoomScale = Math.max(0.25, Math.min(2.0, Math.round((ppeZoomScale + delta) * 20) / 20));
+  let nextScale = Math.round((ppeZoomScale + delta) * 20) / 20;
+  if (delta > 0 && nextScale <= ppeZoomScale + 0.005) nextScale = ppeZoomScale + 0.05;
+  if (delta < 0 && nextScale >= ppeZoomScale - 0.005) nextScale = ppeZoomScale - 0.05;
+  ppeZoomScale = Math.max(0.20, Math.min(2.5, nextScale));
   applyPpeZoom();
 }}
 
@@ -2310,6 +2376,28 @@ function exportPpeAs(format) {{
 }}
 
 function printPoster() {{
+  fitAll();
+  try {{
+    if (window.parent && window.parent !== window) {{
+      const reqPayload = {{
+        posterType: "ppe",
+        pitchId: currentPitchId,
+        requestedAt: new Date().toISOString()
+      }};
+      window.parent.postMessage({{ type: "PAAG_JSA_PRINT_REQUEST", payload: reqPayload }}, "*");
+      if (window.parent.frames) {{
+        for (let i = 0; i < window.parent.frames.length; i++) {{
+          try {{
+            window.parent.frames[i].postMessage({{ type: "PAAG_JSA_PRINT_REQUEST", payload: reqPayload }}, "*");
+          }} catch (fe) {{}}
+        }}
+      }}
+      return;
+    }}
+  }} catch (e) {{}}
+  window.print();
+}}
+function _legacyPrintPosterNoop() {{
   fitAll();
   window.print();
 }}
@@ -3121,6 +3209,27 @@ def build_jsa_poster_html(
   .col-action {{ width: 39%; }}
 
   /* Bottom Footer & Annual Review Sticker Box */
+  .jsa-viewport.zoomed-scroll {{
+    scrollbar-width: auto;
+    scrollbar-color: #64748b #e2e8f0;
+  }}
+  .jsa-viewport.zoomed-scroll::-webkit-scrollbar {{
+    width: 12px;
+    height: 12px;
+  }}
+  .jsa-viewport.zoomed-scroll::-webkit-scrollbar-track {{
+    background: #e2e8f0;
+    border-radius: 6px;
+  }}
+  .jsa-viewport.zoomed-scroll::-webkit-scrollbar-thumb {{
+    background: #64748b;
+    border-radius: 6px;
+    border: 2px solid #e2e8f0;
+  }}
+  .jsa-viewport.zoomed-scroll::-webkit-scrollbar-thumb:hover {{
+    background: #475569;
+  }}
+
   .jsa-footer-row {{
     display: flex;
     justify-content: flex-end;
@@ -3303,7 +3412,7 @@ def build_jsa_poster_html(
     </div>
     <button class="btn btn-save-refresh" id="btnSaveRefreshJsa" onclick="saveAndRefreshJsa()" title="Save JSA edits to the database and refresh">💾 Save &amp; Refresh</button>
     <button class="btn" id="btnUndoJsa" onclick="undoJsaChanges()" style="display:none;" title="Discard unsaved JSA edits">↶ Undo</button>
-    <button class="btn btn-primary" onclick="window.print()">🖨️ Print JSA Poster</button>
+    <button class="btn btn-primary" onclick="requestJsaPrint()" title="Open Print &amp; Export Settings for 1 pitch, a Fishbone section, or all pitches">🖨️ Print JSA Poster</button>
     <button class="btn" onclick="openSaveAsModal()">💾 Save As</button>
     <button class="btn" onclick="toggleSelectorDrawer()">🛡️ Add PPE to Task</button>
     <button class="btn" id="btnIconStyle" onclick="toggleIconStyle()">🎨 {initial_icon_style_btn_label}</button>
@@ -4172,6 +4281,29 @@ function triggerBlobDownload(blob, filename) {{
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }}
 
+function requestJsaPrint() {{
+  try {{
+    if (window.parent && window.parent !== window) {{
+      const reqPayload = {{
+        posterType: "jsa",
+        pitchId: currentPitchId,
+        useJsaIcons: Boolean(useJsaIcons),
+        requestedAt: new Date().toISOString()
+      }};
+      window.parent.postMessage({{ type: "PAAG_JSA_PRINT_REQUEST", payload: reqPayload }}, "*");
+      if (window.parent.frames) {{
+        for (let i = 0; i < window.parent.frames.length; i++) {{
+          try {{
+            window.parent.frames[i].postMessage({{ type: "PAAG_JSA_PRINT_REQUEST", payload: reqPayload }}, "*");
+          }} catch (fe) {{}}
+        }}
+      }}
+      return;
+    }}
+  }} catch (e) {{}}
+  window.print();
+}}
+
 function openPrintableJSA() {{
   const modal = document.getElementById("saveAsModal");
   if (modal) modal.classList.remove("open");
@@ -4717,8 +4849,12 @@ function applyJsaZoom() {{
     const naturalW = frame.offsetWidth || 850;
     const naturalH = frame.offsetHeight || 1100;
 
-    const availW = Math.max(300, (viewport.clientWidth || document.documentElement.clientWidth || window.innerWidth) - 20);
-    const fitScale = Math.max(0.30, Math.min(1.0, availW / naturalW));
+    const containerW = document.documentElement.clientWidth || window.innerWidth || viewport.clientWidth || 900;
+    const availW = Math.max(260, containerW - 24);
+    const _fitScaleInit = Math.max(0.22, Math.min(1.0, availW / naturalW));
+    const fitW = Math.ceil(naturalW * _fitScaleInit);
+    const fitH = Math.ceil(naturalH * _fitScaleInit);
+    const fitScale = _fitScaleInit;
 
     if (jsaZoomMode === "fit") {{
       jsaZoomScale = fitScale;
@@ -4733,11 +4869,25 @@ function applyJsaZoom() {{
     stage.style.width = scaledW + "px";
     stage.style.height = scaledH + "px";
 
-    const isZoomedOver100 = jsaZoomScale > 1.001;
+    const isZoomedIn = jsaZoomScale > (fitScale + 0.005);
+    const targetPosterH = isZoomedIn ? fitH : scaledH;
+    const targetViewportW = isZoomedIn ? Math.min(availW, fitW + 18) : availW;
+    stage.style.margin = isZoomedIn ? "0" : "0 auto";
+    viewport.classList.toggle("zoomed-scroll", isZoomedIn);
+    viewport.style.overflowX = isZoomedIn ? "scroll" : "hidden";
+    viewport.style.overflowY = isZoomedIn ? "scroll" : "hidden";
+    viewport.style.width = isZoomedIn ? targetViewportW + "px" : "100%";
+    viewport.style.maxWidth = isZoomedIn ? targetViewportW + "px" : "none";
+    viewport.style.margin = isZoomedIn ? "0 auto" : "0";
+    viewport.style.height = (targetPosterH + (isZoomedIn ? 20 : 16)) + "px";
+    viewport.style.maxHeight = isZoomedIn ? (targetPosterH + 20) + "px" : "none";
+    if (false) {{
+      const isZoomedOver100 = jsaZoomScale > 1.001;
     const targetPosterH = isZoomedOver100 ? naturalH : scaledH;
     viewport.style.overflow = isZoomedOver100 ? "auto" : "hidden";
     viewport.style.height = (targetPosterH + 16) + "px";
     viewport.style.maxHeight = isZoomedOver100 ? (naturalH + 16) + "px" : "none";
+    }}
 
     const viewportTop = viewport.offsetTop || 60;
     const desiredIframeH = Math.ceil(viewportTop + targetPosterH + 24);
@@ -4762,7 +4912,10 @@ function applyJsaZoom() {{
 
 function stepJsaZoom(delta) {{
   jsaZoomMode = "manual";
-  jsaZoomScale = Math.max(0.3, Math.min(2.0, Math.round((jsaZoomScale + delta) * 20) / 20));
+  let nextScale = Math.round((jsaZoomScale + delta) * 20) / 20;
+  if (delta > 0 && nextScale <= jsaZoomScale + 0.005) nextScale = jsaZoomScale + 0.05;
+  if (delta < 0 && nextScale >= jsaZoomScale - 0.005) nextScale = jsaZoomScale - 0.05;
+  jsaZoomScale = Math.max(0.25, Math.min(2.5, nextScale));
   applyJsaZoom();
 }}
 
@@ -4827,7 +4980,7 @@ try {{
 
 
 _JSA_SAVE_BRIDGE_COMPONENT = st.components.v2.component(
-    "paag_jsa_poster_save_bridge_v1",
+    "paag_jsa_poster_save_bridge_v2",
     html='<div style="display:none;"></div>',
     css="",
     js="""
@@ -4835,7 +4988,12 @@ export default function(component) {
   const { setTriggerValue } = component;
   const handler = (event) => {
     const data = event && event.data;
-    if (!data || data.type !== "PAAG_JSA_SAVE" || !data.payload) return;
+    if (!data || !data.payload) return;
+    if (data.type === "PAAG_JSA_PRINT_REQUEST") {
+      setTriggerValue("print_request", data.payload);
+      return;
+    }
+    if (data.type !== "PAAG_JSA_SAVE" && data.type !== "PAAG_JSA_SAVE_REQUEST") return;
     setTriggerValue("save_payload", data.payload);
   };
   window.addEventListener("message", handler);
@@ -4853,8 +5011,1390 @@ def jsa_poster_save_bridge(*, key: str):
         return _JSA_SAVE_BRIDGE_COMPONENT(
             key=key,
             on_save_payload_change=lambda: None,
+            on_print_request_change=lambda: None,
             height="content",
         )
     except Exception:
         return None
 
+
+
+def _extract_effective_ppe_names(raw_items: list[Any] | None) -> list[str]:
+    names: list[str] = []
+    for entry in raw_items or []:
+        if isinstance(entry, dict):
+            nm = str(entry.get("canonical_name") or entry.get("name") or "").strip()
+        else:
+            nm = str(entry or "").strip()
+        if nm:
+            names.append(nm)
+    rollup = resolve_pitch_ppe_rollup(names)
+    return list(rollup.get("effective_canonical_names") or rollup.get("effective_names") or [])
+
+
+def build_jsa_poster_print_card_html(
+    jsa_summary: dict[str, Any],
+    *,
+    use_jsa_icons: bool = False,
+    min_table_rows: int = 10,
+) -> str:
+    """Render a static, self-contained portrait JSA Poster card for multi-pitch print/PDF/HTML decks."""
+    effective_names = _extract_effective_ppe_names(jsa_summary.get("effective_ppe"))
+    baseline_set = {normalize_ppe_name(x) for x in STANDARD_BASELINE_PPE}
+    has_special_ppe = any(normalize_ppe_name(n) not in baseline_set for n in effective_names)
+    border_class = "border-purple" if has_special_ppe else ""
+
+    plant_code = html.escape(str(jsa_summary.get("plant_code") or "AP1").strip() or "AP1")
+    job_title = html.escape(
+        str(
+            jsa_summary.get("job_title")
+            or jsa_summary.get("pitch_display_label")
+            or jsa_summary.get("pitch_number")
+            or "Job Safety Analysis"
+        ).strip()
+    )
+    default_notice = (
+        "The JSA should be reviewed by all employees operating this workstation. "
+        "This JSA should be reviewed & updated when changes to equipment / processes occur."
+    )
+    important_notice = html.escape(
+        str(jsa_summary.get("important_notice") or default_notice).strip() or default_notice
+    )
+    ehs_logo_uri = get_ehs_logo_data_uri()
+
+    # Build PPE tiles
+    ppe_count = len(effective_names)
+    if ppe_count <= 4:
+        icon_w, icon_h = 132, 108
+    elif ppe_count <= 6:
+        icon_w, icon_h = 112, 92
+    elif ppe_count <= 8:
+        icon_w, icon_h = 94, 76
+    else:
+        icon_w, icon_h = 80, 64
+
+    ppe_tiles_html_parts: list[str] = []
+    for ppe_name in effective_names:
+        img_uri = (
+            get_jsa_icon_data_uri(ppe_name)
+            if use_jsa_icons
+            else (get_ppe_icon_data_uri(ppe_name) or get_jsa_icon_data_uri(ppe_name))
+        )
+        safe_p_name = html.escape(ppe_name)
+        if img_uri:
+            ppe_tiles_html_parts.append(
+                f'<div class="jsa-deck-ppe-tile" style="width:{icon_w}px;">'
+                f'<img src="{img_uri}" alt="{safe_p_name}" style="height:{icon_h}px;" />'
+                f'<div class="jsa-deck-ppe-cap">{safe_p_name}</div>'
+                f"</div>"
+            )
+        else:
+            ppe_tiles_html_parts.append(
+                f'<div class="jsa-deck-ppe-tile" style="width:{icon_w}px;">'
+                f'<div class="jsa-deck-ppe-fallback">{safe_p_name}</div>'
+                f"</div>"
+            )
+    visual_zone_inner = (
+        "".join(ppe_tiles_html_parts)
+        if ppe_tiles_html_parts
+        else '<div class="jsa-deck-visual-empty">No PPE Assigned</div>'
+    )
+
+    # Build JSA step rows
+    raw_rows = list(jsa_summary.get("jsa_rows") or [])
+    rows_to_render: list[dict[str, Any]] = []
+    for r in raw_rows:
+        if not isinstance(r, dict):
+            continue
+        rows_to_render.append(
+            {
+                "job_step": str(r.get("job_step") or ""),
+                "potential_hazards": str(r.get("potential_hazards") or ""),
+                "proposed_actions": str(r.get("proposed_actions") or ""),
+                "is_auto_ppe_row": bool(r.get("is_auto_ppe_row")),
+            }
+        )
+    if not rows_to_render:
+        rows_to_render.append(
+            {
+                "job_step": "Put on PPE",
+                "potential_hazards": "",
+                "proposed_actions": "",
+                "is_auto_ppe_row": True,
+            }
+        )
+    while len(rows_to_render) < max(1, int(min_table_rows)):
+        rows_to_render.append(
+            {
+                "job_step": "",
+                "potential_hazards": "",
+                "proposed_actions": "",
+                "is_auto_ppe_row": False,
+            }
+        )
+
+    tbody_parts: list[str] = []
+    for r in rows_to_render:
+        tr_cls = ' class="auto-ppe-row"' if r["is_auto_ppe_row"] else ""
+        s_txt = html.escape(r["job_step"]).replace("\n", "<br/>")
+        h_txt = html.escape(r["potential_hazards"]).replace("\n", "<br/>")
+        a_txt = html.escape(r["proposed_actions"]).replace("\n", "<br/>")
+        tbody_parts.append(
+            f"<tr{tr_cls}>"
+            f"<td>{s_txt}</td>"
+            f"<td>{h_txt}</td>"
+            f"<td>{a_txt}</td>"
+            f"</tr>"
+        )
+
+    logo_img_html = f'<img src="{ehs_logo_uri}" alt="EHS&amp;S Logo" />' if ehs_logo_uri else "<strong>EHS&amp;S</strong>"
+
+    return f"""
+<div class="safety-print-card jsa-print-card" data-poster-kind="jsa">
+  <div class="jsa-deck-outer-frame {border_class}">
+    <div class="jsa-deck-inner-sheet">
+      <div class="jsa-deck-top-section">
+        <div class="jsa-deck-header-row">
+          <div class="jsa-deck-plant-code">{plant_code}</div>
+          <div class="jsa-deck-title-block">
+            <div class="jsa-deck-main-heading">JOB SAFETY ANALYSIS</div>
+            <div class="jsa-deck-job-title-box">{job_title}</div>
+            <div class="jsa-deck-operation-sub">Operation</div>
+          </div>
+          <div class="jsa-deck-logo-box">{logo_img_html}</div>
+        </div>
+
+        <div class="jsa-deck-important-box">
+          <div class="jsa-deck-important-header">IMPORTANT</div>
+          <div class="jsa-deck-important-body">{important_notice}</div>
+        </div>
+
+        <div class="jsa-deck-visual-zone">{visual_zone_inner}</div>
+
+        <table class="jsa-deck-steps-table">
+          <thead>
+            <tr>
+              <th style="width:28%;">JOB STEPS</th>
+              <th style="width:33%;">POTENTIAL ERRORS / HAZARDS</th>
+              <th style="width:39%;">ACTION</th>
+            </tr>
+          </thead>
+          <tbody>
+            {"".join(tbody_parts)}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="jsa-deck-footer-row">
+        <div class="jsa-deck-sticker-box">
+          <div class="jsa-deck-sticker-area">
+            PLACE ANNUAL<br/>REVIEW<br/>STICKER HERE
+          </div>
+          <div class="jsa-deck-template-rev">
+            JSA Template - FRM-GEA-SAF-085 Rev 0 2/28/2024
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+
+def build_ppe_poster_print_card_html(ppe_summary: dict[str, Any]) -> str:
+    """Render a static, self-contained 11x17 Landscape PPE Poster card for multi-pitch print/PDF/HTML decks."""
+    effective_names = _extract_effective_ppe_names(ppe_summary.get("effective_ppe"))
+    effective_set = set(effective_names)
+
+    safe_job = html.escape(
+        str(
+            ppe_summary.get("job_name")
+            or ppe_summary.get("default_job")
+            or ppe_summary.get("pitch_name")
+            or ppe_summary.get("pitch_number")
+            or ""
+        ).strip()
+    )
+    safe_ws = html.escape(
+        str(
+            ppe_summary.get("workstation")
+            or ppe_summary.get("default_workstation")
+            or ppe_summary.get("pitch_number")
+            or ""
+        ).strip()
+    )
+    safe_sec = html.escape(
+        str(
+            ppe_summary.get("section")
+            or ppe_summary.get("default_section")
+            or ppe_summary.get("section_name")
+            or ""
+        ).strip()
+    )
+    logo_uri = get_ehs_logo_data_uri()
+
+    # Collect ordered catalog + custom PPE items with hazards & mitigations
+    selected_items: list[dict[str, str]] = []
+    seen_names: set[str] = set()
+    for cat_item in PPE_CATALOG:
+        c_name = str(cat_item["name"])
+        if c_name in effective_set:
+            seen_names.add(c_name)
+            selected_items.append(
+                {
+                    "name": c_name,
+                    "image": get_ppe_icon_data_uri(c_name),
+                    "hazard": str(cat_item.get("hazard") or ""),
+                    "mitigation": str(cat_item.get("mitigation") or ""),
+                }
+            )
+    for custom_name in effective_names:
+        if custom_name not in seen_names:
+            seen_names.add(custom_name)
+            selected_items.append(
+                {
+                    "name": custom_name,
+                    "image": get_ppe_icon_data_uri(custom_name),
+                    "hazard": "Task-specific workplace hazard.",
+                    "mitigation": f"Correctly wear approved {custom_name.upper()}.",
+                }
+            )
+
+    count = len(selected_items)
+    if count <= 3:
+        cols, tile_h, img_h, cap_fs = max(1, count or 3), 260, 195, "11pt"
+    elif count <= 6:
+        cols, tile_h, img_h, cap_fs = 3, 225, 165, "10.5pt"
+    elif count <= 9:
+        cols, tile_h, img_h, cap_fs = 3, 155, 110, "9.5pt"
+    elif count <= 12:
+        cols, tile_h, img_h, cap_fs = 4, 150, 105, "9pt"
+    else:
+        cols, tile_h, img_h, cap_fs = 5, 125, 85, "8.5pt"
+
+    if count > 16:
+        compact_cls = "compact-3"
+    elif count > 12:
+        compact_cls = "compact-2"
+    elif count > 8:
+        compact_cls = "compact-1"
+    else:
+        compact_cls = ""
+
+    icon_tiles_html: list[str] = []
+    table_rows_html: list[str] = []
+    for item in selected_items:
+        s_name = html.escape(item["name"])
+        s_haz = html.escape(item["hazard"])
+        s_mit = html.escape(item["mitigation"])
+        img_tag = (
+            f'<img src="{item["image"]}" alt="{s_name}" style="max-height:{img_h}px;" />'
+            if item["image"]
+            else f'<div style="font-weight:700;font-size:13pt;text-align:center;">{s_name}</div>'
+        )
+        icon_tiles_html.append(
+            f'<div class="ppe-deck-icon-tile">'
+            f"{img_tag}"
+            f'<div class="ppe-deck-caption" style="font-size:{cap_fs};">{s_name}</div>'
+            f"</div>"
+        )
+        table_rows_html.append(
+            f"<tr>"
+            f"<td><strong>{s_name}</strong></td>"
+            f"<td>{s_haz}</td>"
+            f"<td>{s_mit}</td>"
+            f"</tr>"
+        )
+
+    return f"""
+<div class="safety-print-card ppe-print-card" data-poster-kind="ppe">
+  <div class="ppe-deck-page mode-special">
+    <div class="ppe-deck-poster">
+      <div class="ppe-deck-header">
+        <div class="ppe-deck-validation-box">
+          <div class="ppe-deck-validation-title">VALIDATION</div>
+          <div class="ppe-deck-validation-sub">Place annual review sticker here</div>
+        </div>
+        <h2>MINIMUM PPE REQUIREMENTS</h2>
+        <img class="ppe-deck-header-logo" src="{logo_uri}" alt="EHS&amp;S Logo" />
+      </div>
+
+      <div class="ppe-deck-meta-bar">
+        <div class="ppe-deck-meta-chip"><strong>Job:</strong> <span>{safe_job}</span></div>
+        <div class="ppe-deck-meta-chip"><strong>Workstation:</strong> <span>{safe_ws}</span></div>
+        <div class="ppe-deck-meta-chip"><strong>Section:</strong> <span>{safe_sec}</span></div>
+      </div>
+
+      <div class="ppe-deck-body">
+        <div class="ppe-deck-icons-panel">
+          <div class="ppe-deck-panel-title">Required PPE (Visual)</div>
+          <div class="ppe-deck-icons-grid" style="--cols:{cols}; --tile-h:{tile_h}px;">
+            {"".join(icon_tiles_html)}
+          </div>
+        </div>
+
+        <div class="ppe-deck-table-panel">
+          <div class="ppe-deck-panel-title">Hazards &amp; Mitigations</div>
+          <div class="ppe-deck-table-wrap {compact_cls}">
+            <table class="ppe-deck-table">
+              <colgroup>
+                <col style="width:26%;" />
+                <col style="width:37%;" />
+                <col style="width:37%;" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>PPE Item</th>
+                  <th>Hazard</th>
+                  <th>Mitigation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {"".join(table_rows_html)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+
+def render_printable_safety_poster_deck(
+    slides_html: list[str],
+    *,
+    poster_mode: str = "jsa",
+    paper_size: str = "letter",
+    title: str = "JSA & PPE Posters",
+) -> str:
+    """Wrap 1 or more static JSA and/or 11x17 PPE Poster cards into a standalone printable/PDF/HTML deck."""
+    is_tabloid = str(paper_size).lower() == "tabloid"
+    mode_norm = str(poster_mode).lower()
+
+    if mode_norm == "ppe":
+        # 11x17 Landscape by default (or 11x8.5 Landscape if Letter selected)
+        page_css_size = "17in 11in" if is_tabloid else "11in 8.5in"
+        ppe_print_scale = "1" if is_tabloid else "0.64"
+        jsa_print_scale = "1"
+        format_badge = "11 × 17 in (Tabloid Landscape)" if is_tabloid else "8.5 × 11 in (Letter Landscape)"
+    elif mode_norm == "jsa":
+        # Portrait JSA
+        page_css_size = "11in 17in" if is_tabloid else "8.5in 11in"
+        ppe_print_scale = "0.64"
+        jsa_print_scale = "1.22" if is_tabloid else "0.92"
+        format_badge = "11 × 17 in (Tabloid Portrait)" if is_tabloid else "8.5 × 11 in (Letter Portrait)"
+    else:
+        # Both JSA + PPE
+        page_css_size = "17in 11in" if is_tabloid else "8.5in 11in"
+        ppe_print_scale = "1" if is_tabloid else "0.48"
+        jsa_print_scale = "0.92"
+        format_badge = "11 × 17 in (Tabloid)" if is_tabloid else "8.5 × 11 in (Letter)"
+
+    total_slides = len(slides_html)
+    safe_title = html.escape(title)
+    slides_joined = "\n".join(
+        f'<div class="safety-print-slide-wrapper">{s}</div>' for s in slides_html
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{safe_title}</title>
+<style>
+  * {{
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }}
+  @page {{
+    size: {page_css_size};
+    margin: 0.2in;
+  }}
+  html, body {{
+    margin: 0;
+    padding: 0;
+    background: #e2e8f0;
+    font-family: Segoe UI, Roboto, Arial, sans-serif;
+    color: #0f172a;
+  }}
+  .print-banner {{
+    position: sticky;
+    top: 0;
+    z-index: 9999;
+    background: #0f172a;
+    color: #f8fafc;
+    padding: 12px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }}
+  .print-banner-btn {{
+    background: #0284c7;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }}
+  .print-banner-btn:hover {{
+    background: #0369a1;
+  }}
+  .print-banner-btn.green {{
+    background: #008a5e;
+  }}
+  .print-banner-btn.green:hover {{
+    background: #006e4a;
+  }}
+  .print-banner-btn.secondary {{
+    background: #334155;
+    font-weight: 600;
+  }}
+  .print-banner-btn.secondary:hover {{
+    background: #475569;
+  }}
+  .pdf-tip-banner {{
+    display: none;
+    background: #eff6ff;
+    border-bottom: 2px solid #3b82f6;
+    color: #1e3a8a;
+    padding: 9px 24px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+  }}
+  .pdf-tip-banner.visible {{
+    display: block;
+  }}
+  .safety-deck-container {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    padding: 24px 16px 48px 16px;
+  }}
+  .safety-print-slide-wrapper {{
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    width: 100%;
+  }}
+
+  /* --- JSA Card Styles --- */
+  .jsa-deck-outer-frame {{
+    width: 850px;
+    min-height: 1080px;
+    padding: 26px;
+    background: repeating-linear-gradient(
+      135deg,
+      #00b377 0px,
+      #00b377 34px,
+      #000000 34px,
+      #000000 68px
+    );
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  }}
+  .jsa-deck-outer-frame.border-purple {{
+    background: repeating-linear-gradient(
+      135deg,
+      #7851a9 0px,
+      #7851a9 34px,
+      #000000 34px,
+      #000000 68px
+    );
+  }}
+  .jsa-deck-inner-sheet {{
+    background: #ffffff;
+    border: 2px solid #000000;
+    min-height: 1028px;
+    padding: 14px 18px 16px 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }}
+  .jsa-deck-top-section {{
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }}
+  .jsa-deck-header-row {{
+    display: grid;
+    grid-template-columns: 120px 1fr 110px;
+    align-items: center;
+    gap: 10px;
+  }}
+  .jsa-deck-plant-code {{
+    font-size: 36px;
+    font-weight: 900;
+    color: #000;
+    padding-left: 6px;
+  }}
+  .jsa-deck-title-block {{
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }}
+  .jsa-deck-main-heading {{
+    font-size: 25px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    color: #000;
+  }}
+  .jsa-deck-job-title-box {{
+    border: 1.5px solid #222;
+    background: #e5e7eb;
+    padding: 4px 14px;
+    font-size: 15.5px;
+    font-weight: 700;
+    min-width: 340px;
+    max-width: 96%;
+    text-align: center;
+    color: #000;
+  }}
+  .jsa-deck-operation-sub {{
+    font-size: 15px;
+    font-weight: 800;
+    color: #000;
+  }}
+  .jsa-deck-logo-box {{
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }}
+  .jsa-deck-logo-box img {{
+    max-height: 66px;
+    max-width: 105px;
+    object-fit: contain;
+  }}
+  .jsa-deck-important-box {{
+    border: 1.8px solid #000;
+  }}
+  .jsa-deck-important-header {{
+    background: #10c486;
+    border-bottom: 1.5px solid #000;
+    text-align: center;
+    font-weight: 900;
+    font-size: 15px;
+    padding: 3px 8px;
+    color: #000;
+  }}
+  .jsa-deck-important-body {{
+    padding: 6px 12px;
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.35;
+    color: #000;
+  }}
+  .jsa-deck-visual-zone {{
+    min-height: 195px;
+    margin: 4px 0;
+    padding: 8px 10px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }}
+  .jsa-deck-visual-empty {{
+    font-size: 22px;
+    color: #64748b;
+    font-weight: 600;
+  }}
+  .jsa-deck-ppe-tile {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3px;
+    text-align: center;
+  }}
+  .jsa-deck-ppe-tile img {{
+    max-width: 100%;
+    object-fit: contain;
+  }}
+  .jsa-deck-ppe-cap {{
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #111;
+    margin-top: 2px;
+    line-height: 1.15;
+  }}
+  .jsa-deck-ppe-fallback {{
+    border: 1px solid #94a3b8;
+    border-radius: 6px;
+    padding: 8px;
+    font-size: 11px;
+    font-weight: 700;
+  }}
+  .jsa-deck-steps-table {{
+    width: 100%;
+    border-collapse: collapse;
+    border: 2.5px solid #000;
+    table-layout: fixed;
+  }}
+  .jsa-deck-steps-table th {{
+    border: 1.5px solid #000;
+    padding: 6px 8px;
+    font-size: 11.5px;
+    font-weight: 900;
+    text-align: left;
+    background: #ffffff;
+    color: #000;
+  }}
+  .jsa-deck-steps-table td {{
+    border: 1.2px solid #000;
+    padding: 5px 8px;
+    font-size: 11px;
+    vertical-align: top;
+    line-height: 1.28;
+    height: 34px;
+    color: #000;
+    word-wrap: break-word;
+  }}
+  .jsa-deck-steps-table tr.auto-ppe-row td {{
+    background: #f8fafc;
+  }}
+  .jsa-deck-footer-row {{
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 10px;
+  }}
+  .jsa-deck-sticker-box {{
+    width: 260px;
+    border: 1.5px dashed #64748b;
+    text-align: center;
+  }}
+  .jsa-deck-sticker-area {{
+    padding: 7px 10px 5px 10px;
+    font-family: "Times New Roman", Times, serif;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #94a3b8;
+    line-height: 1.22;
+  }}
+  .jsa-deck-template-rev {{
+    border-top: 1px solid #94a3b8;
+    padding: 3px 6px;
+    font-size: 9px;
+    color: #64748b;
+  }}
+
+  /* --- 11x17 PPE Poster Card Styles --- */
+  .ppe-deck-page {{
+    width: 1584px;
+    height: 1008px;
+    padding: 26px;
+    border-radius: 10px;
+    background: repeating-linear-gradient(
+      135deg,
+      #6f42c1 0 16px,
+      #ffffff 16px 32px
+    );
+    box-shadow: 0 6px 20px rgba(15, 23, 42, 0.16);
+  }}
+  .ppe-deck-poster {{
+    width: 100%;
+    height: 100%;
+    background: #ffffff;
+    border-radius: 6px;
+    border: 2px solid #3b4b59;
+    padding: 18px;
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    row-gap: 13px;
+    overflow: hidden;
+  }}
+  .ppe-deck-header {{
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e9edf2;
+    border: 1.5px solid #3b4b59;
+    border-radius: 6px;
+    padding: 10px 16px;
+    min-height: 104px;
+  }}
+  .ppe-deck-header h2 {{
+    margin: 0;
+    font-size: 28pt;
+    letter-spacing: 0.5px;
+    color: #1f2d3a;
+    font-weight: 800;
+    text-align: center;
+  }}
+  .ppe-deck-header-logo {{
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    max-height: 84px;
+    max-width: 210px;
+    object-fit: contain;
+  }}
+  .ppe-deck-validation-box {{
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 245px;
+    height: 84px;
+    border: 2px dashed #3b4b59;
+    border-radius: 6px;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 6px 10px;
+  }}
+  .ppe-deck-validation-title {{
+    font-size: 10pt;
+    font-weight: 800;
+    color: #3b4b59;
+  }}
+  .ppe-deck-validation-sub {{
+    font-size: 8.5pt;
+    color: #555;
+  }}
+  .ppe-deck-meta-bar {{
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+  }}
+  .ppe-deck-meta-chip {{
+    border: 1.5px solid #3b4b59;
+    border-radius: 6px;
+    padding: 7px 12px;
+    background: #f5f7fa;
+    font-size: 12pt;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }}
+  .ppe-deck-meta-chip span {{
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }}
+  .ppe-deck-body {{
+    display: grid;
+    grid-template-columns: 58% 42%;
+    column-gap: 18px;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }}
+  .ppe-deck-icons-panel,
+  .ppe-deck-table-panel {{
+    border: 1.5px solid #dcdfe4;
+    border-radius: 6px;
+    padding: 13px;
+    background: #f9fafb;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    min-height: 0;
+    overflow: hidden;
+  }}
+  .ppe-deck-panel-title {{
+    font-size: 12pt;
+    font-weight: 700;
+    color: #3b4b59;
+    margin: 0 0 8px 0;
+  }}
+  .ppe-deck-icons-grid {{
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
+    grid-auto-rows: var(--tile-h, 160px);
+    gap: 11px;
+    align-content: start;
+    height: 100%;
+    background: #fff;
+    border: 1px solid #dcdfe4;
+    border-radius: 6px;
+    padding: 11px;
+    overflow: hidden;
+  }}
+  .ppe-deck-icon-tile {{
+    border: 1px solid #e4e7ec;
+    border-radius: 8px;
+    background: #fff;
+    padding: 7px;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    align-items: center;
+    justify-items: center;
+    overflow: hidden;
+  }}
+  .ppe-deck-icon-tile img {{
+    max-width: 100%;
+    object-fit: contain;
+    display: block;
+  }}
+  .ppe-deck-caption {{
+    margin-top: 4px;
+    text-align: center;
+    line-height: 1.15;
+    color: #222;
+    font-weight: 600;
+  }}
+  .ppe-deck-table-wrap {{
+    background: #fff;
+    border: 1px solid #dcdfe4;
+    border-radius: 6px;
+    padding: 7px;
+    height: 100%;
+    overflow: hidden;
+  }}
+  .ppe-deck-table {{
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 10.5pt;
+  }}
+  .ppe-deck-table thead th {{
+    background: #eef2f7;
+    color: #1f2d3a;
+    border: 1px solid #dcdfe4;
+    padding: 6px 8px;
+    font-weight: 700;
+    text-align: left;
+  }}
+  .ppe-deck-table tbody td {{
+    border: 1px solid #dcdfe4;
+    padding: 6px 8px;
+    vertical-align: top;
+    word-wrap: break-word;
+  }}
+  .ppe-deck-table-wrap.compact-1 .ppe-deck-table {{ font-size: 9.2pt; }}
+  .ppe-deck-table-wrap.compact-1 .ppe-deck-table td,
+  .ppe-deck-table-wrap.compact-1 .ppe-deck-table th {{ padding: 4px 6px; }}
+  .ppe-deck-table-wrap.compact-2 .ppe-deck-table {{ font-size: 8.2pt; }}
+  .ppe-deck-table-wrap.compact-2 .ppe-deck-table td,
+  .ppe-deck-table-wrap.compact-2 .ppe-deck-table th {{ padding: 3px 5px; }}
+  .ppe-deck-table-wrap.compact-3 .ppe-deck-table {{ font-size: 7.4pt; }}
+  .ppe-deck-table-wrap.compact-3 .ppe-deck-table td,
+  .ppe-deck-table-wrap.compact-3 .ppe-deck-table th {{ padding: 2px 4px; }}
+
+  @media print {{
+    html, body {{
+      background: #ffffff !important;
+    }}
+    .no-print {{
+      display: none !important;
+    }}
+    .safety-deck-container {{
+      padding: 0 !important;
+      gap: 0 !important;
+      display: block !important;
+    }}
+    .safety-print-slide-wrapper {{
+      page-break-after: always;
+      break-after: page;
+      page-break-inside: avoid;
+      break-inside: avoid;
+      display: flex !important;
+      justify-content: center !important;
+      align-items: flex-start !important;
+      margin: 0 auto !important;
+      padding: 0 !important;
+    }}
+    .safety-print-slide-wrapper:last-child {{
+      page-break-after: auto;
+      break-after: auto;
+    }}
+    .jsa-deck-outer-frame {{
+      box-shadow: none !important;
+      zoom: {jsa_print_scale};
+    }}
+    .ppe-deck-page {{
+      box-shadow: none !important;
+      zoom: {ppe_print_scale};
+    }}
+  }}
+</style>
+</head>
+<body>
+  <div class="print-banner no-print">
+    <div>
+      <strong style="font-size:1.05rem;">🖨️ {safe_title} — Ready to Print ({total_slides} Poster{"s" if total_slides != 1 else ""})</strong>
+      <div style="font-size:0.82rem; color:#94a3b8; margin-top:2px;">
+        Target Page Format: <strong>{html.escape(format_badge)}</strong> &bull; Enable <strong>Background graphics</strong> in your browser print dialog.
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button type="button" class="print-banner-btn green" onclick="triggerPhysicalPrint()">
+        🖨️ Print Physical Paper Copies
+      </button>
+      <button type="button" class="print-banner-btn" onclick="triggerSaveAsPdf()">
+        📄 Save as PDF
+      </button>
+      <button type="button" class="print-banner-btn secondary" onclick="downloadStandaloneDeckHtml()">
+        🌐 Download HTML
+      </button>
+      <button type="button" class="print-banner-btn secondary" onclick="window.close()">
+        ✕ Close
+      </button>
+    </div>
+  </div>
+  <div id="pdfTipBanner" class="pdf-tip-banner no-print">
+    💡 <strong>Save as PDF Tip:</strong> In the print window that opens, set <strong>Destination</strong> (Printer) to <strong>"Save as PDF"</strong> (or <strong>"Microsoft Print to PDF"</strong>) and check <strong>Background graphics</strong>.
+  </div>
+  <div class="safety-deck-container">
+    {slides_joined}
+  </div>
+  <script>
+    function triggerPhysicalPrint() {{
+      const tip = document.getElementById("pdfTipBanner");
+      if (tip) tip.classList.remove("visible");
+      window.print();
+    }}
+    function triggerSaveAsPdf() {{
+      const tip = document.getElementById("pdfTipBanner");
+      if (tip) tip.classList.add("visible");
+      setTimeout(function() {{ window.print(); }}, 120);
+    }}
+    function downloadStandaloneDeckHtml() {{
+      const htmlContent = "<!DOCTYPE html>\\n" + document.documentElement.outerHTML;
+      const blob = new Blob([htmlContent], {{ type: "text/html;charset=utf-8" }});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = {json.dumps(title.replace(" ", "_") + ".html")};
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function() {{ URL.revokeObjectURL(url); }}, 1000);
+    }}
+    if (window.location.hash === "#autoprint") {{
+      window.addEventListener("load", function() {{
+        setTimeout(function() {{ window.print(); }}, 350);
+      }});
+    }} else if (window.location.hash === "#autopdf") {{
+      window.addEventListener("load", function() {{
+        const tip = document.getElementById("pdfTipBanner");
+        if (tip) tip.classList.add("visible");
+        setTimeout(function() {{ window.print(); }}, 350);
+      }});
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+def render_safety_poster_print_dialog_body(
+    *,
+    project_id: str,
+    scenario_id: str,
+    selected_pitch_id: str,
+    poster_summaries: list[dict[str, Any]] | None = None,
+    jsa_summaries: list[dict[str, Any]] | None = None,
+    default_poster_type: str = "jsa",
+    active_section_filter: str = "",
+    key_prefix: str = "safety_print",
+    on_close_callback: Any | None = None,
+    close_button_label: str = "✕ Close Print Window",
+) -> None:
+    """Render the PAAG-style Print & Export Settings UI for JSA and 11x17 PPE Posters."""
+    from utils.safety_store import pitch_jsa_poster_summary, pitch_ppe_poster_summary
+
+    all_ppe_list = (
+        poster_summaries
+        if poster_summaries is not None
+        else pitch_ppe_poster_summary(project_id, scenario_id)
+    )
+    all_jsa_list = (
+        jsa_summaries
+        if jsa_summaries is not None
+        else pitch_jsa_poster_summary(project_id, scenario_id)
+    )
+
+    ppe_by_pid: dict[str, dict[str, Any]] = {
+        str(p.get("pitch_id") or ""): p for p in (all_ppe_list or []) if p.get("pitch_id")
+    }
+    jsa_by_pid: dict[str, dict[str, Any]] = {
+        str(j.get("pitch_id") or ""): j for j in (all_jsa_list or []) if j.get("pitch_id")
+    }
+
+    ordered_pids: list[str] = [
+        str(p.get("pitch_id") or "")
+        for p in (all_ppe_list or all_jsa_list or [])
+        if p.get("pitch_id")
+    ]
+    if not ordered_pids and selected_pitch_id:
+        ordered_pids = [selected_pitch_id]
+
+    pitch_label_map: dict[str, str] = {}
+    sec_pitch_map: dict[str, list[str]] = {}
+    ordered_sec_names: list[str] = []
+
+    for pid in ordered_pids:
+        p_info = ppe_by_pid.get(pid) or jsa_by_pid.get(pid) or {}
+        p_num = str(p_info.get("pitch_number") or "Pitch").strip()
+        p_name = str(p_info.get("pitch_name") or p_info.get("job_name") or "").strip()
+        sec_name = str(p_info.get("section_name") or p_info.get("section") or "Unassigned").strip() or "Unassigned"
+        pitch_label_map[pid] = f"{p_num} — {p_name}" if p_name else p_num
+        if sec_name not in sec_pitch_map:
+            sec_pitch_map[sec_name] = []
+            ordered_sec_names.append(sec_name)
+        sec_pitch_map[sec_name].append(pid)
+
+    curr_pid = selected_pitch_id if selected_pitch_id in ordered_pids else (ordered_pids[0] if ordered_pids else "")
+    curr_p_info = ppe_by_pid.get(curr_pid) or jsa_by_pid.get(curr_pid) or {}
+    curr_pitch_label = pitch_label_map.get(curr_pid, "Current Pitch")
+    curr_sec_name = (
+        str(curr_p_info.get("section_name") or curr_p_info.get("section") or "").strip()
+        or "Unassigned"
+    )
+    target_sec_name = (
+        active_section_filter
+        if (active_section_filter and active_section_filter in sec_pitch_map)
+        else curr_sec_name
+    )
+    target_sec_count = len(sec_pitch_map.get(target_sec_name, []))
+
+    top_c1, top_c2 = st.columns([4.5, 1.3], vertical_alignment="center")
+    with top_c1:
+        st.markdown("### Export & Print JSA & PPE Posters")
+        st.caption(
+            "Choose to print 1 pitch poster, all posters from a Fishbone section, or all pitches in the project — "
+            "as physical paper copies, Save as PDF, or standalone HTML."
+        )
+    with top_c2:
+        if on_close_callback is not None:
+            if st.button(
+                close_button_label,
+                key=f"{key_prefix}_top_close_{scenario_id}_{curr_pid}",
+                width="stretch",
+            ):
+                on_close_callback()
+                st.rerun()
+
+    POSTER_TYPE_JSA = "📋 JSA Poster (FRM-GEA-SAF-085)"
+    POSTER_TYPE_PPE = "🛡️ 11×17 Minimum PPE Poster"
+    POSTER_TYPE_BOTH = "📑 Both Posters (JSA + 11×17 PPE)"
+    poster_type_options = [POSTER_TYPE_JSA, POSTER_TYPE_PPE, POSTER_TYPE_BOTH]
+
+    poster_type_state_key = f"{key_prefix}_poster_type_{scenario_id}"
+    req_default = str(default_poster_type or "jsa").lower()
+    if st.session_state.get(poster_type_state_key) not in poster_type_options:
+        if req_default == "ppe":
+            st.session_state[poster_type_state_key] = POSTER_TYPE_PPE
+        elif req_default == "both":
+            st.session_state[poster_type_state_key] = POSTER_TYPE_BOTH
+        else:
+            st.session_state[poster_type_state_key] = POSTER_TYPE_JSA
+
+    chosen_poster_type = st.segmented_control(
+        "Poster Type to Print / Export",
+        options=poster_type_options,
+        key=poster_type_state_key,
+    ) or POSTER_TYPE_JSA
+
+    if chosen_poster_type == POSTER_TYPE_PPE:
+        poster_mode = "ppe"
+    elif chosen_poster_type == POSTER_TYPE_BOTH:
+        poster_mode = "both"
+    else:
+        poster_mode = "jsa"
+
+    col_scope, col_fmt = st.columns([1.5, 1.2])
+
+    with col_scope:
+        scope_choices = [
+            f"Current pitch only (1 pitch — {curr_pitch_label})",
+        ]
+        if target_sec_name and target_sec_count > 0:
+            scope_choices.append(
+                f"Current Fishbone section: {target_sec_name} ({target_sec_count} pitch{'es' if target_sec_count != 1 else ''})"
+            )
+        if len(ordered_sec_names) > 0:
+            scope_choices.append("Select specific Fishbone section(s)...")
+        scope_choices.append(
+            f"All pitches in project / scenario ({len(ordered_pids)} pitch{'es' if len(ordered_pids) != 1 else ''})"
+        )
+        scope_choices.append("Select specific pitches...")
+
+        chosen_scope = st.radio(
+            "Print Selection (Scope)",
+            scope_choices,
+            index=0,
+            key=f"{key_prefix}_scope_{scenario_id}",
+            help="Choose to print 1 slide (current pitch), all slides in a Fishbone section, or all slides in the project.",
+        )
+
+        selected_sec_names: list[str] = []
+        if "specific Fishbone section" in chosen_scope:
+            def_secs = [target_sec_name] if target_sec_name in ordered_sec_names else ordered_sec_names[:1]
+            selected_sec_names = st.multiselect(
+                "Choose Fishbone Section(s) to Print",
+                options=ordered_sec_names,
+                default=def_secs,
+                format_func=lambda s: f"{s} ({len(sec_pitch_map.get(s, []))} pitch{'es' if len(sec_pitch_map.get(s, [])) != 1 else ''})",
+                key=f"{key_prefix}_sec_multi_{scenario_id}",
+            )
+
+        selected_custom_pids: list[str] = []
+        if "specific pitches" in chosen_scope:
+            selected_custom_pids = st.multiselect(
+                "Choose Pitches to Include",
+                options=ordered_pids,
+                default=[curr_pid] if curr_pid else ordered_pids[:1],
+                format_func=lambda pid: pitch_label_map.get(pid, pid),
+                key=f"{key_prefix}_pitch_multi_{scenario_id}",
+            )
+
+    with col_fmt:
+        if poster_mode == "ppe":
+            fmt_options = [
+                "11 × 17 in (Tabloid Landscape — Standard PPE Poster)",
+                "8.5 × 11 in (Letter Landscape — Scaled to Fit)",
+            ]
+            default_fmt_idx = 0
+        elif poster_mode == "jsa":
+            fmt_options = [
+                "8.5 × 11 in (Letter Portrait — Standard JSA)",
+                "11 × 17 in (Tabloid Portrait — Large Format JSA)",
+            ]
+            default_fmt_idx = 0
+        else:
+            fmt_options = [
+                "8.5 × 11 in (Letter)",
+                "11 × 17 in (Tabloid — 11×17)",
+            ]
+            default_fmt_idx = 1
+
+        format_choice = st.radio(
+            "Paper Size / Page Format",
+            fmt_options,
+            index=default_fmt_idx,
+            key=f"{key_prefix}_fmt_{poster_mode}_{scenario_id}",
+            help="Select standard 8.5×11 Letter or 11×17 Tabloid paper size for physical printing and Save as PDF.",
+        )
+        paper_size = "tabloid" if "11 × 17" in format_choice else "letter"
+
+        use_jsa_icons = False
+        if poster_mode in {"jsa", "both"}:
+            style_choice = st.radio(
+                "JSA PPE Visual Style",
+                ["Photo Cards (with description)", "JSA Square Icons"],
+                index=0,
+                key=f"{key_prefix}_jsa_style_{scenario_id}",
+            )
+            use_jsa_icons = "Square Icons" in style_choice
+
+    # Resolve target pitch IDs in walk order
+    if "Current pitch only" in chosen_scope:
+        target_pids = [curr_pid] if curr_pid else ordered_pids[:1]
+    elif "Current Fishbone section" in chosen_scope:
+        target_pids = list(sec_pitch_map.get(target_sec_name, [curr_pid]))
+    elif "specific Fishbone section" in chosen_scope:
+        target_pids = []
+        for s_name in selected_sec_names:
+            for pid in sec_pitch_map.get(s_name, []):
+                if pid not in target_pids:
+                    target_pids.append(pid)
+        if not target_pids and curr_pid:
+            target_pids = [curr_pid]
+    elif "All pitches" in chosen_scope:
+        target_pids = list(ordered_pids)
+    else:
+        target_pids = list(selected_custom_pids) if selected_custom_pids else ([curr_pid] if curr_pid else ordered_pids[:1])
+
+    slides_html: list[str] = []
+    for pid in target_pids:
+        if poster_mode in {"jsa", "both"}:
+            j_sum = jsa_by_pid.get(pid)
+            if j_sum:
+                slides_html.append(
+                    build_jsa_poster_print_card_html(
+                        j_sum,
+                        use_jsa_icons=use_jsa_icons,
+                    )
+                )
+        if poster_mode in {"ppe", "both"}:
+            p_sum = ppe_by_pid.get(pid)
+            if p_sum:
+                slides_html.append(build_ppe_poster_print_card_html(p_sum))
+
+    if not slides_html:
+        st.warning("No posters were selected for printing.")
+        return
+
+    total_posters = len(slides_html)
+    total_pitches_sel = len(target_pids)
+    mode_title_map = {
+        "jsa": "JSA_Posters",
+        "ppe": "PPE_11x17_Posters",
+        "both": "JSA_and_PPE_Posters",
+    }
+    deck_title = f"{mode_title_map.get(poster_mode, 'Safety_Posters')}_{total_pitches_sel}_Pitches"
+    full_deck_html = render_printable_safety_poster_deck(
+        slides_html,
+        poster_mode=poster_mode,
+        paper_size=paper_size,
+        title=f"Safety Posters ({total_posters} Slide{'s' if total_posters != 1 else ''})",
+    )
+
+    st.info(
+        f"Ready to output **{total_posters} poster slide{'s' if total_posters != 1 else ''}** "
+        f"across **{total_pitches_sel} pitch{'es' if total_pitches_sel != 1 else ''}** "
+        f"on **{format_choice}**."
+    )
+
+    scope_sig = f"{poster_mode}_{chosen_scope}_{paper_size}_{use_jsa_icons}_{target_pids}"
+    scope_slug = hashlib.md5(scope_sig.encode("utf-8")).hexdigest()[:8]
+
+    act_c1, act_c2 = st.columns([2.2, 1.0], vertical_alignment="center")
+    with act_c1:
+        escaped_deck_html = (
+            json.dumps(full_deck_html)
+            .replace("</script>", "<\\/script>")
+            .replace("</Script>", "<\\/Script>")
+        )
+        action_buttons_html = f"""<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {{
+    margin: 0;
+    padding: 2px 0;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }}
+  .btn-act {{
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 700;
+    padding: 8px 15px;
+    border-radius: 6px;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }}
+  .btn-print-paper {{
+    background: #008a5e;
+    color: #ffffff !important;
+  }}
+  .btn-print-paper:hover {{
+    background: #006e4a;
+  }}
+  .btn-save-pdf {{
+    background: #0284c7;
+    color: #ffffff !important;
+  }}
+  .btn-save-pdf:hover {{
+    background: #0369a1;
+  }}
+  .btn-open-tab {{
+    background: #f1f5f9;
+    color: #0f172a !important;
+    border: 1px solid #cbd5e1;
+    font-weight: 600;
+  }}
+  .btn-open-tab:hover {{
+    background: #e2e8f0;
+  }}
+</style>
+</head>
+<body>
+  <button id="btnPrintPaper" class="btn-act btn-print-paper" title="Open print dialog to print physical paper copies">
+    <span>🖨️</span> Print Physical Paper Copies
+  </button>
+  <button id="btnSavePdf" class="btn-act btn-save-pdf" title="Open print preview ready to Save as PDF">
+    <span>📄</span> Save as PDF
+  </button>
+  <button id="btnOpenTab" class="btn-act btn-open-tab" title="Open compiled multi-poster deck in a new browser tab">
+    <span>↗️</span> Open in New Tab
+  </button>
+  <script>
+    const deckContent = {escaped_deck_html};
+    function openDeckWindow(mode) {{
+      let htmlToOpen = deckContent;
+      if (mode === "print") {{
+        htmlToOpen = deckContent.replace(
+          "</body>",
+          '<script>window.addEventListener("load", function(){{ setTimeout(function(){{ window.print(); }}, 380); }});<\\/script></body>'
+        );
+      }} else if (mode === "pdf") {{
+        htmlToOpen = deckContent.replace(
+          "</body>",
+          '<script>window.addEventListener("load", function(){{ var t=document.getElementById("pdfTipBanner"); if(t) t.classList.add("visible"); setTimeout(function(){{ window.print(); }}, 380); }});<\\/script></body>'
+        );
+      }}
+      const blob = new Blob([htmlToOpen], {{ type: "text/html;charset=utf-8" }});
+      const blobUrl = URL.createObjectURL(blob);
+      const win = window.open(blobUrl, "_blank");
+      if (win) win.focus();
+    }}
+    document.getElementById("btnPrintPaper").onclick = function(e) {{
+      e.preventDefault();
+      openDeckWindow("print");
+    }};
+    document.getElementById("btnSavePdf").onclick = function(e) {{
+      e.preventDefault();
+      openDeckWindow("pdf");
+    }};
+    document.getElementById("btnOpenTab").onclick = function(e) {{
+      e.preventDefault();
+      openDeckWindow("view");
+    }};
+  </script>
+</body>
+</html>"""
+        components.html(action_buttons_html, height=46)
+
+    with act_c2:
+        safe_html_fn = f"{deck_title}_{paper_size}.html".replace(" ", "_")
+        st.download_button(
+            f"Download HTML ({total_posters} Poster{'s' if total_posters != 1 else ''})",
+            data=full_deck_html,
+            file_name=safe_html_fn,
+            mime="text/html",
+            icon=":material/download:",
+            type="secondary",
+            width="stretch",
+            key=f"{key_prefix}_dl_html_{scenario_id}_{scope_slug}",
+        )
+
+    st.divider()
+    st.caption(
+        f"Preview (Poster 1 of {total_posters} — use **Open in New Tab**, **Print Physical Paper Copies**, or **Save as PDF** above to view/print all {total_posters} poster{'s' if total_posters != 1 else ''}):"
+    )
+    preview_deck_html = render_printable_safety_poster_deck(
+        slides_html[:1],
+        poster_mode=poster_mode,
+        paper_size=paper_size,
+        title="Poster 1 Preview",
+    )
+    components.html(preview_deck_html, height=720, scrolling=True)
+
+    if on_close_callback is not None:
+        if st.button(
+            close_button_label,
+            key=f"{key_prefix}_bottom_close_{scenario_id}_{curr_pid}",
+        ):
+            on_close_callback()
+            st.rerun()

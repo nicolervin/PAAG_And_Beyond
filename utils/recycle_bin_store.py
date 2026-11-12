@@ -64,6 +64,7 @@ _TABLE_HUMAN_LABELS: dict[str, str] = {
     "part_feature_rules": "part feature rule",
     "assembly_sections": "Fishbone section",
     "assembly_section_connections": "section connection",
+    "fishbone_sticky_notes": "Fishbone sticky note",
     "fishbone_part_assignments": "Fishbone part placement",
     "pits_bom_occurrences": "PITS BOM occurrence",
     "pits_bom_occurrence_revisions": "PITS BOM occurrence revision",

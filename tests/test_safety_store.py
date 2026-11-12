@@ -455,7 +455,7 @@ class SafetyStoreTests(unittest.TestCase):
         # JSA rows: lead-in "Put on PPE" + 2 work element steps = 3 rows
         self.assertEqual(len(p1_jsa["jsa_rows"]), 3)
         self.assertEqual(p1_jsa["jsa_rows"][0]["job_step"], "Put on PPE")
-        self.assertIn("Cut Level 5 Gloves", p1_jsa["jsa_rows"][0]["proposed_actions"])
+        self.assertEqual(p1_jsa["jsa_rows"][0]["proposed_actions"], "")
         self.assertEqual(p1_jsa["jsa_rows"][1]["job_step"], "Enter Work Pitch")
         self.assertEqual(p1_jsa["jsa_rows"][1]["step_number"], 1)
         self.assertEqual(p1_jsa["jsa_rows"][1]["potential_hazards"], "Slip, trip and fall hazards")
@@ -476,6 +476,30 @@ class SafetyStoreTests(unittest.TestCase):
         self.assertIn("FRM-GEA-SAF-085", jsa_html)
         self.assertIn("01-ML1-001 — Basket Drop / Marriage Deck", jsa_html)
         self.assertIn("Slip, trip and fall hazards", jsa_html)
+        from utils.ppe_poster import (
+            build_jsa_poster_print_card_html,
+            build_ppe_poster_print_card_html,
+            render_printable_safety_poster_deck,
+        )
+        p1_ppe = store.pitch_ppe_poster_summary(
+            self.project_id, self.scenario_id, "pitch-jsa-1"
+        )[0]
+        jsa_card = build_jsa_poster_print_card_html(p1_jsa)
+        ppe_card = build_ppe_poster_print_card_html(p1_ppe)
+        deck_html = render_printable_safety_poster_deck(
+            [jsa_card, ppe_card],
+            poster_mode="both",
+            paper_size="tabloid",
+            title="Test Multi-Poster Deck",
+        )
+        self.assertIn("JOB SAFETY ANALYSIS", deck_html)
+        self.assertIn("MINIMUM PPE REQUIREMENTS", deck_html)
+        self.assertIn("Print Physical Paper Copies", deck_html)
+        self.assertIn("Save as PDF", deck_html)
+        self.assertIn("Download HTML", deck_html)
+        self.assertIn("zoomed-scroll", jsa_html)
+        self.assertIn("overflowX", jsa_html)
+        self.assertIn("overflowY", jsa_html)
         self.assertIn("Put on PPE", jsa_html)
 
         # Now rebalance/move 'safety-work' ('ye-jsa-2') to 'pitch-jsa-2'
@@ -569,6 +593,14 @@ class SafetyStoreTests(unittest.TestCase):
         p1_sum = store.process_pitch_visual_summary(self.project_id, self.scenario_id, "pitch-1")
         p1_ppe_names = [t["name"] for t in p1_sum["tools"] if t.get("is_ppe")]
         self.assertEqual(p1_ppe_names, ["Cut Level 4 Gloves", "Safety Glasses"])
+        self.assertTrue(p1_sum["is_barney_zone"])
+        self.assertEqual(p1_sum["barney_zone_names"], ["Cut Level 4 Gloves"])
+        self.assertEqual(len(p1_sum["alerts"]["safety"]), 1)
+        self.assertTrue(p1_sum["alerts"]["safety"][0]["barney_zone"])
+        from utils.process_pitch_visual import render_pitch_canvas
+        p1_slide_html = render_pitch_canvas(p1_sum, p1_sum["elements"])
+        self.assertIn("alert-block barney-zone safety", p1_slide_html)
+        self.assertIn("Barney Zone (Cut Level 4 Gloves)", p1_slide_html)
 
         # Now move Step B ('safety-work' / 'ye-2') to pitch-2
         with store.connection() as conn:
@@ -588,6 +620,20 @@ class SafetyStoreTests(unittest.TestCase):
         p2_sum_after = store.process_pitch_visual_summary(self.project_id, self.scenario_id, "pitch-2")
         p2_ppe_after = [t["name"] for t in p2_sum_after["tools"] if t.get("is_ppe")]
         self.assertEqual(p2_ppe_after, ["Cut Level 4 Gloves", "Safety Glasses"])
+        # Pitch 1 now has ONLY standard PPE -> not a Barney Zone and NO safety alert on PAAG!
+        self.assertFalse(p1_sum_after["is_barney_zone"])
+        self.assertEqual(p1_sum_after["alerts"]["safety"], [])
+        p1_after_slide_html = render_pitch_canvas(p1_sum_after, p1_sum_after["elements"])
+        self.assertIn("alert-block clear safety", p1_after_slide_html)
+        # Pitch 2 now has Cut Level 4 Gloves -> flagged as a purple Barney Zone on PAAG!
+        self.assertTrue(p2_sum_after["is_barney_zone"])
+        self.assertEqual(p2_sum_after["barney_zone_names"], ["Cut Level 4 Gloves"])
+        self.assertEqual(len(p2_sum_after["alerts"]["safety"]), 1)
+        p2_after_slide_html = render_pitch_canvas(p2_sum_after, p2_sum_after["elements"])
+        self.assertIn("alert-block barney-zone safety", p2_after_slide_html)
+        crit_tags = store.work_element_criticality(self.project_id, self.scenario_id)
+        self.assertEqual(crit_tags["ctq-work"], [])
+        self.assertEqual(crit_tags["safety-work"], ["Barney Zone"])
 
         # Verify poster header overrides and HTML generation
         store.save_pitch_ppe_poster_overrides(

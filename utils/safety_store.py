@@ -17,7 +17,7 @@ PPE_ICONS_DIR = ASSETS_DIR / "ppe_icons"
 JSA_ICONS_DIR = ASSETS_DIR / "jsa_icons"
 EHS_LOGO_PATH = ASSETS_DIR / "ehs_icon" / "LOGO.png"
 
-_SAFETY_STORE_HOT_RELOAD_REV = 5
+_SAFETY_STORE_HOT_RELOAD_REV = 6
 
 STANDARD_BASELINE_PPE: list[str] = [
     "Cut Level 2 Gloves",
@@ -510,6 +510,43 @@ def get_ppe_catalog_item(name: object) -> dict[str, Any] | None:
     return _PPE_BY_CASEFOLD.get(norm.casefold())
 
 
+_STANDARD_BASELINE_PPE_CASEFOLD: frozenset[str] = frozenset(
+    n.casefold() for n in STANDARD_BASELINE_PPE
+)
+
+
+def is_barney_zone_ppe_item(name: object) -> bool:
+    """Return True if a PPE item is outside the 3 standard baseline PPE items
+    (Safety Glasses, Sturdy Closed Toe and Heel Shoes, Cut Level 2 Gloves)."""
+    canon = normalize_ppe_name(name)
+    if not canon:
+        return False
+    return canon.casefold() not in _STANDARD_BASELINE_PPE_CASEFOLD
+
+
+def extract_barney_zone_ppe(raw_ppe_values: Iterable[object] | object) -> list[str]:
+    """Return deduplicated list of non-standard (Barney Zone) PPE names from raw PPE input."""
+    flat_names: list[str] = []
+    if isinstance(raw_ppe_values, (str, bytes)):
+        flat_names.extend(parse_ppe(raw_ppe_values))
+    elif isinstance(raw_ppe_values, Iterable):
+        for entry in raw_ppe_values:
+            flat_names.extend(parse_ppe(entry))
+    else:
+        flat_names.extend(parse_ppe(raw_ppe_values))
+    barney_names: list[str] = []
+    seen_canon: set[str] = set()
+    for raw_name in flat_names:
+        canon = normalize_ppe_name(raw_name)
+        if not canon or not is_barney_zone_ppe_item(canon):
+            continue
+        ckey = canon.casefold()
+        if ckey not in seen_canon:
+            seen_canon.add(ckey)
+            barney_names.append(canon)
+    return barney_names
+
+
 def parse_ppe(val: object) -> list[str]:
     """Parse stored PPE value into a deduplicated list of strings."""
     if val is None:
@@ -673,6 +710,7 @@ def resolve_pitch_ppe_rollup(raw_ppe_values: Iterable[object] | object) -> dict[
                     "mitigation": str(cat_item["mitigation"]),
                     "category_group": str(cat_item["category_group"]),
                     "is_catalog": True,
+                    "is_barney_zone_ppe": is_barney_zone_ppe_item(cat_item["name"]),
                 }
             )
 
@@ -692,6 +730,7 @@ def resolve_pitch_ppe_rollup(raw_ppe_values: Iterable[object] | object) -> dict[
                     "mitigation": f"Correctly wear approved {name.upper()}.",
                     "category_group": "",
                     "is_catalog": False,
+                    "is_barney_zone_ppe": is_barney_zone_ppe_item(name),
                 }
             )
 
@@ -699,7 +738,16 @@ def resolve_pitch_ppe_rollup(raw_ppe_values: Iterable[object] | object) -> dict[
     effective_canonical_names = [item["canonical_name"] for item in effective_items]
     baseline_set = {n.casefold() for n in STANDARD_BASELINE_PPE}
     effective_set = {n.casefold() for n in effective_canonical_names}
-    is_standard_mode = bool(effective_set == baseline_set)
+    barney_zone_items = [item for item in effective_items if item.get("is_barney_zone_ppe")]
+    barney_zone_names = [str(item["name"]) for item in barney_zone_items]
+    seen_barney_casefold = {str(item["canonical_name"]).casefold() for item in barney_zone_items}
+    for raw_n in raw_unique_names:
+        if is_barney_zone_ppe_item(raw_n) and raw_n.casefold() not in seen_barney_casefold:
+            seen_barney_casefold.add(raw_n.casefold())
+            barney_zone_names.append(canonical_to_display.get(raw_n.casefold(), raw_n))
+    is_barney_zone = bool(barney_zone_names)
+    is_standard_mode = bool(effective_set == baseline_set and not is_barney_zone)
+    is_standard_only = bool(effective_set and effective_set.issubset(baseline_set) and not is_barney_zone)
 
     return {
         "effective_names": effective_names,
@@ -711,6 +759,10 @@ def resolve_pitch_ppe_rollup(raw_ppe_values: Iterable[object] | object) -> dict[
         "raw_unique_names": raw_unique_names,
         "is_standard_mode": is_standard_mode,
         "is_standard_baseline": is_standard_mode,
+        "is_standard_only": is_standard_only,
+        "is_barney_zone": is_barney_zone,
+        "barney_zone_names": barney_zone_names,
+        "barney_zone_items": barney_zone_items,
     }
 
 
@@ -891,12 +943,15 @@ def safety_requirements(
         diffs = format_process_snapshot_diff(d["source_snapshot_json"], live_snap)
         d["upstream_changed"] = bool(diffs)
         d["upstream_diff_summary"] = " · ".join(diffs)
+        barney_ppe = extract_barney_zone_ppe(d["ppe"])
+        d["is_barney_zone"] = bool(barney_ppe)
+        d["barney_zone_ppe"] = barney_ppe
         if diffs:
             d["sync_status"] = "⚠️ Upstream change"
         elif not d["ppe"]:
             d["sync_status"] = "⚠️ Needs PPE"
         else:
-            d["sync_status"] = "Synced"
+            d["sync_status"] = "🟣 Barney Zone" if barney_ppe else "Synced"
         result_rows.append(d)
 
     if include_unassigned_steps:
@@ -1530,6 +1585,10 @@ def pitch_ppe_poster_summary(
                 "raw_unique_ppe_names": rollup["raw_unique_names"],
                 "is_standard_mode": rollup["is_standard_mode"],
                 "is_standard_baseline": rollup["is_standard_mode"],
+                "is_standard_only": rollup["is_standard_only"],
+                "is_barney_zone": rollup["is_barney_zone"],
+                "barney_zone_names": rollup["barney_zone_names"],
+                "barney_zone_items": rollup["barney_zone_items"],
             }
         )
     return summaries
@@ -1965,6 +2024,10 @@ def pitch_jsa_poster_summary(
                 "effective_ppe_names": rollup["effective_names"],
                 "overrides": rollup["overrides"],
                 "is_standard_baseline": rollup["is_standard_mode"],
+                "is_standard_only": rollup["is_standard_only"],
+                "is_barney_zone": rollup["is_barney_zone"],
+                "barney_zone_names": rollup["barney_zone_names"],
+                "barney_zone_items": rollup["barney_zone_items"],
             }
         )
     return summaries
@@ -3082,6 +3145,7 @@ __domain_exports__ = [
     'tag_ppe_to_work_elements', 'update_ppe_item_element_tags_on_pitch',
     'derive_ppe_hazards_and_actions',
     'normalize_ppe_name', 'get_ppe_catalog_item',
+    'is_barney_zone_ppe_item', 'extract_barney_zone_ppe',
     'PPE_CATALOG', 'STANDARD_BASELINE_PPE', 'STANDARD_PPE_OPTIONS',
     'JSA_HAZARD_PRESETS', 'JSA_ACTION_PRESETS',
     'PPE_ICONS_DIR', 'JSA_ICONS_DIR', 'EHS_LOGO_PATH',

@@ -901,7 +901,12 @@ def render_pitch_canvas(
             img_url = _media_data_url(img_path)
             if img_url:
                 ppe_img_html = f'<img src="{img_url}" alt="{t_name}" class="ppe-inline-icon" /> '
-        ppe_badge = '<span class="badge-ppe">PPE</span> ' if is_ppe else ''
+        is_barney_ppe = bool(tool.get("is_barney_zone_ppe", False))
+        ppe_badge = (
+            '<span class="badge-ppe barney-zone">🟣 Barney Zone PPE</span> '
+            if (is_ppe and is_barney_ppe)
+            else ('<span class="badge-ppe">PPE</span> ' if is_ppe else '')
+        )
         tier_badge = f'<span class="badge-tier" style="font-size:0.68rem;background:#e2e8f0;color:#334155;padding:1px 4px;border-radius:3px;margin-right:4px;">{t_tier}</span> ' if t_tier else ''
         t_notes = _text(tool.get("notes") or "")
         title_attr = f"{t_summary} — {t_notes}" if t_notes else t_summary
@@ -1599,6 +1604,40 @@ def render_pitch_canvas(
     base_task_count = len(all_pitch_elements) if all_pitch_elements else len(set(step_num_by_wid.values()))
     alert_blocks_html: list[str] = []
     for cat_name, display_name, cat_key, page_slug, cat_list in alert_categories:
+        cat_list = list(cat_list or [])
+        pitch_barney_names = list(
+            pitch.get("barney_zone_names")
+            or (pitch.get("ppe_rollup") or {}).get("barney_zone_names")
+            or []
+        )
+        barney_items_in_cat = [
+            item for item in cat_list
+            if item.get("barney_zone")
+            or str(item.get("label") or "").strip().lower().startswith("barney zone")
+        ]
+        is_barney_pitch = bool(
+            cat_key == "safety"
+            and (
+                pitch.get("is_barney_zone")
+                or (pitch.get("ppe_rollup") or {}).get("is_barney_zone")
+                or barney_items_in_cat
+            )
+        )
+        if is_barney_pitch and not barney_items_in_cat:
+            bz_label = (
+                f"Barney Zone: {', '.join(pitch_barney_names)}"
+                if pitch_barney_names
+                else "Barney Zone: Special PPE required"
+            )
+            bz_item = {
+                "kind": "barney_zone",
+                "barney_zone": True,
+                "ppe_items": pitch_barney_names,
+                "label": bz_label,
+                "detail": f"This pitch requires non-standard Barney Zone PPE ({', '.join(pitch_barney_names) or 'special PPE'}).",
+            }
+            cat_list = [bz_item, *cat_list]
+            barney_items_in_cat = [bz_item]
         if cat_list:
             missing_ppe_items = [
                 item for item in cat_list
@@ -1608,7 +1647,30 @@ def render_pitch_canvas(
                 item for item in cat_list
                 if not str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
             ]
-            if missing_ppe_items:
+            if cat_key == "safety" and is_barney_pitch:
+                bz_names = list(pitch_barney_names)
+                if not bz_names:
+                    for b_it in barney_items_in_cat:
+                        for p_n in b_it.get("ppe_items") or []:
+                            if p_n and p_n not in bz_names:
+                                bz_names.append(str(p_n))
+                bz_joined = ", ".join(bz_names)
+                bz_summary = (
+                    f"🟣 Barney Zone ({bz_joined})"
+                    if bz_joined and len(bz_joined) <= 26
+                    else (
+                        f"🟣 Barney Zone ({len(bz_names)} special PPE)"
+                        if bz_names
+                        else "🟣 Barney Zone"
+                    )
+                )
+                if missing_ppe_items:
+                    eff_total_tasks = max(base_task_count, len(missing_ppe_items))
+                    assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
+                    items_str = f"{bz_summary} · No PPE ({assigned_ppe_tasks}/{eff_total_tasks})"
+                else:
+                    items_str = bz_summary
+            elif missing_ppe_items:
                 eff_total_tasks = max(base_task_count, len(missing_ppe_items))
                 assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
                 items_str = f"No PPE assigned ({assigned_ppe_tasks}/{eff_total_tasks} tasks)"
@@ -1633,7 +1695,7 @@ def render_pitch_canvas(
                 item_detail = html.escape(_text(item.get("detail") or ""))
                 popover_items_html.append(
                     f"""
-                    <div class="popover-item active">
+                    <div class="popover-item {'barney-zone' if (item.get('barney_zone') or str(item.get('label') or '').strip().lower().startswith('barney zone')) else 'active'}">
                       <div class="popover-item-title">{item_label}</div>
                       {f'<div class="popover-item-desc">{item_detail}</div>' if item_detail and item_detail != item_label else ''}
                     </div>
@@ -1656,7 +1718,7 @@ def render_pitch_canvas(
             <div class="alert-popover" role="tooltip">
               <div class="popover-header">
                 <span class="popover-category">{display_name} Alerts</span>
-                <span class="popover-count-badge active">{len(cat_list)} flagged</span>
+                <span class="popover-count-badge {'barney-zone' if is_barney_pitch else 'active'}">{'🟣 Barney Zone' if (is_barney_pitch and not missing_ppe_items) else f'{len(cat_list)} flagged'}</span>
               </div>
               <div class="popover-items-list">
                 {"".join(popover_items_html)}
@@ -1669,7 +1731,7 @@ def render_pitch_canvas(
 
             alert_blocks_html.append(
                 f"""
-                <div class="alert-block active {cat_key}" title="{html.escape(first_detail)}">
+                <div class="alert-block {'barney-zone' if is_barney_pitch else 'active'} {cat_key}" title="{html.escape(first_detail)}">
                   <strong>{cat_name}:</strong> <span class="alert-summary">{items_str}</span>
                   {popover_html}
                 </div>
@@ -3516,6 +3578,29 @@ def render_pitch_canvas(
         background: #fecaca;
         border-color: #ef4444;
       }}
+      .alert-block.barney-zone {{
+        background: #f3e8ff;
+        color: #6b21a8;
+        font-weight: 700;
+        border: 1.5px solid #a855f7;
+      }}
+      .alert-block.barney-zone strong {{
+        color: #581c87;
+      }}
+      .alert-block.barney-zone:hover {{
+        background: #e9d5ff;
+        border-color: #9333ea;
+      }}
+      .badge-ppe.barney-zone {{
+        background: #f3e8ff !important;
+        color: #6b21a8 !important;
+        border: 1px solid #c084fc !important;
+        font-weight: 700;
+      }}
+      .alert-block.active:hover {{
+        background: #fecaca;
+        border-color: #ef4444;
+      }}
       .alert-block.clear {{
         color: #475569;
         border: 1px solid transparent;
@@ -3590,6 +3675,11 @@ def render_pitch_canvas(
         padding: 2px 6px;
         border-radius: 10px;
       }}
+      .popover-count-badge.barney-zone {{
+        background: #f3e8ff;
+        color: #6b21a8;
+        border: 1px solid #c084fc;
+      }}
       .popover-count-badge.active {{
         background: #fee2e2;
         color: #991b1b;
@@ -3613,6 +3703,14 @@ def render_pitch_canvas(
         border: 1px solid #e2e8f0;
         border-radius: 5px;
         padding: 6px 8px;
+      }}
+      .popover-item.barney-zone {{
+        background: #faf5ff;
+        border-color: #e9d5ff;
+        border-left: 3px solid #9333ea;
+      }}
+      .popover-item.barney-zone .popover-item-title {{
+        color: #581c87;
       }}
       .popover-item.active {{
         border-left: 3px solid #ef4444;
@@ -5381,6 +5479,34 @@ def _render_single_paag_pptx_slide(
     base_task_count = len(all_pitch_elements) if all_pitch_elements else len(set(step_num_by_wid.values()))
     alert_col_w = (iw - 0.08 * sc) / 5.0
     for idx_a, (cat_name, cat_key, cat_list) in enumerate(alert_categories):
+        cat_list = list(cat_list or [])
+        pitch_barney_names = list(
+            pitch.get("barney_zone_names")
+            or (pitch.get("ppe_rollup") or {}).get("barney_zone_names")
+            or []
+        )
+        barney_items_in_cat = [
+            item for item in cat_list
+            if item.get("barney_zone")
+            or str(item.get("label") or "").strip().lower().startswith("barney zone")
+        ]
+        is_barney_pitch = bool(
+            cat_key == "safety"
+            and (
+                pitch.get("is_barney_zone")
+                or (pitch.get("ppe_rollup") or {}).get("is_barney_zone")
+                or barney_items_in_cat
+            )
+        )
+        if is_barney_pitch and not barney_items_in_cat:
+            bz_item = {
+                "kind": "barney_zone",
+                "barney_zone": True,
+                "ppe_items": pitch_barney_names,
+                "label": f"Barney Zone: {', '.join(pitch_barney_names)}" if pitch_barney_names else "Barney Zone",
+            }
+            cat_list = [bz_item, *cat_list]
+            barney_items_in_cat = [bz_item]
         ax = ix + 0.04 * sc + idx_a * alert_col_w
         ay = alerts_y + 0.025 * sc
         aw = alert_col_w - 0.04 * sc
@@ -5394,7 +5520,30 @@ def _render_single_paag_pptx_slide(
                 item for item in cat_list
                 if not str(item.get("label") or "").strip().lower().startswith("no ppe assigned")
             ]
-            if missing_ppe_items:
+            if cat_key == "safety" and is_barney_pitch:
+                bz_names = list(pitch_barney_names)
+                if not bz_names:
+                    for b_it in barney_items_in_cat:
+                        for p_n in b_it.get("ppe_items") or []:
+                            if p_n and p_n not in bz_names:
+                                bz_names.append(str(p_n))
+                bz_joined = ", ".join(bz_names)
+                bz_summary = (
+                    f"🟣 Barney Zone ({bz_joined})"
+                    if bz_joined and len(bz_joined) <= 26
+                    else (
+                        f"🟣 Barney Zone ({len(bz_names)} special PPE)"
+                        if bz_names
+                        else "🟣 Barney Zone"
+                    )
+                )
+                if missing_ppe_items:
+                    eff_total_tasks = max(base_task_count, len(missing_ppe_items))
+                    assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
+                    items_str = f"{bz_summary} · No PPE ({assigned_ppe_tasks}/{eff_total_tasks})"
+                else:
+                    items_str = bz_summary
+            elif missing_ppe_items:
                 eff_total_tasks = max(base_task_count, len(missing_ppe_items))
                 assigned_ppe_tasks = max(0, eff_total_tasks - len(missing_ppe_items))
                 items_str = f"No PPE assigned ({assigned_ppe_tasks}/{eff_total_tasks} tasks)"
@@ -5422,14 +5571,16 @@ def _render_single_paag_pptx_slide(
                     paragraphs=[
                         _pptx_para_xml(
                             [
-                                _pptx_run_xml(f"{cat_name}: ", pt=7.2 * sc, color="991B1B", bold=True),
-                                _pptx_run_xml(items_str, pt=7.2 * sc, color="B91C1C", bold=True),
+                                _pptx_run_xml(f"{cat_name}: ", pt=7.2 * sc, color="581C87" if is_barney_pitch else "991B1B", bold=True),
+                                _pptx_run_xml(items_str, pt=7.2 * sc, color="6B21A8" if is_barney_pitch else "B91C1C", bold=True),
+
                             ],
                             align="l",
                         )
                     ],
-                    fill_hex="FEF2F2",
-                    line_hex="FCA5A5",
+                    fill_hex="F3E8FF" if is_barney_pitch else "FEF2F2",
+                    line_hex="A855F7" if is_barney_pitch else "FCA5A5",
+
                     line_pt=0.75,
                     geom="roundRect",
                     round_adj=15000,
@@ -6580,4 +6731,4 @@ def render_paag_pptx_deck(
     return buf.getvalue()
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 15
+_PROCESS_PITCH_VISUAL_REV_20261102 = 16

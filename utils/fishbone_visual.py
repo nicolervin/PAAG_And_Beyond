@@ -23,6 +23,7 @@ _HTML = """
       <button id="save-fishbone-btn" type="button" title="Save and refresh fishbone changes" class="btn-tool" style="background:#16a34a; color:white; border-color:#16a34a; font-weight:700;">💾 Save &amp; Refresh</button>
       <button id="print-fishbone-btn" type="button" title="Print the fishbone diagram with readable part numbers" class="btn-tool">🖨️ Print</button>
       <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
+      <button id="add-sticky-note-btn" type="button" title="Add a digital sticky note to the fishbone canvas" class="btn-tool" style="background:#eab308; color:#1e293b; border-color:#ca8a04; font-weight:700;">📝 Add Sticky Note</button>
       <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
       <button id="auto-arrange" type="button" title="Auto-arrange sections" class="btn-tool">⚡ Auto-arrange</button>
       <button id="clear-fishbone-btn" type="button" title="Clear parts and/or delete sections from Fishbone" class="btn-tool" style="background:#dc2626; color:white; border-color:#dc2626; font-weight:700;">🗑️ Clear</button>
@@ -66,6 +67,7 @@ _HTML = """
         </defs>
         <g id="fishbone-world"></g>
       </svg>
+      <div id="sticky-notes-layer" class="sticky-notes-layer"></div>
       <div id="fishbone-tooltip" class="fishbone-tooltip" hidden>
         <div class="tooltip-header">
           <div class="tooltip-media">
@@ -247,7 +249,7 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag part onto another part to stack as model variants (click N× badge to edit variant ties) · Drag circle handle or edge snap nodes to connect · Click arrow or ✎ to edit/delete</div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag part onto another part to stack as model variants (click N× badge to edit variant ties) · Click 📝 Add Sticky Note to add resizable/rotatable notes · Drag circle handle or edge snap nodes to connect · Click arrow or ✎ to edit/delete</div>
     </div>
   </div>
 </div>
@@ -460,6 +462,264 @@ _CSS = """
 
 .fishbone-shell:fullscreen { width: 100vw; height: 100vh; min-height: 0; border: 0; border-radius: 0; }
 .fishbone-shell:fullscreen .fishbone-viewport { min-height: 0; }
+
+/* Digital Sticky Notes Layer */
+.sticky-notes-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+  z-index: 12;
+}
+.sticky-note-card {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.22), 0 2px 5px rgba(15, 23, 42, 0.14);
+  user-select: none;
+  transition: box-shadow 0.15s ease;
+  min-width: 110px;
+  min-height: 90px;
+  --note-bg: #fef08a;
+  --note-header: #fde047;
+  --note-border: #eab308;
+  --note-text: #1e293b;
+  background: var(--note-bg);
+  border: 1.5px solid var(--note-border);
+  color: var(--note-text);
+}
+.sticky-note-card:hover,
+.sticky-note-card:focus-within {
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.3), 0 3px 8px rgba(15, 23, 42, 0.18);
+  z-index: 18;
+}
+.sticky-note-card.color-yellow { --note-bg: #fef08a; --note-header: #fde047; --note-border: #eab308; --note-text: #1e293b; }
+.sticky-note-card.color-pink   { --note-bg: #fbcfe8; --note-header: #f9a8d4; --note-border: #ec4899; --note-text: #1e293b; }
+.sticky-note-card.color-blue   { --note-bg: #bae6fd; --note-header: #7dd3fc; --note-border: #0284c7; --note-text: #0f172a; }
+.sticky-note-card.color-green  { --note-bg: #bbf7d0; --note-header: #86efac; --note-border: #16a34a; --note-text: #0f172a; }
+.sticky-note-card.color-orange { --note-bg: #fed7aa; --note-header: #fdba74; --note-border: #ea580c; --note-text: #1e293b; }
+.sticky-note-card.color-purple { --note-bg: #e9d5ff; --note-header: #d8b4fe; --note-border: #9333ea; --note-text: #1e293b; }
+
+/* Diamond orientation: true rotated diamond silhouette that scales independently in X and Y */
+.sticky-note-card.orientation-diamond {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.sticky-note-card.orientation-diamond:hover,
+.sticky-note-card.orientation-diamond:focus-within {
+  box-shadow: none;
+}
+.sticky-diamond-svg {
+  display: none;
+}
+.sticky-note-card.orientation-diamond .sticky-diamond-svg {
+  display: block;
+  position: absolute;
+  left: -20%;
+  top: -20%;
+  width: 140%;
+  height: 140%;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+  filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.24));
+}
+.sticky-note-card.orientation-diamond .sticky-diamond-poly {
+  fill: var(--note-bg);
+  stroke: var(--note-border);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  pointer-events: auto;
+}
+.sticky-note-card.orientation-diamond .sticky-note-header {
+  background: rgba(255, 255, 255, 0.36);
+  border-bottom: 1px dashed var(--note-border);
+  border-radius: 4px;
+}
+
+.sticky-note-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--note-header);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 5px 5px 0 0;
+  cursor: grab;
+  flex-shrink: 0;
+}
+.sticky-note-header:active {
+  cursor: grabbing;
+}
+.sticky-note-grip {
+  font-size: 0.72rem;
+  font-weight: 800;
+  opacity: 0.65;
+  letter-spacing: -1px;
+  padding-right: 2px;
+  cursor: grab;
+}
+.sticky-color-swatches {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.sticky-color-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.35);
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.1s ease, border-color 0.1s ease;
+}
+.sticky-color-dot:hover {
+  transform: scale(1.22);
+}
+.sticky-color-dot.active {
+  border: 2px solid #0f172a;
+  transform: scale(1.15);
+}
+.sticky-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+.sticky-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 1px solid rgba(15, 23, 42, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  color: #0f172a;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.sticky-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: #0f172a;
+}
+.sticky-icon-btn.delete-btn:hover {
+  background: #ef4444;
+  color: white;
+  border-color: #dc2626;
+}
+.sticky-note-textarea {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--note-text);
+  font-family: inherit;
+  font-size: 0.83rem;
+  font-weight: 500;
+  line-height: 1.35;
+  padding: 6px 8px 2px 8px;
+  user-select: text;
+  cursor: text;
+}
+.sticky-note-textarea::placeholder {
+  color: rgba(15, 23, 42, 0.45);
+  font-style: italic;
+}
+.sticky-note-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 2px 14px 4px 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: rgba(15, 23, 42, 0.72);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+.sticky-note-size-pill {
+  font-size: 0.63rem;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  background: rgba(255, 255, 255, 0.65);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.sticky-note-card.resizing .sticky-note-size-pill,
+.sticky-note-card:hover .sticky-note-size-pill {
+  opacity: 0.85;
+}
+.sticky-note-author {
+  margin-left: auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* 2-Direction Resize Handles (Width, Height, and 2D Corner) */
+.sticky-resize-e {
+  position: absolute;
+  top: 24px;
+  right: -4px;
+  width: 8px;
+  bottom: 12px;
+  cursor: ew-resize;
+  z-index: 4;
+}
+.sticky-resize-s {
+  position: absolute;
+  left: 8px;
+  right: 12px;
+  bottom: -4px;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 4;
+}
+.sticky-resize-se {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  z-index: 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 1px;
+}
+.sticky-resize-se::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgba(15, 23, 42, 0.45);
+  border-bottom: 2px solid rgba(15, 23, 42, 0.45);
+}
 """
 
 _JS = """
@@ -799,6 +1059,7 @@ export default function renderFishbone(component) {
   const viewport = parentElement.querySelector(".fishbone-viewport")
   const svg = parentElement.querySelector("#fishbone-svg")
   const world = parentElement.querySelector("#fishbone-world")
+  const stickyNotesLayer = parentElement.querySelector("#sticky-notes-layer")
   const tooltip = parentElement.querySelector("#fishbone-tooltip")
   const tooltipImage = parentElement.querySelector("#tooltip-image")
   const tooltipNoImage = parentElement.querySelector("#tooltip-no-image")
@@ -843,6 +1104,7 @@ export default function renderFishbone(component) {
   if (assemblyModeGroupOnly) assemblyModeGroupOnly.onchange = updateAssemblyModalMode
 
   const addSectionBtn = parentElement.querySelector("#add-section-btn")
+  const addStickyNoteBtn = parentElement.querySelector("#add-sticky-note-btn")
   const addSectionModal = parentElement.querySelector("#add-section-modal")
   const addSectionName = parentElement.querySelector("#add-section-name")
   const addSectionType = parentElement.querySelector("#add-section-type")
@@ -968,8 +1230,10 @@ export default function renderFishbone(component) {
   const parts = data.parts || []
   const paletteItems = data.palette_items || []
   const allSections = data.all_sections || sections
+  const stickyNotes = (data.sticky_notes || []).map(sn => ({ ...sn }))
+  const currentEditor = String(data.current_editor || "").trim() || "Collaborator"
 
-  const dataSignature = `${sections.map(s => `${s.id}:${s.name}:${s.type}:${s.parent_id || ''}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${paletteItems.length}`
+  const dataSignature = `${sections.map(s => `${s.id}:${s.name}:${s.type}:${s.parent_id || ''}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${stickyNotes.map(sn => `${sn.id}:${sn.canvas_x}:${sn.canvas_y}:${sn.width}:${sn.height}:${sn.color}:${sn.orientation}:${sn.text || ''}:${sn.author_name || ''}`).join("|")}::${paletteItems.length}`
 
   // Track which sections each part_id is placed in (and individual cards/uses per section)
   const partSectionsMap = new Map()
@@ -1017,7 +1281,8 @@ export default function renderFishbone(component) {
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
   }
-  summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts`
+  const stickySummarySuffix = stickyNotes.length > 0 ? ` · ${stickyNotes.length} sticky note${stickyNotes.length === 1 ? "" : "s"}` : ""
+  summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts${stickySummarySuffix}`
 
   // Palette toggle
   togglePaletteBtn.onclick = () => {
@@ -4717,8 +4982,341 @@ export default function renderFishbone(component) {
   // Viewport Pan and Zoom
   function updateTransform() {
     world.setAttribute("transform", `translate(${state.x} ${state.y}) scale(${state.scale})`)
+    if (stickyNotesLayer) {
+      stickyNotesLayer.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`
+    }
     saveFishboneView(storageKey, state)
   }
+
+  const STICKY_COLORS = [
+    { id: "yellow", hex: "#fde047", label: "Yellow" },
+    { id: "pink", hex: "#f9a8d4", label: "Pink" },
+    { id: "blue", hex: "#7dd3fc", label: "Blue" },
+    { id: "green", hex: "#86efac", label: "Green" },
+    { id: "orange", hex: "#fdba74", label: "Orange" },
+    { id: "purple", hex: "#d8b4fe", label: "Purple" },
+  ]
+
+  function renderStickyNotes() {
+    if (!stickyNotesLayer) return
+    stickyNotesLayer.replaceChildren()
+
+    stickyNotes.forEach((note) => {
+      const noteId = String(note.id || "")
+      if (!noteId) return
+      const color = STICKY_COLORS.some(c => c.id === note.color) ? note.color : "yellow"
+      const orient = note.orientation === "diamond" ? "diamond" : "square"
+      const cx = Number.isFinite(Number(note.canvas_x)) ? Number(note.canvas_x) : 140
+      const cy = Number.isFinite(Number(note.canvas_y)) ? Number(note.canvas_y) : 140
+      const w = clamp(Number(note.width) || 200, 110, 900)
+      const h = clamp(Number(note.height) || 160, 90, 900)
+      const author = String(note.author_name || currentEditor || "Collaborator").trim() || "Collaborator"
+
+      const card = document.createElement("div")
+      card.className = `sticky-note-card color-${color} orientation-${orient}`
+      card.dataset.stickyId = noteId
+      card.style.left = `${cx}px`
+      card.style.top = `${cy}px`
+      card.style.width = `${w}px`
+      card.style.height = `${h}px`
+
+      // Diamond SVG background so diamond notes rotate 45deg visually and scale in 2 directions (width & height)
+      const diamondSvg = svgElement("svg", {
+        class: "sticky-diamond-svg",
+        viewBox: "0 0 100 100",
+        preserveAspectRatio: "none",
+      })
+      const diamondPoly = svgElement("polygon", {
+        class: "sticky-diamond-poly",
+        points: "50,0 100,50 50,100 0,50",
+      })
+      diamondSvg.appendChild(diamondPoly)
+      card.appendChild(diamondSvg)
+
+      const header = document.createElement("div")
+      header.className = "sticky-note-header"
+      header.title = "Drag to move sticky note"
+
+      const grip = document.createElement("span")
+      grip.className = "sticky-note-grip"
+      grip.textContent = "⋮⋮"
+      header.appendChild(grip)
+
+      const swatches = document.createElement("div")
+      swatches.className = "sticky-color-swatches"
+      STICKY_COLORS.forEach((c) => {
+        const dot = document.createElement("button")
+        dot.type = "button"
+        dot.className = `sticky-color-dot${c.id === color ? " active" : ""}`
+        dot.style.background = c.hex
+        dot.title = `Color: ${c.label}`
+        dot.onmousedown = (e) => e.stopPropagation()
+        dot.onclick = (e) => {
+          e.stopPropagation()
+          if (note.color === c.id) return
+          note.color = c.id
+          component.setTriggerValue("upsert_sticky_note", {
+            ...note,
+            color: c.id,
+            text: textarea.value,
+            author_name: note.author_name || author,
+          })
+        }
+        swatches.appendChild(dot)
+      })
+      header.appendChild(swatches)
+
+      const actions = document.createElement("div")
+      actions.className = "sticky-header-actions"
+
+      const orientBtn = document.createElement("button")
+      orientBtn.type = "button"
+      orientBtn.className = "sticky-icon-btn"
+      orientBtn.textContent = orient === "diamond" ? "⬜" : "❖"
+      orientBtn.title = orient === "diamond"
+        ? "Switch to normal rectangle/square orientation"
+        : "Rotate into a diamond shape"
+      orientBtn.onmousedown = (e) => e.stopPropagation()
+      orientBtn.onclick = (e) => {
+        e.stopPropagation()
+        const nextOrient = orient === "diamond" ? "square" : "diamond"
+        note.orientation = nextOrient
+        component.setTriggerValue("upsert_sticky_note", {
+          ...note,
+          orientation: nextOrient,
+          text: textarea.value,
+          author_name: note.author_name || author,
+        })
+      }
+      actions.appendChild(orientBtn)
+
+      const delBtn = document.createElement("button")
+      delBtn.type = "button"
+      delBtn.className = "sticky-icon-btn delete-btn"
+      delBtn.textContent = "×"
+      delBtn.title = "Delete sticky note"
+      delBtn.onmousedown = (e) => e.stopPropagation()
+      delBtn.onclick = (e) => {
+        e.stopPropagation()
+        component.setTriggerValue("delete_sticky_note", { id: noteId })
+      }
+      actions.appendChild(delBtn)
+
+      header.appendChild(actions)
+      card.appendChild(header)
+
+      const textarea = document.createElement("textarea")
+      textarea.className = "sticky-note-textarea"
+      textarea.placeholder = "Write sticky note..."
+      textarea.value = String(note.text || "")
+      let lastCommittedText = textarea.value
+      let debounceTimer = null
+
+      const commitTextChange = () => {
+        if (debounceTimer) {
+          clearTimeout(debounceTimer)
+          debounceTimer = null
+        }
+        if (textarea.value === lastCommittedText) return
+        lastCommittedText = textarea.value
+        note.text = textarea.value
+        note.author_name = currentEditor || author
+        authorSpan.textContent = `✍️ ${note.author_name}`
+        component.setTriggerValue("upsert_sticky_note", {
+          ...note,
+          text: note.text,
+          author_name: note.author_name,
+        })
+      }
+
+      textarea.onmousedown = (e) => e.stopPropagation()
+      textarea.onwheel = (e) => e.stopPropagation()
+      textarea.onkeydown = (e) => {
+        e.stopPropagation()
+        if (e.key === "Escape") {
+          textarea.blur()
+        }
+      }
+      textarea.oninput = () => {
+        note.text = textarea.value
+        note.author_name = currentEditor || author
+        authorSpan.textContent = `✍️ ${note.author_name}`
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(commitTextChange, 900)
+      }
+      textarea.onblur = () => {
+        commitTextChange()
+      }
+      card.appendChild(textarea)
+
+      const footer = document.createElement("div")
+      footer.className = "sticky-note-footer"
+
+      const sizePill = document.createElement("span")
+      sizePill.className = "sticky-note-size-pill"
+      sizePill.textContent = `${Math.round(w)}×${Math.round(h)}`
+      footer.appendChild(sizePill)
+
+      const authorSpan = document.createElement("span")
+      authorSpan.className = "sticky-note-author"
+      authorSpan.textContent = `✍️ ${author}`
+      authorSpan.title = `Edited by ${author}`
+      footer.appendChild(authorSpan)
+
+      card.appendChild(footer)
+
+      // Dragging the sticky note around the Fishbone screen
+      const startDragNote = (downEvt) => {
+        if (downEvt.button !== 0) return
+        downEvt.stopPropagation()
+        downEvt.preventDefault()
+        state.hasUserInteracted = true
+        const startClientX = downEvt.clientX
+        const startClientY = downEvt.clientY
+        const origX = Number(note.canvas_x) || cx
+        const origY = Number(note.canvas_y) || cy
+        let curX = origX
+        let curY = origY
+        let moved = false
+
+        const onMove = (moveEvt) => {
+          const dx = (moveEvt.clientX - startClientX) / (state.scale || 1)
+          const dy = (moveEvt.clientY - startClientY) / (state.scale || 1)
+          if (Math.abs(dx) > 1.5 || Math.abs(dy) > 1.5) moved = true
+          curX = Math.round(origX + dx)
+          curY = Math.round(origY + dy)
+          card.style.left = `${curX}px`
+          card.style.top = `${curY}px`
+        }
+        const onUp = () => {
+          window.removeEventListener("mousemove", onMove)
+          window.removeEventListener("mouseup", onUp)
+          if (moved) {
+            note.canvas_x = curX
+            note.canvas_y = curY
+            component.setTriggerValue("upsert_sticky_note", {
+              ...note,
+              canvas_x: curX,
+              canvas_y: curY,
+              text: textarea.value,
+              author_name: note.author_name || author,
+            })
+          }
+        }
+        window.addEventListener("mousemove", onMove)
+        window.addEventListener("mouseup", onUp)
+      }
+      header.onmousedown = startDragNote
+      diamondPoly.onmousedown = startDragNote
+
+      // 2-Direction Resize Handles: East (width), South (height), South-East (both width & height)
+      const attachResizeHandle = (handleEl, scaleX, scaleY) => {
+        handleEl.onmousedown = (downEvt) => {
+          if (downEvt.button !== 0) return
+          downEvt.stopPropagation()
+          downEvt.preventDefault()
+          state.hasUserInteracted = true
+          card.classList.add("resizing")
+          const startClientX = downEvt.clientX
+          const startClientY = downEvt.clientY
+          const origW = Number(note.width) || w
+          const origH = Number(note.height) || h
+          let curW = origW
+          let curH = origH
+          let resized = false
+
+          const onMove = (moveEvt) => {
+            const dx = (moveEvt.clientX - startClientX) / (state.scale || 1)
+            const dy = (moveEvt.clientY - startClientY) / (state.scale || 1)
+            if (scaleX) {
+              curW = Math.round(clamp(origW + dx, 110, 900))
+              card.style.width = `${curW}px`
+            }
+            if (scaleY) {
+              curH = Math.round(clamp(origH + dy, 90, 900))
+              card.style.height = `${curH}px`
+            }
+            if (curW !== origW || curH !== origH) resized = true
+            sizePill.textContent = `${curW}×${curH}`
+          }
+          const onUp = () => {
+            window.removeEventListener("mousemove", onMove)
+            window.removeEventListener("mouseup", onUp)
+            card.classList.remove("resizing")
+            if (resized) {
+              note.width = curW
+              note.height = curH
+              component.setTriggerValue("upsert_sticky_note", {
+                ...note,
+                width: curW,
+                height: curH,
+                text: textarea.value,
+                author_name: note.author_name || author,
+              })
+            }
+          }
+          window.addEventListener("mousemove", onMove)
+          window.addEventListener("mouseup", onUp)
+        }
+      }
+
+      const resizeE = document.createElement("div")
+      resizeE.className = "sticky-resize-e"
+      resizeE.title = "Drag to scale width horizontally"
+      attachResizeHandle(resizeE, true, false)
+      card.appendChild(resizeE)
+
+      const resizeS = document.createElement("div")
+      resizeS.className = "sticky-resize-s"
+      resizeS.title = "Drag to scale height vertically"
+      attachResizeHandle(resizeS, false, true)
+      card.appendChild(resizeS)
+
+      const resizeSE = document.createElement("div")
+      resizeSE.className = "sticky-resize-se"
+      resizeSE.title = "Drag corner to scale sticky note width and height"
+      attachResizeHandle(resizeSE, true, true)
+      card.appendChild(resizeSE)
+
+      stickyNotesLayer.appendChild(card)
+
+      if (state.focusStickyNoteId && state.focusStickyNoteId === noteId) {
+        state.focusStickyNoteId = null
+        requestAnimationFrame(() => {
+          textarea.focus()
+        })
+      }
+    })
+  }
+
+  if (addStickyNoteBtn) {
+    addStickyNoteBtn.onclick = () => {
+      const vRect = viewport.getBoundingClientRect()
+      const viewCenterW = vRect.width > 80 ? vRect.width / 2 : 360
+      const viewCenterH = vRect.height > 80 ? vRect.height / 2 : 240
+      const defaultW = 200
+      const defaultH = 160
+      const stagger = (stickyNotes.length % 6) * 24
+      const worldX = Math.round(((viewCenterW - state.x) / (state.scale || 1)) - defaultW / 2 + stagger)
+      const worldY = Math.round(((viewCenterH - state.y) / (state.scale || 1)) - defaultH / 2 + stagger)
+      const newId = `sn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      state.focusStickyNoteId = newId
+      component.setTriggerValue("upsert_sticky_note", {
+        id: newId,
+        section_id: null,
+        text: "",
+        author_name: currentEditor,
+        color: "yellow",
+        orientation: "square",
+        canvas_x: worldX,
+        canvas_y: worldY,
+        width: defaultW,
+        height: defaultH,
+      })
+    }
+  }
+
+  renderStickyNotes()
 
   function renderWorld() {
     renderFishbone(component)
@@ -4732,7 +5330,7 @@ export default function renderFishbone(component) {
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
 
-    if (sections.length === 0) {
+    if (sections.length === 0 && stickyNotes.length === 0) {
       minX = 140
       maxX = 540
       minY = 110
@@ -4755,6 +5353,16 @@ export default function renderFishbone(component) {
           minY = Math.min(minY, start.sy, end.sy)
           maxY = Math.max(maxY, start.sy, end.sy)
         }
+      })
+      stickyNotes.forEach(sn => {
+        const nx = Number(sn.canvas_x) || 0
+        const ny = Number(sn.canvas_y) || 0
+        const nw = Number(sn.width) || 200
+        const nh = Number(sn.height) || 160
+        minX = Math.min(minX, nx)
+        maxX = Math.max(maxX, nx + nw)
+        minY = Math.min(minY, ny)
+        maxY = Math.max(maxY, ny + nh)
       })
     }
 
@@ -5508,10 +6116,10 @@ export default function renderFishbone(component) {
 }
 """
 
-_FISHBONE_VISUAL_HOT_RELOAD_REV = 12
+_FISHBONE_VISUAL_HOT_RELOAD_REV = 13
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v47",
+    "paag_interactive_fishbone_builder_v48",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -5556,6 +6164,8 @@ def interactive_fishbone(
     parts: list[dict],
     palette_items: list[dict] | None = None,
     all_sections: list[dict] | None = None,
+    sticky_notes: list[dict] | None = None,
+    current_editor: str = "",
     *,
     key: str,
     on_create_section: Callable[[], None] | None = None,
@@ -5574,6 +6184,8 @@ def interactive_fishbone(
     on_move_part_assignment: Callable[[], None] | None = None,
     on_replicate_part_uses: Callable[[], None] | None = None,
     on_unstack_part_variant: Callable[[], None] | None = None,
+    on_upsert_sticky_note: Callable[[], None] | None = None,
+    on_delete_sticky_note: Callable[[], None] | None = None,
     on_undo_last_edit: Callable[[], None] | None = None,
     on_redo_last_edit: Callable[[], None] | None = None,
     on_discard_all_edits: Callable[[], None] | None = None,
@@ -5594,6 +6206,8 @@ def interactive_fishbone(
             "parts": parts,
             "palette_items": palette_items or [],
             "all_sections": all_sections or sections,
+            "sticky_notes": sticky_notes or [],
+            "current_editor": str(current_editor or "").strip(),
             "unsaved_count": int(unsaved_count or 0),
             "can_undo_last": bool(can_undo_last),
             "can_redo_last": bool(can_redo_last),
@@ -5617,6 +6231,8 @@ def interactive_fishbone(
         "on_move_part_assignment_change": on_move_part_assignment or _noop,
         "on_replicate_part_uses_change": on_replicate_part_uses or _noop,
         "on_unstack_part_variant_change": on_unstack_part_variant or _noop,
+        "on_upsert_sticky_note_change": on_upsert_sticky_note or _noop,
+        "on_delete_sticky_note_change": on_delete_sticky_note or _noop,
         "on_undo_last_edit_change": on_undo_last_edit or _noop,
         "on_redo_last_edit_change": on_redo_last_edit or _noop,
         "on_discard_all_edits_change": on_discard_all_edits or _noop,
