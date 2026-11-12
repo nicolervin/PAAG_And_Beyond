@@ -14,6 +14,7 @@ from utils.equipment_store import (
     UNIT_ORIENTATION_OPTIONS,
     attach_equipment_to_function,
     batch_assign_pitches_to_conveyor_zone,
+    clear_equipment_origin_flag,
     clone_equipment_scenario,
     conveyor_zones,
     delete_conveyor_zones,
@@ -22,9 +23,14 @@ from utils.equipment_store import (
     detach_equipment_from_function,
     equipment_assets,
     equipment_needs_vs_placements_matrix,
+    equipment_origin_flags,
     equipment_placement_detail,
+    equipment_placement_mismatches,
+    equipment_prerequisite_violations,
+    equipment_scenario_process_options,
     equipment_torque_published_specifications,
     equipment_types,
+    move_equipment_to_linked_pitch,
     save_conveyor_zone,
     save_equipment_placement,
     save_equipment_torque_requirements,
@@ -863,6 +869,398 @@ class EquipmentStoreTests(unittest.TestCase):
         self.assertEqual("Zone Alpha", cloned_zones.iloc[0]["name"])
         if pitch_map:
             self.assertEqual(pitch_map[p1], cloned_zones.iloc[0]["start_pitch_id"])
+
+    def test_equipment_assets_populates_linked_pitches_and_processes(self) -> None:
+        area_id = str(uuid4())
+        pitch_id = str(uuid4())
+        work_id = str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (area_id, self.project_id, self.scenario_id, "Main Line", now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Active', 1, ?)",
+                (pitch_id, self.project_id, area_id, "01-ML1-001", "Body Load", now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                (str(uuid4()), self.project_id, area_id, pitch_id, work_id, "Fasten wheel bolts", now),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([{"id": work_id, "station": "01-ML1-001", "operation": "Fasten wheel bolts", "sequence": 1, "pitch_id": pitch_id}]),
+        )
+
+        types = equipment_types(self.project_id)
+        torque_type_id = str(types.loc[types["label"].eq("Torque tool"), "id"].iloc[0])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [{
+                "id": "",
+                "equipment_type_id": torque_type_id,
+                "name": "DC Tool Detail Test",
+                "description": "",
+                "manufacturer": "",
+                "model": "",
+                "notes": "",
+                "pitch_id": "",
+            }],
+            "Tester",
+        )
+        eq_id = str(created["created_ids"][0])
+        save_equipment_placement(
+            self.project_id, self.scenario_id, eq_id, pitch_id, [work_id], "Tester"
+        )
+
+        assets = equipment_assets(self.project_id, self.scenario_id, "Quality")
+        row = assets.loc[assets["id"].astype(str).eq(eq_id)].iloc[0]
+        self.assertIn("01-ML1-001 — Body Load (Main Line)", str(row["linked_pitches"]))
+        self.assertIn("Fasten wheel bolts", str(row["linked_processes"]))
+
+    def test_process_first_linking_and_single_pitch_enforcement(self) -> None:
+        area_id = str(uuid4())
+        p1, p2 = str(uuid4()), str(uuid4())
+        w1, w2 = str(uuid4()), str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, 'Main Line', ?)",
+                (area_id, self.project_id, self.scenario_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '01', 'Pitch 1', 'Active', 1, ?)",
+                (p1, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '02', 'Pitch 2', 'Active', 2, ?)",
+                (p2, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Torque chassis bolt', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p1, w1, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Torque bracket bolt', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p2, w2, now),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([
+                {"id": w1, "station": "01", "operation": "Torque chassis bolt", "sequence": 1, "pitch_id": p1},
+                {"id": w2, "station": "02", "operation": "Torque bracket bolt", "sequence": 2, "pitch_id": p2},
+            ]),
+        )
+
+        ops_df = equipment_scenario_process_options(self.project_id, self.scenario_id)
+        self.assertEqual(2, len(ops_df))
+
+        types = equipment_types(self.project_id)
+        torque_type_id = str(types.loc[types["label"].eq("Torque tool"), "id"].iloc[0])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [{
+                "id": "",
+                "equipment_type_id": torque_type_id,
+                "name": "DC Tool Process-First",
+                "description": "",
+                "manufacturer": "",
+                "model": "",
+                "notes": "",
+                "pitch_id": "",
+            }],
+            "Tester",
+        )
+        eq_id = str(created["created_ids"][0])
+
+        # Process-first: pass empty pitch_id="", auto-derive p1 from w1
+        save_equipment_placement(
+            self.project_id, self.scenario_id, eq_id, "", [w1], "Tester"
+        )
+        detail = equipment_placement_detail(self.project_id, self.scenario_id, eq_id)
+        self.assertEqual(p1, detail["pitch_id"])
+        self.assertEqual([w1], detail["work_element_ids"])
+
+        # Attempting to link a single physical tool to primary steps across two pitches fails
+        with self.assertRaises(ValueError):
+            save_equipment_placement(
+                self.project_id, self.scenario_id, eq_id, "", [w1, w2], "Tester"
+            )
+
+    def test_monument_blocks_move_and_movable_records_origin_flag(self) -> None:
+        area_id = str(uuid4())
+        p1, p2 = str(uuid4()), str(uuid4())
+        w1 = str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, 'Main Line', ?)",
+                (area_id, self.project_id, self.scenario_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '01', 'Origin Pitch', 'Active', 1, ?)",
+                (p1, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '02', 'New Pitch', 'Active', 2, ?)",
+                (p2, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Press bearing', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p1, w1, now),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([{"id": w1, "station": "01", "operation": "Press bearing", "sequence": 1, "pitch_id": p1}]),
+        )
+
+        types = equipment_types(self.project_id)
+        type_id = str(types.iloc[0]["id"])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [
+                {
+                    "id": "",
+                    "equipment_type_id": type_id,
+                    "name": "Heavy Press Monument",
+                    "is_monument": True,
+                    "description": "",
+                    "manufacturer": "",
+                    "model": "",
+                    "notes": "",
+                    "pitch_id": "",
+                },
+                {
+                    "id": "",
+                    "equipment_type_id": type_id,
+                    "name": "Movable Nutrunner",
+                    "is_monument": False,
+                    "description": "",
+                    "manufacturer": "",
+                    "model": "",
+                    "notes": "",
+                    "pitch_id": "",
+                },
+            ],
+            "Tester",
+        )
+        monument_id, movable_id = [str(cid) for cid in created["created_ids"]]
+        save_equipment_placement(
+            self.project_id, self.scenario_id, monument_id, p1, [w1], "Tester", is_monument=True
+        )
+        save_equipment_placement(
+            self.project_id, self.scenario_id, movable_id, p1, [w1], "Tester", is_monument=False
+        )
+
+        # Move work element w1 to p2
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE yamazumi_elements SET pitch_id = ? WHERE process_element_id = ?",
+                (p2, w1),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([{"id": w1, "station": "02", "operation": "Press bearing", "sequence": 1, "pitch_id": p2}]),
+        )
+
+        mismatches = equipment_placement_mismatches(self.project_id, self.scenario_id)
+        self.assertEqual(2, len(mismatches))
+
+        # Monument cannot move automatically
+        with self.assertRaises(ValueError):
+            move_equipment_to_linked_pitch(self.project_id, self.scenario_id, monument_id, "Tester")
+
+        # Movable tool moves and records origin pitch flag
+        move_equipment_to_linked_pitch(self.project_id, self.scenario_id, movable_id, "Tester")
+        flags = equipment_origin_flags(self.project_id, self.scenario_id)
+        self.assertEqual(1, len(flags))
+        self.assertEqual(movable_id, str(flags.iloc[0]["equipment_id"]))
+        self.assertIn("01 — Origin Pitch", str(flags.iloc[0]["origin_pitch"]))
+
+        clear_equipment_origin_flag(self.project_id, self.scenario_id, movable_id, "Tester")
+        self.assertTrue(equipment_origin_flags(self.project_id, self.scenario_id).empty)
+
+    def test_prerequisite_operations_and_sequence_violations(self) -> None:
+        area_id = str(uuid4())
+        p1, p2 = str(uuid4()), str(uuid4())
+        w_prereq, w_main = str(uuid4()), str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, 'Main Line', ?)",
+                (area_id, self.project_id, self.scenario_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '01', 'Upstream Pitch', 'Active', 1, ?)",
+                (p1, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '02', 'Equipment Pitch', 'Active', 2, ?)",
+                (p2, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Apply threadlocker', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p1, w_prereq, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Final torque joint', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p2, w_main, now),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([
+                {"id": w_prereq, "station": "01", "operation": "Apply threadlocker", "sequence": 1, "pitch_id": p1},
+                {"id": w_main, "station": "02", "operation": "Final torque joint", "sequence": 2, "pitch_id": p2},
+            ]),
+        )
+
+        types = equipment_types(self.project_id)
+        type_id = str(types.iloc[0]["id"])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [{
+                "id": "",
+                "equipment_type_id": type_id,
+                "name": "Final Torque Station",
+                "description": "",
+                "manufacturer": "",
+                "model": "",
+                "notes": "",
+                "pitch_id": "",
+            }],
+            "Tester",
+        )
+        eq_id = str(created["created_ids"][0])
+        save_equipment_placement(
+            self.project_id,
+            self.scenario_id,
+            eq_id,
+            p2,
+            [w_main],
+            "Tester",
+            prerequisite_work_element_ids=[w_prereq],
+        )
+        self.assertTrue(equipment_prerequisite_violations(self.project_id, self.scenario_id).empty)
+
+        # Now move equipment to p1 and prerequisite to p2 -> causes sequence violation!
+        with store.connection() as conn:
+            conn.execute("UPDATE equipment_placements SET pitch_id = ? WHERE equipment_id = ?", (p1, eq_id))
+            conn.execute("UPDATE yamazumi_elements SET pitch_id = ? WHERE process_element_id = ?", (p2, w_prereq))
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([
+                {"id": w_main, "station": "01", "operation": "Final torque joint", "sequence": 1, "pitch_id": p1},
+                {"id": w_prereq, "station": "02", "operation": "Apply threadlocker", "sequence": 2, "pitch_id": p2},
+            ]),
+        )
+        violations = equipment_prerequisite_violations(self.project_id, self.scenario_id)
+        self.assertEqual(1, len(violations))
+        self.assertIn("downstream", str(violations.iloc[0]["reason"]))
+
+    def test_per_pitch_torque_audit_requires_physical_tool_at_each_pitch(self) -> None:
+        area_id = str(uuid4())
+        p1, p2 = str(uuid4()), str(uuid4())
+        w1, w2 = str(uuid4()), str(uuid4())
+        now = store.now_iso()
+        with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO yamazumi_areas (id, project_id, scenario_id, name, updated_at) VALUES (?, ?, ?, 'Main Line', ?)",
+                (area_id, self.project_id, self.scenario_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '01', 'Pitch 1', 'Active', 1, ?)",
+                (p1, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_pitches (id, project_id, area_id, pitch_number, pitch_name, status, sequence, updated_at) VALUES (?, ?, ?, '02', 'Pitch 2', 'Active', 2, ?)",
+                (p2, self.project_id, area_id, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Torque Left Side', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p1, w1, now),
+            )
+            conn.execute(
+                "INSERT INTO yamazumi_elements (id, project_id, area_id, pitch_id, process_element_id, description, sequence, updated_at) VALUES (?, ?, ?, ?, ?, 'Torque Right Side', 1, ?)",
+                (str(uuid4()), self.project_id, area_id, p2, w2, now),
+            )
+        store.replace_work_elements(
+            self.project_id,
+            self.scenario_id,
+            pd.DataFrame([
+                {"id": w1, "station": "01", "operation": "Torque Left Side", "sequence": 1, "pitch_id": p1},
+                {"id": w2, "station": "02", "operation": "Torque Right Side", "sequence": 2, "pitch_id": p2},
+            ]),
+        )
+
+        # Create one shared Torque requirement assigned to both w1 (Pitch 1) and w2 (Pitch 2)
+        quality_store.save_quality_requirement_rows(
+            self.project_id,
+            [{
+                "id": "",
+                "unique_identifier": "TRQ-SHARED-10NM",
+                "requirement_type": "Torque",
+                "description": "10 Nm M6 Fastener",
+                "specification": "10 Nm",
+                "target_value": "10",
+                "tolerances": "+/- 1",
+                "unit": "Nm",
+                "pfmea_controls": ["Automatic Torque Monitoring"],
+            }],
+            "Tester",
+        )
+        reqs = quality_store.quality_requirements(self.project_id)
+        req_id = str(reqs.loc[reqs["unique_identifier"].eq("TRQ-SHARED-10NM"), "id"].iloc[0])
+        quality_store.publish_quality_requirement_assignments(
+            self.project_id, self.scenario_id, [req_id], [w1, w2], "Tester"
+        )
+
+        # Create a single physical Torque Tool placed ONLY at Pitch 1 (linked to w1 and req_id)
+        types = equipment_types(self.project_id)
+        torque_type_id = str(types.loc[types["label"].eq("Torque tool"), "id"].iloc[0])
+        created = save_function_equipment_rows(
+            self.project_id,
+            "Quality",
+            self.scenario_id,
+            [{
+                "id": "",
+                "equipment_type_id": torque_type_id,
+                "name": "Pitch 1 DC Tool",
+                "description": "",
+                "manufacturer": "",
+                "model": "",
+                "notes": "",
+                "pitch_id": "",
+            }],
+            "Tester",
+        )
+        tool1_id = str(created["created_ids"][0])
+        save_equipment_placement(self.project_id, self.scenario_id, tool1_id, p1, [w1], "Tester")
+        save_equipment_torque_requirements(self.project_id, tool1_id, [req_id], "Tester")
+
+        matrix = equipment_needs_vs_placements_matrix(self.project_id, self.scenario_id)
+        w1_rows = matrix.loc[matrix["work_element_id"].eq(w1) & matrix["source_stage"].eq("Drawing Requirement")]
+        w2_rows = matrix.loc[matrix["work_element_id"].eq(w2) & matrix["source_stage"].eq("Drawing Requirement")]
+        self.assertEqual(1, len(w1_rows))
+        self.assertEqual(1, len(w2_rows))
+        # Pitch 1 is satisfied, but Pitch 2 MUST NOT be satisfied by Pitch 1's physical tool!
+        self.assertTrue(bool(w1_rows.iloc[0]["is_satisfied"]))
+        self.assertFalse(bool(w2_rows.iloc[0]["is_satisfied"]))
+        self.assertIn("Not linked to this step/pitch", str(w2_rows.iloc[0]["linked_asset_names"]))
 
 
 if __name__ == "__main__":
