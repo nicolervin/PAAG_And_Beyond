@@ -185,9 +185,9 @@ class WorkElementOpIdTests(unittest.TestCase):
             ["work-main", "work-single", "work-nested"],
         )
 
-        self.assertEqual(values["work-main"], "M2.01-MAIN.2")
-        self.assertEqual(values["work-single"], "M2S1a.01-SINGLE.1")
-        self.assertEqual(values["work-nested"], "M2S2c.01-NESTED.1")
+        self.assertEqual(values["work-main"], "Main.01-MAIN.2")
+        self.assertEqual(values["work-single"], "Single.01-SINGLE.1")
+        self.assertEqual(values["work-nested"], "Nested deep.01-NESTED.1")
 
     def test_branch_point_uses_compound_designators_recursively(self) -> None:
         self.linked_work("work-b1", "b1", "branch-one")
@@ -201,10 +201,10 @@ class WorkElementOpIdTests(unittest.TestCase):
             ["work-b1", "work-b2", "work-c11", "work-c12"],
         )
 
-        self.assertEqual(values["work-b1"], "M2S3b1.01-B1.1")
-        self.assertEqual(values["work-b2"], "M2S3b2.01-B2.1")
-        self.assertEqual(values["work-c11"], "M2S3c11.01-C11.1")
-        self.assertEqual(values["work-c12"], "M2S3c12.01-C12.1")
+        self.assertEqual(values["work-b1"], "Branch one.01-B1.1")
+        self.assertEqual(values["work-b2"], "Branch two.01-B2.1")
+        self.assertEqual(values["work-c11"], "Branch one A.01-C11.1")
+        self.assertEqual(values["work-c12"], "Branch one B.01-C12.1")
 
     def test_incomplete_source_states_return_clear_placeholders(self) -> None:
         self.linked_work("work-no-fishbone", "unlinked", None)
@@ -468,7 +468,7 @@ class WorkElementOpIdTests(unittest.TestCase):
             self.project_id, self.scenario_id, [process_id]
         )
         self.assertTrue(op_contexts[process_id]["complete"])
-        self.assertEqual(op_contexts[process_id]["op_id"], "M2.01-PED-027.1")
+        self.assertEqual(op_contexts[process_id]["op_id"], "Main.01-PED-027.1")
 
         pitch_summary = store.process_pitch_visual_summary(
             self.project_id, self.scenario_id, pitch_id

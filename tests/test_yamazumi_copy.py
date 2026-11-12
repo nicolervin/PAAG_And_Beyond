@@ -460,6 +460,15 @@ class YamazumiCopyPageTests(unittest.TestCase):
             button_labels.index("Delete Work Element"),
             button_labels.index("Copy Work Element"),
         )
+        for action_label in (
+            "Delete Pitches",
+            "Copy Pitches",
+            "Move Pitches",
+            "Delete Work Element",
+            "Copy Work Element",
+        ):
+            btn = next(b for b in app.button if b.label == action_label)
+            self.assertTrue(btn.disabled, f"{action_label} should be disabled before selecting a row")
         expander_labels = [expander.label for expander in app.expander]
         self.assertNotIn("Copy to Another Area", expander_labels)
         self.assertNotIn("Copy to another area", expander_labels)

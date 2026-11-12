@@ -39,6 +39,7 @@ from utils.store import (
     save_fishbone_canvas_positions,
     set_fishbone_assignments_stack_group,
     unlink_part_variant,
+    update_assembly_section,
     update_assembly_section_rows,
     yamazumi_area_creation_summary,
     yamazumi_areas,
@@ -65,13 +66,14 @@ import utils.fishbone_visual as _fishbone_visual_mod
 import utils.fishbone_store as _fishbone_store_mod
 import utils.store as _store_mod
 
-if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 3:
+if getattr(_fishbone_store_mod, "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 5:
     _fishbone_store_mod = importlib.reload(_fishbone_store_mod)
     _store_mod = importlib.reload(_store_mod)
     add_assembly_section = _store_mod.add_assembly_section
+    update_assembly_section = _store_mod.update_assembly_section
     update_assembly_section_rows = _store_mod.update_assembly_section_rows
 
-if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 9:
+if getattr(_fishbone_visual_mod, "_FISHBONE_VISUAL_HOT_RELOAD_REV", 0) < 12:
     _fishbone_visual_mod = importlib.reload(_fishbone_visual_mod)
 from utils.fishbone_visual import interactive_fishbone, part_thumbnail
 from utils.table_ui import (
@@ -79,6 +81,7 @@ from utils.table_ui import (
     decimal_values_equal,
     detect_table_cell_conflicts,
     editable_table_footer,
+    format_part_label,
     guarded_tabs,
     native_selected_rows,
     prepare_editor_selection_column,
@@ -520,6 +523,11 @@ if assign_parts_tab.open:
                     placed_by_part[str(part_id)] = f"{len(uses)} use{'s' if len(uses) != 1 else ''} · {section_summary}"
 
             part_pool = parts[["id", "part_number", "description", "quantity", "revision", "model_applicability"]].copy()
+            _fb_fn_col = parts["factory_nickname"] if "factory_nickname" in parts.columns else [""] * len(parts)
+            part_pool["description"] = [
+                format_part_label(pnum, desc, fnick, include_part_number=False)
+                for pnum, desc, fnick in zip(part_pool["part_number"], part_pool["description"], _fb_fn_col)
+            ]
             part_pool["variant_group"] = [
                 ", ".join(vg) if isinstance(vg, (list, tuple)) else str(vg or "")
                 for vg in (parts["variant_group"] if "variant_group" in parts.columns else [""] * len(parts))
@@ -652,7 +660,7 @@ if assign_parts_tab.open:
                         key="fishbone_pool_edit_part",
                         help="Open this exact catalog part in the Parts Catalog to edit its models, details, and photos.",
                     ),
-                    "part_number": st.column_config.TextColumn("Part number", pinned=True),
+                    "part_number": st.column_config.TextColumn("Part number", width=145, pinned=True),
                     "level": st.column_config.TextColumn(
                         "Level",
                         width="small",
@@ -847,6 +855,19 @@ if assign_parts_tab.open:
                         pass
                 return status
             full_assignment_editor["section"] = full_assignment_editor["section_id"].astype(str).map(section_option_labels)
+            _asgn_fn_col = (
+                full_assignment_editor["factory_nickname"]
+                if "factory_nickname" in full_assignment_editor.columns
+                else [""] * len(full_assignment_editor)
+            )
+            full_assignment_editor["description"] = [
+                format_part_label(pnum, desc, fnick, include_part_number=False)
+                for pnum, desc, fnick in zip(
+                    full_assignment_editor["part_number"],
+                    full_assignment_editor["description"],
+                    _asgn_fn_col,
+                )
+            ]
             full_assignment_editor["model_applicability"] = [
                 feature_applicability(pid, m_app)
                 for pid, m_app in zip(
@@ -948,7 +969,7 @@ if assign_parts_tab.open:
                         width=130,
                     ),
                     "sequence": st.column_config.NumberColumn("Order in section", min_value=1, step=1, format="%d"),
-                    "part_number": st.column_config.TextColumn("Part number", width=105, pinned=True),
+                    "part_number": st.column_config.TextColumn("Part number", width=145, pinned=True),
                     "description": st.column_config.TextColumn("Part Name", width=140, pinned=True),
                     "variant_group": st.column_config.TextColumn(
                         "Variant group",
@@ -1282,7 +1303,13 @@ if fishbone_tab.open:
                     sec_name = str(p.get("name") or "").strip()
                     raw_sec_type = str(p.get("section_type") or "Assembly")
                     sec_type = "Support Operations" if raw_sec_type == "Support Operations" else "Assembly"
-                    parent_id = p.get("parent_id") or None
+                    raw_parent_ids = p.get("parent_ids")
+                    parent_ids_list = [
+                        str(pid).strip()
+                        for pid in (raw_parent_ids if isinstance(raw_parent_ids, list) else ([p.get("parent_id")] if p.get("parent_id") else []))
+                        if str(pid or "").strip()
+                    ]
+                    parent_id = parent_ids_list[0] if parent_ids_list else None
                     gx = p.get("grid_x")
                     gy = p.get("grid_y")
                     if sec_name:
@@ -1297,15 +1324,16 @@ if fishbone_tab.open:
                                 grid_x=int(gx) if gx is not None else None,
                                 grid_y=int(gy) if gy is not None else None,
                             )
-                            if parent_id and sec_type in {"Assembly", "Support Operations"}:
-                                save_assembly_section_connection(
-                                    project_id,
-                                    new_sec_id,
-                                    parent_id,
-                                    connection_type="subassembly",
-                                    sequence=10,
-                                    editor_name=st.session_state.get("current_editor", ""),
-                                )
+                            if parent_ids_list and sec_type in {"Assembly", "Support Operations"}:
+                                for idx_p, target_pid in enumerate(parent_ids_list, start=1):
+                                    save_assembly_section_connection(
+                                        project_id,
+                                        new_sec_id,
+                                        target_pid,
+                                        connection_type="subassembly",
+                                        sequence=idx_p * 10,
+                                        editor_name=st.session_state.get("current_editor", ""),
+                                    )
                             area_summary = yamazumi_area_creation_summary(project_id, new_sec_id)
                             created_areas = list(area_summary.get("created", []))
                             area_conflicts = list(area_summary.get("conflicts", []))
@@ -1336,6 +1364,60 @@ if fishbone_tab.open:
                                     else ""
                                 ),
                                 icon=":material/check_circle:",
+                            )
+                            st.rerun()
+                        except ValueError as exc:
+                            st.error(str(exc))
+                if p := getattr(canvas_state, "edit_section", None):
+                    try:
+                        delattr(canvas_state, "edit_section")
+                    except (AttributeError, TypeError):
+                        pass
+                    sec_id = str(p.get("section_id") or "").strip()
+                    sec_name = str(p.get("name") or "").strip()
+                    raw_sec_type = str(p.get("section_type") or "Assembly")
+                    sec_type = "Support Operations" if raw_sec_type == "Support Operations" else "Assembly"
+                    parent_id = str(p.get("parent_id") or "").strip() or None
+                    raw_parent_ids = p.get("parent_ids")
+                    parent_ids_list = (
+                        [str(pid).strip() for pid in raw_parent_ids if str(pid or "").strip()]
+                        if isinstance(raw_parent_ids, list)
+                        else None
+                    )
+                    if sec_id and sec_name:
+                        try:
+                            st.session_state[framework_undo_key] = current_plan_snapshot
+                            updated_info = update_assembly_section(
+                                project_id,
+                                sec_id,
+                                sec_name,
+                                sec_type,
+                                parent_id,
+                                parent_ids=parent_ids_list,
+                            )
+                            old_parent_id = updated_info.get("old_parent_id")
+                            new_parent_id = updated_info.get("new_parent_id")
+                            if old_parent_id != new_parent_id or parent_ids_list is not None:
+                                draft["connections"] = [
+                                    dc for dc in draft.get("connections", [])
+                                    if str(dc.get("from_section_id") or "") != sec_id
+                                ]
+                                if not connections_df.empty:
+                                    for _, crow in connections_df.iterrows():
+                                        if str(crow["from_section_id"]) == sec_id:
+                                            draft["deleted_connections"].discard(str(crow["id"]))
+                            record_audit_event(
+                                project_id,
+                                "Fishbone framework",
+                                "Edit section from canvas",
+                                1,
+                                st.session_state.get("current_editor", ""),
+                                updated_info,
+                            )
+                            request_table_editor_reset(framework_editor_key)
+                            st.toast(
+                                f"Updated section '{sec_name}'",
+                                icon=":material/edit:",
                             )
                             st.rerun()
                         except ValueError as exc:
@@ -2370,13 +2452,20 @@ if fishbone_tab.open:
                         variant_group_by_pn.setdefault(pn_a, set()).add(pn_b)
                         variant_group_by_pn.setdefault(pn_b, set()).add(pn_a)
             if not parts.empty:
-                for p_id_val, p_num_val, p_desc_val in zip(
-                    parts["id"], parts["part_number"], parts["description"]
+                _canvas_fn_col = (
+                    parts["factory_nickname"]
+                    if "factory_nickname" in parts.columns
+                    else [""] * len(parts)
+                )
+                for p_id_val, p_num_val, p_desc_val, p_fn_val in zip(
+                    parts["id"], parts["part_number"], parts["description"], _canvas_fn_col
                 ):
                     p_id = str(p_id_val or "").strip()
                     p_num_raw = str(p_num_val or "").strip()
                     p_num = p_num_raw.upper()
-                    p_desc = str(p_desc_val or "").strip()
+                    p_desc = format_part_label(
+                        p_num_raw, p_desc_val, p_fn_val, include_part_number=False
+                    )
                     if p_id:
                         part_num_by_id[p_id] = p_num_raw
                     if p_id and p_desc:
@@ -2462,7 +2551,7 @@ if fishbone_tab.open:
                     except (ValueError, TypeError):
                         qty = 1.0
 
-                    p_desc = str(desc_val or "").strip() or part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or ""
+                    p_desc = part_desc_lookup.get(pid) or part_desc_lookup.get(pn.upper()) or str(desc_val or "").strip()
                     palette_items.append({
                         "part_id": pid,
                         "part_number": pn or "—",
@@ -2585,7 +2674,7 @@ if fishbone_tab.open:
                         "section_id": current_sec_id,
                         "section_name": str(records.get(current_sec_id, {}).get("name") or sec_name_val),
                         "part_number": pn_clean,
-                        "description": str(desc_val or ""),
+                        "description": part_desc_lookup.get(part_id) or part_desc_lookup.get(pn_clean.upper()) or str(desc_val or ""),
                         "use_description": eff_use_desc,
                         "quantity": eff_qty,
                         "models": applicability_label,

@@ -621,7 +621,7 @@ class PfmeaStoreTests(unittest.TestCase):
         before = pfmea_store.pfmea_process_steps(
             self.project_id, self.scenario_id
         ).iloc[0]
-        self.assertEqual(before["op_id"], "M1.ST-010.1")
+        self.assertEqual(before["op_id"], "PFMEA main.ST-010.1")
 
         with store.connection() as conn:
             conn.execute(
@@ -642,7 +642,7 @@ class PfmeaStoreTests(unittest.TestCase):
         saved_entry = pfmea_store.pfmea_entries(
             self.project_id, self.scenario_id
         ).iloc[0]
-        self.assertEqual(after["op_id"], "M1.ST-020.1")
+        self.assertEqual(after["op_id"], "PFMEA main.ST-020.1")
         self.assertEqual(after["pitch"], "ST-020")
         self.assertEqual(saved_entry["id"], entry_id)
         self.assertEqual(saved_entry["work_element_id"], self.work_element_id)

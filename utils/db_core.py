@@ -2975,9 +2975,10 @@ def init_db() -> None:
                 ppe_poster_workstation_override TEXT NOT NULL DEFAULT '',
                 ppe_poster_section_override TEXT NOT NULL DEFAULT '',
                 jsa_job_title_override TEXT NOT NULL DEFAULT '',
-                jsa_plant_code TEXT NOT NULL DEFAULT 'AP1',
+                jsa_plant_code TEXT NOT NULL DEFAULT '',
                 jsa_important_notice TEXT NOT NULL DEFAULT '',
                 jsa_include_pitch_photos INTEGER NOT NULL DEFAULT 1,
+                jsa_rows_override_json TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, area_id, pitch_number)
             );
@@ -3823,6 +3824,7 @@ def init_db() -> None:
             "ppe_poster_section_override",
             "jsa_job_title_override",
             "jsa_important_notice",
+            "jsa_rows_override_json",
         ):
             if ppe_override_col not in pitch_columns:
                 conn.execute(
@@ -3830,7 +3832,7 @@ def init_db() -> None:
                 )
         if "jsa_plant_code" not in pitch_columns:
             conn.execute(
-                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_plant_code TEXT NOT NULL DEFAULT 'AP1'"
+                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_plant_code TEXT NOT NULL DEFAULT ''"
             )
         if "jsa_include_pitch_photos" not in pitch_columns:
             conn.execute(

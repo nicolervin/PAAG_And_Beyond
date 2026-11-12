@@ -216,6 +216,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "tips": [
             "You can paste multiple rows directly from Excel into the Parts Catalog editor!",
+            "Use the **Show factory nicknames** toggle in the left sidebar (or the **Nickname** eye button on Process at a Glance) to include (\"Factory Nickname\") automatically in part dropdowns, labels, and tables whenever a part has a factory nickname.",
         ],
     },
     "fishbone": {
@@ -227,7 +228,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "Parallel branches) with a 4-card readiness banner (Active sections, Part placement coverage, Fishbone uses placed, and Downstream Yamazumi sync), place parts into sections, and configure the Manufacturing Assembly Grid."
         ),
         "workflows": [
-            "**Build Section Flow**: Create assembly sections and connect them (`series`, `parallel`, `subassembly`) on the visual Fishbone diagram, or edit section names, order, active status, type, parent assembly, and descriptions in the **Advanced Section Configuration & Maintenance** table.",
+            "**Build Section Flow**: Create assembly sections and connect them (`series`, `parallel`, `subassembly`) on the visual Fishbone diagram, click the pencil icon (`✎`) in the top-right corner of any section block on the canvas to edit its name, type of production (`Assembly` or `Support Operations / Fabrication`), parent assembly (`Feeds into`), or delete it, or edit section names, order, active status, type, parent assembly, and descriptions in the **Advanced Section Configuration & Maintenance** table.",
             "**Assign Parts & Split Quantities**: Place catalog parts into sections with step numbers, quantities, and use descriptions, or click the `+` button on any part card to replicate the part across multiple sections or split its quantity (`+ Split card` / `Split qty evenly`) into multiple separate cards within the same section.",
             "**Stack Model Variants on Canvas**: Parts linked via **Variant group** (or sharing a center base drawing code) stack into a single card with a purple `N×` badge and `1/N` variant indicator in the same section. You can drag a part card directly onto another part card on the Interactive Fishbone canvas (including multiple split-quantity cards of the same part number for different model variants) to stack and tie them as model variants, or click the `N×` badge on a stacked card to open the **Edit Model Variant Ties** modal and disconnect or add variants.",
             "**Manufacturing Assemblies & Grid**: Group parts into subassemblies/kits (`ASM`) and map them across product models.",
@@ -280,8 +281,8 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "workflows": [
             "**Manage Process steps**: Edit sequence, status, tool, resource type (`Human`, `Cobots`, `Automation`), and workstation heights (`Feature` and `Time (s)` are read-only in **Process at a Glance** and updated in the **Yamazumi** tab).",
             "**Select lines for Edit, Move, or Unlink**: Check the **Select** column (or click **Select all**) in **Process at a Glance by Pitch** to open **Edit line** (and click **Save PAAG Element**), click **Move selected (N)** to choose a destination pitch address from the dropdown dialog, or click **Unlink selected (N)**.",
-            "**Deterministic Op IDs**: Operation IDs (e.g. `M1S1b.01-ML1-004.4`) are formatted from Pitch Address + Flow Prefix + Sequence.",
-            "**Parts Consumed or Handled (`Handle` vs `Consume`)**: Filter both **Not consumed parts** and **Consumed parts** tables simultaneously using the single **Search parts** bar in **Available Fishbone Parts**, pair Fishbone parts with PAAG elements, choose the **Selection rule** (`Use all`, `Model choice`, or `Optional` — when `Model choice` is selected, check **Model variant** on each part card that is one of the operator's model-choice alternatives), classify whether each part is **Consumed** or **Handled** (when **Consume** is selected, enter the consumed **Quantity** directly next to **Handling type** and choose the **Use / installation location** when multiple Fishbone uses exist; when **Handle** is selected, both **Quantity** and **Use / installation location** are disabled and resolved automatically; `Consume` allowance is evaluated per overlapping model/feature variant so a placement consumed on one model variant can also be consumed on a mutually exclusive model variant, while the **Consumed parts** table populates parts consumed across all Fishbone sections/areas in the scenario so they can be handled in downstream areas), and use **Unlink this part from the PAAG element** on any individual part card if needed.",
+            "**Deterministic Op IDs**: Operation IDs (e.g. `Door Assembly.01-ML1-004.4`) are formatted as `<Section Name>.<Pitch Address>.<Position>`.",
+            "**Parts Consumed or Handled (`Handle` vs `Consume`)**: Filter both **Not consumed parts** and **Consumed parts** tables simultaneously using the single **Search parts** bar in **Available Fishbone Parts**, pair Fishbone parts with PAAG elements, choose the **Selection rule** (`Use all`, `Model choice`, or `Optional` — when `Model choice` is selected, check **Model variant** on each part card that is one of the operator's model-choice alternatives), classify whether each part is **Consumed** or **Handled** (enter the **Quantity** consumed or handled directly next to **Handling type** and choose or confirm the **Use / installation location**; `Consume` allowance is evaluated per overlapping model/feature variant so a placement consumed on one model variant can also be consumed on a mutually exclusive model variant, while **Handle** quantities do not reduce the Fishbone Consume allowance and the **Consumed parts** table populates parts consumed across all Fishbone sections/areas in the scenario so they can be handled in downstream areas), use **Unlink this part from the PAAG element** on any individual part card if needed, and click **Create PAAG Elements (`work`, `parts`, `tool/equipment`)** (which dynamically shows the selected items from the work, parts, and tool/equipment trifecta) to save the PAAG element with or without parts.",
             "**Pitch Visual Aids & Tools on PAAG Slides**: Select a pitch from the **Pitch** dropdown in the **PAAG Slides** tab (which only populates pitches that contain work elements and highlights each pitch **green** when a visual aid is tied to every work element in the pitch, **yellow** when at least one visual aid is added but not every work element is tied to a visual aid, or **white** when not started), upload or paste images, videos, CAD renders, or links—or pull a photo directly from the **Parts Catalog** sub-tab—for each pitch and tag relevant Process steps, or click **Copy** on any existing visual aid card to duplicate it on the current pitch or copy it to another pitch in the scenario (using **Copy Visual Aid** to stay on the current pitch or **Copy & Go to Pitch** to switch directly to the destination pitch and optionally open the **Annotate** editor on the new copy immediately, with all callouts and shapes remaining independently editable). When annotating a visual aid (**Annotate** / **Annotate / Add Shapes**), use **📦 Part Photo** to overlay photos from the Parts Catalog, **📋 Paste Photo** (or `Ctrl+V`) to paste photos from your clipboard, or **💬 Callout** to add text callouts onto the annotation canvas (callout text renders at a consistent visual size regardless of the uploaded photo's pixel resolution, and you can adjust the callout font size anytime using the **Text** dropdown or **A−** / **A+** buttons), then drag callouts, shapes, or photos to reposition them (and resize photos via their corner handles) before clicking **💾 Apply & Save Markup**. Click **+ Tie Tool** in the **Tools & PPE Required** panel on the PAAG slide (or in the PAAG Slides toolbar) to open a dialog requesting **Work Element** and **Tool Type** (from the same dropdown list as **Create PAAG Elements**), which saves the tool to the slide and updates that work element in the **Process at a Glance by Pitch** table. PPE required by work elements on the pitch is automatically deduplicated and resolved using category hierarchy overrides (*Cut Level 6 > Cut Level 5 > Cut Level 4 > Cut Level 3 > Cut Level 2 > Cut Level 1 Gloves*, *Hard Hat > Bump Cap*, *Safety Toe Shoes > Sturdy Closed Toe and Heel Shoes*, *Foam Lined Safety Glasses > Safety Glasses*) with inline PPE icons; click **🛡️ JSA & PPE** on the slide (or **JSA & PPE** in the PAAG Slides toolbar / Safety Alert popover) to view, print, or download the portrait **Job Safety Analysis (JSA) Poster (`FRM-GEA-SAF-085`)** and the **11\"×17\" Minimum PPE Requirements Poster** for that pitch. In the **Yamazumi** panel on each PAAG slide, work element bars are scaled proportionally to their cycle time while expanding the pitch frame as needed so every work element description remains readable; hover over step badge numbers to inspect step details or click the **Step # ↗** / **Open in Yamazumi ↗** links to jump directly to that section and work element on the Yamazumi tab. Use **Print / Export** on the PAAG Slides toolbar to print to PDF/printer, open the deck in a new tab, download a native **PowerPoint** (`.pptx`) deck, or download a standalone HTML deck.",
         ],
         "connections": (
@@ -403,14 +404,13 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         "scope": "Active scenario",
         "summary": (
             "Scenario-specific Safety requirements, 29-item Personal Protective Equipment (PPE) catalog "
-            "with automatic pitch-level deduplication and hierarchy overrides, 1-click Standard Baseline PPE assignment, "
+            "with automatic pitch-level deduplication and hierarchy overrides, "
             "portrait Job Safety Analysis (JSA) Poster (`FRM-GEA-SAF-085`) per pitch, "
             "and 11\"×17\" landscape Minimum PPE Requirements Poster generator per pitch."
         ),
         "workflows": [
-            "**Pre-populated Safety requirements table (`Review` tab)**: Every PAAG work element and its Pitch are pre-populated in the **Safety requirements** table with **Sync status** (`Synced`, `⚠️ Needs PPE`, or `⚠️ Upstream change`), **Upstream changes**, **Assigned PPE** (29-item catalog), **Potential Errors / Hazards (JSA)**, **Action / Mitigation (JSA)**, and **Requirement description**. Click **View JSA/PPE Poster** in the **Poster** column on any row to jump directly to that pitch's interactive JSA & PPE Posters workspace below the table.",
-            "**Apply Standard Baseline PPE**: Click **Apply Standard Baseline PPE** to assign the 3 standard baseline items (`Cut Level 2 Gloves`, `Safety Glasses`, `Sturdy Closed Toe and Heel Shoes`) in one click to any unreviewed Process steps.",
-            "**Add PPE Dialog (`Add PPE` button above JSA)**: In the header above the **Pitch JSA & PPE Posters** section, click **Add PPE** to open a dialog window where you can choose PPE items (or browse the PPE Icon Gallery) and tag them to the appropriate PAAG work elements on that pitch.",
+            "**Pre-populated Safety requirements table (`Review` tab)**: Every PAAG work element, its **Fishbone Section**, and its **Pitch** are pre-populated in the **Safety requirements** table with **Sync status** (`Synced`, `⚠️ Needs PPE`, or `⚠️ Upstream change`), **Upstream changes**, **Assigned PPE** (29-item catalog), **Potential Errors / Hazards (JSA)**, **Action / Mitigation (JSA)**, and **Requirement description**. Click **View JSA/PPE Poster** in the **Poster** column on any row to jump directly to that pitch's interactive JSA & PPE Posters workspace below the table.",
+            "**Confirm Tasks When Adding PPE (`Add PPE to Task` on JSA Poster or `Add PPE` button)**: Clicking any PPE icon inside **Add PPE to Task** (or clicking a PPE icon on the JSA Poster) opens a **Confirm Tasks for PPE** modal before adding it to the poster so you can check which specific PAAG task(s) on the pitch require that PPE (with **Only this task**, **Select All**, **Clear All**, and optional multi-PPE bundling). Linking PPE to specific tasks ensures the PPE automatically moves with the task if it is rebalanced to another pitch.",
             "**Automatic Pitch PPE Rollup & Hierarchy Overrides**: When step PPE rolls up to a workstation pitch (for PAAG slides, the JSA Poster, and the PPE Poster), duplicate PPE items are listed once and higher protection levels automatically override lower levels in the same category (*Cut Level 6 > Cut Level 5 > Cut Level 4 > Cut Level 3 > Cut Level 2 > Cut Level 1 Gloves*, *Hard Hat > Bump Cap*, *Safety Toe Shoes > Sturdy Closed Toe and Heel Shoes*, and *Foam Lined Safety Glasses > Safety Glasses*). Moving a higher-level step to another pitch dynamically updates both pitches' PPE rollups and JSA steps.",
             "**Pitch-by-Pitch JSA (`FRM-GEA-SAF-085`) & 11\"×17\" PPE Posters**: Navigate pitch by pitch (`◀ Back` / `Next ▶` or pitch dropdown) to view, edit, print, or export the portrait **Job Safety Analysis (`FRM-GEA-SAF-085`)** poster and the **11\"×17\" Minimum PPE Requirements** poster (individually or side-by-side).",
             "**Edit or Acknowledge upstream Process changes**: When a linked Process step changes upstream after a Safety requirement was saved, select rows in the `⚠️ Upstream Process changes to review` queue and click **Acknowledge selected**, or edit the requirement in the main table and click **Save & Refresh** to clear the flag automatically.",
@@ -419,7 +419,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
             "Links to **Process at a Glance** (`work_elements`, PAAG slide Tools & PPE panel, and JSA & PPE Poster modal) and feeds **Pin Map** safety indicators."
         ),
         "tips": [
-            "Every persisted change (including JSA Step Hazards/Actions, JSA Header Settings, 1-click Baseline PPE, and Poster Header Overrides) is recorded in the **History** expander at the bottom of the page.",
+            "Every persisted change (including JSA Step Hazards/Actions, JSA Header Settings, and Poster Header Overrides) is recorded in the **History** expander at the bottom of the page.",
         ],
     },
     "recycle_bin": {
@@ -432,7 +432,7 @@ PAGE_MANUALS: dict[str, dict[str, Any]] = {
         ),
         "workflows": [
             "**Filter by scope**: Toggle between `Active project` and `All projects` (which displays both `Project` and `Scenario` columns).",
-            "**Restore selected**: Select one or more deleted items and click **Restore selected** to atomically restore the record, its cascaded children, and its preserved media files.",
+            "**Restore selected & Undo last restore**: Select one or more deleted items and click **Restore selected** to atomically restore the record, its cascaded children, and its preserved media files. If you restore an item by mistake, click **Undo last restore** to move it right back to the Recycle Bin.",
             "**Delete permanently**: Select specific items and confirm permanent deletion if they should be purged before their 30-day expiration date.",
         ],
         "connections": (
@@ -550,9 +550,9 @@ GLOSSARY_TERMS: list[dict[str, str]] = [
         "term": "Operation ID (Op ID)",
         "category": "Process Planning",
         "definition": (
-            "Deterministic Process step identifier in Process at a Glance (for example, `M1S1b.01-ML1-004.4`), "
-            "combining the Fishbone Hierarchy Prefix (`M1S1b`), the Yamazumi Pitch Address (`01-ML1-004`), "
-            "and the element's stack position inside that pitch (`.4`)."
+            "Deterministic Process step identifier in Process at a Glance (`<Section Name>.<Pitch Address>.<Position>`, "
+            "for example `Door Assembly.01-ML1-004.4`), combining the Fishbone Section Name (`Door Assembly`), "
+            "the Yamazumi Pitch Address (`01-ML1-004`), and the element's stack position inside that pitch (`.4`)."
         ),
     },
     {
@@ -716,11 +716,11 @@ def _explain_fishbone_prefix(prefix: str) -> str:
     m_so = re.match(r"^SO(?P<num>\d+)$", clean, re.IGNORECASE)
     if m_so:
         return f"Support Operations section #{m_so.group('num')} on the Fishbone."
-    return f"Fishbone hierarchy section prefix ('{clean}')."
+    return f"Fishbone section name ('{clean}')."
 
 
 def decode_operation_or_pitch_id(raw_value: str) -> dict[str, Any]:
-    """Decode a PAAG Pitch Address (e.g. 01-ML1-004) or Operation ID (e.g. M1S1b.01-ML1-004.4)."""
+    """Decode a PAAG Pitch Address (e.g. 01-ML1-004) or Operation ID (e.g. Door Assembly.01-ML1-004.4)."""
     text = str(raw_value or "").strip()
     if not text:
         return {"valid": False, "error": "Enter a Pitch Address or Operation ID to decode."}
@@ -737,10 +737,9 @@ def decode_operation_or_pitch_id(raw_value: str) -> dict[str, Any]:
     stack_position = ""
     pitch_candidate = text
 
-    # Check if input is a full Op ID: <fishbone_prefix>.<pitch_address>.<stack_position>
-    # Note that <fishbone_prefix> can contain a dot if shared across mainlines (e.g. M1+M2.S1a.01-ML1-004.4)
+    # Check if input is a full Op ID: <Section Name>.<Pitch Address>.<Position>
     full_op_match = re.match(
-        r"^(?P<fb>[A-Za-z0-9+.]+?)\.(?P<pitch>[A-Za-z0-9]+-[A-Za-z0-9&]+-\d+)\.(?P<pos>\d+)$",
+        r"^(?P<fb>.+?)\.(?P<pitch>[A-Za-z0-9]+-[A-Za-z0-9&]+-\d+)\.(?P<pos>\d+)$",
         text,
     )
     if full_op_match:
@@ -1742,7 +1741,7 @@ def _build_critical_thread_flowchart_html(
 
             <!-- Row 5: Process at a Glance (Step 7) -->
             <div class="paag-fc-center-row">
-                {_node_card_html(7, "Process at a Glance (Authoritative Scenario Plan)", "Deterministic Op IDs (M1S1b.01-ML1-004.4) · Part Handle vs. Consume pairings · Pitch visual aids", "scenario")}
+                {_node_card_html(7, "Process at a Glance (Authoritative Scenario Plan)", "Deterministic Op IDs (<Section Name>.<Pitch Address>.<Position>) · Part Handle vs. Consume pairings · Pitch visual aids", "scenario")}
             </div>
 
             <!-- Fan-Out from Step 7 to 5 Functional Reviews -->
@@ -1857,11 +1856,11 @@ def _render_glossary_and_troubleshooting_tab() -> None:
     st.markdown("#### :material/qr_code_scanner: Interactive Op ID & Pitch Address Decoder")
     st.caption(
         "Paste any Yamazumi Pitch Address (e.g. `M1S1b.01`) or Process at a Glance Operation ID "
-        "(e.g. `M1S1b.01-ML1-004.4`) to see what each segment means."
+        "(e.g. `Door Assembly.01-ML1-004.4`) to see what each segment means."
     )
     sample_op = st.text_input(
         "Pitch Address or Operation ID",
-        value="M1S1b.01-ML1-004.4",
+        value="Door Assembly.01-ML1-004.4",
         key="help_hub_op_id_decoder_input",
     )
     decoded = decode_operation_or_pitch_id(sample_op)
@@ -2506,7 +2505,289 @@ def _render_feedback_tracker_tab(
                 )
 
 
-@st.dialog("Universal Help, Global Search & Feedback Hub", width="large")
+_HELP_HUB_REV_20261110 = 3
+
+PART_LABEL_MODE_LABELS: dict[str, str] = {
+    "number_desc_nickname": 'Part # + Official Description + ("Factory Nickname")',
+    "number_nickname": 'Part # + "Factory Nickname" (falls back to Official Description)',
+    "number_desc_only": "Part # + Official Description only (hide inline nicknames)",
+}
+
+ROLE_PRESET_OPTIONS: tuple[str, ...] = (
+    "Industrial Engineer",
+    "Quality / AQE",
+    "Ergonomist",
+    "Materials Planner",
+    "Safety",
+    "All Columns",
+)
+
+TIME_UNIT_OVERRIDE_LABELS: dict[str, str] = {
+    "scenario": "Use Scenario Default",
+    "seconds": "Seconds (s)",
+    "minutes": "Decimal Minutes (min)",
+    "centiminutes": "Centiminutes (cmin)",
+    "hours": "Hours (hr)",
+}
+
+
+def _render_settings_tab(project_id: str | None, scenario_id: str | None) -> None:
+    """Render the dedicated workspace preferences & display settings tab."""
+    from utils.table_ui import format_part_label
+
+    st.markdown("### :material/tune: Workspace Settings & Display Preferences")
+    st.caption(
+        "Customize how part labels, table columns, time units, split screens, and safety posters "
+        "display during your planning session."
+    )
+
+    st.session_state.setdefault("pref_show_factory_nickname", True)
+    if "pref_part_label_mode" not in st.session_state:
+        st.session_state["pref_part_label_mode"] = (
+            "number_desc_nickname"
+            if bool(st.session_state.get("pref_show_factory_nickname", True))
+            else "number_desc_only"
+        )
+    elif not bool(st.session_state.get("pref_show_factory_nickname", True)):
+        st.session_state["pref_part_label_mode"] = "number_desc_only"
+
+    st.session_state.setdefault(
+        "pref_show_factory_nickname_col",
+        bool(
+            st.session_state.get(
+                f"process_show_factory_nickname_{scenario_id}",
+                st.session_state.get("pref_show_factory_nickname", True),
+            )
+        )
+        if scenario_id
+        else bool(st.session_state.get("pref_show_factory_nickname", True)),
+    )
+    st.session_state.setdefault("pref_role_preset", "Industrial Engineer")
+    st.session_state.setdefault("pref_table_view_density", "Compact")
+    st.session_state.setdefault("pref_time_unit_override", "scenario")
+    st.session_state.setdefault("pref_split_orientation_default", "top_bottom")
+    st.session_state.setdefault("pref_canvas_zoom_default", "fit")
+    st.session_state.setdefault("pref_jsa_ppe_display_mode", "cards")
+    st.session_state.setdefault("pref_mute_live_collab_notifications", False)
+
+    # 1. Part Label & Factory Nickname Display
+    with st.container(border=True):
+        st.markdown("#### :material/label: 1. Part Label & Factory Nickname Display")
+        st.caption(
+            "Control how part names appear across dropdowns, Fishbone cards, Yamazumi, Process at a Glance, and Functional Reviews."
+        )
+        mode_keys = list(PART_LABEL_MODE_LABELS.keys())
+        current_mode = str(st.session_state.get("pref_part_label_mode", "number_desc_nickname"))
+        if current_mode not in mode_keys:
+            current_mode = "number_desc_nickname"
+
+        chosen_mode = st.radio(
+            "Global part label format",
+            options=mode_keys,
+            index=mode_keys.index(current_mode),
+            format_func=lambda k: PART_LABEL_MODE_LABELS.get(k, k),
+            key="_settings_part_label_mode_radio",
+            help=(
+                "Choose whether inline part strings include both the official engineering description and the "
+                "shop-floor factory nickname, prioritize the factory nickname, or show official descriptions only."
+            ),
+        )
+        if chosen_mode != st.session_state.get("pref_part_label_mode"):
+            st.session_state["pref_part_label_mode"] = chosen_mode
+            st.session_state["pref_show_factory_nickname"] = chosen_mode != "number_desc_only"
+        else:
+            st.session_state["pref_show_factory_nickname"] = chosen_mode != "number_desc_only"
+
+        show_fn_col = st.toggle(
+            "Show Factory Nickname column by default in part tables",
+            value=bool(st.session_state.get("pref_show_factory_nickname_col", True)),
+            key="_settings_show_fn_col_toggle",
+            help=(
+                "When enabled, the dedicated Factory Nickname column in Process Plan -> Available Fishbone Parts "
+                "is shown by default."
+            ),
+        )
+        st.session_state["pref_show_factory_nickname_col"] = bool(show_fn_col)
+        if scenario_id:
+            st.session_state[f"process_show_factory_nickname_{scenario_id}"] = bool(show_fn_col)
+
+        sample_preview = format_part_label(
+            "999D8402G001",
+            "Front of car body asm",
+            "teal and chrome",
+        )
+        st.caption(f"**Live label preview:** {sample_preview}")
+
+    # 2. Role / Function Column Preset & Table View Density
+    with st.container(border=True):
+        st.markdown("#### :material/badge: 2. Role Preset & Table Columns")
+        st.caption(
+            "Pre-configure default optional columns in Process at a Glance by Pitch for your primary role."
+        )
+        cur_role = str(st.session_state.get("pref_role_preset", "Industrial Engineer"))
+        if cur_role not in ROLE_PRESET_OPTIONS:
+            cur_role = "Industrial Engineer"
+        chosen_role = st.selectbox(
+            "Primary role column preset",
+            options=list(ROLE_PRESET_OPTIONS),
+            index=list(ROLE_PRESET_OPTIONS).index(cur_role),
+            key="_settings_role_preset_select",
+            help=(
+                "Industrial Engineer keeps the table compact. Quality/AQE adds Torque, Quality Req & Criticality; "
+                "Ergonomist adds Ergo Risk, Ergo Req & Heights; Materials Planner adds Part #, Output Assembly & Location; "
+                "Safety adds Ergo Risk, Criticality, Location & Orientation."
+            ),
+        )
+        st.session_state["pref_role_preset"] = chosen_role
+
+        density_opts = ["Compact", "Expanded"]
+        cur_density = str(st.session_state.get("pref_table_view_density", "Compact"))
+        if cur_density not in density_opts:
+            cur_density = "Compact"
+        chosen_density = st.segmented_control(
+            "Default table column density",
+            options=density_opts,
+            default=cur_density,
+            key="_settings_table_density_seg",
+            help="Choose Compact (role-focused columns) or Expanded (all engineering/functional columns visible).",
+        )
+        if chosen_density:
+            st.session_state["pref_table_view_density"] = chosen_density
+
+    # 3. Time Display Unit Override
+    with st.container(border=True):
+        st.markdown("#### :material/schedule: 3. Time Display Unit")
+        st.caption(
+            "Override how Takt Time and Cycle Time badges/captions are formatted in your session without altering scenario database settings."
+        )
+        tu_keys = list(TIME_UNIT_OVERRIDE_LABELS.keys())
+        cur_tu = str(st.session_state.get("pref_time_unit_override", "scenario"))
+        if cur_tu not in tu_keys:
+            cur_tu = "scenario"
+        chosen_tu = st.selectbox(
+            "Preferred time display unit",
+            options=tu_keys,
+            index=tu_keys.index(cur_tu),
+            format_func=lambda k: TIME_UNIT_OVERRIDE_LABELS.get(k, k),
+            key="_settings_time_unit_select",
+            help="Display formatted time readouts in Seconds (s), Decimal Minutes (min), Centiminutes (cmin), or Hours (hr).",
+        )
+        st.session_state["pref_time_unit_override"] = chosen_tu
+
+    # 4. Split-Screen Workspace Defaults
+    with st.container(border=True):
+        st.markdown("#### :material/splitscreen: 4. Split-Screen Layout")
+        st.caption(
+            "Choose the default pane arrangement when opening a second page in Split Screen."
+        )
+        split_opts = ["top_bottom", "side_by_side"]
+        split_labels = {
+            "top_bottom": "Top & Bottom (Full-width stacked)",
+            "side_by_side": "Side-by-Side (Left & Right columns)",
+        }
+        cur_split = str(st.session_state.get("pref_split_orientation_default", "top_bottom"))
+        if cur_split not in split_opts:
+            cur_split = "top_bottom"
+        chosen_split = st.radio(
+            "Default split-screen orientation",
+            options=split_opts,
+            index=split_opts.index(cur_split),
+            format_func=lambda k: split_labels.get(k, k),
+            key="_settings_split_orientation_radio",
+            help="Top & Bottom stacks both screens at 100% monitor width; Side-by-Side places them in resizable left/right columns.",
+        )
+        if chosen_split != st.session_state.get("pref_split_orientation_default"):
+            st.session_state["pref_split_orientation_default"] = chosen_split
+            st.session_state["split_workspace_orientation"] = chosen_split
+        else:
+            st.session_state["pref_split_orientation_default"] = chosen_split
+
+    # 5. Canvas & Safety Poster Defaults
+    with st.container(border=True):
+        st.markdown("#### :material/health_and_safety: 5. Canvas & Safety Poster Defaults")
+        st.caption(
+            "Set default zoom and PPE visual style for the Job Safety Analysis (JSA) and 11x17 PPE Posters."
+        )
+        zoom_opts = ["fit", "100%"]
+        zoom_labels = {
+            "fit": "Auto-fit to window (Fit)",
+            "100%": "100% actual scale",
+        }
+        cur_zoom = str(st.session_state.get("pref_canvas_zoom_default", "fit"))
+        if cur_zoom not in zoom_opts:
+            cur_zoom = "fit"
+        chosen_zoom = st.radio(
+            "Default poster zoom",
+            options=zoom_opts,
+            index=zoom_opts.index(cur_zoom),
+            format_func=lambda k: zoom_labels.get(k, k),
+            horizontal=True,
+            key="_settings_canvas_zoom_radio",
+        )
+        st.session_state["pref_canvas_zoom_default"] = chosen_zoom
+
+        ppe_style_opts = ["cards", "icons"]
+        ppe_style_labels = {
+            "cards": "PPE Photo Cards",
+            "icons": "ISO Safety Icons",
+        }
+        cur_ppe_style = str(st.session_state.get("pref_jsa_ppe_display_mode", "cards"))
+        if cur_ppe_style not in ppe_style_opts:
+            cur_ppe_style = "cards"
+        chosen_ppe_style = st.radio(
+            "Default JSA visual zone style",
+            options=ppe_style_opts,
+            index=ppe_style_opts.index(cur_ppe_style),
+            format_func=lambda k: ppe_style_labels.get(k, k),
+            horizontal=True,
+            key="_settings_jsa_ppe_style_radio",
+        )
+        st.session_state["pref_jsa_ppe_display_mode"] = chosen_ppe_style
+
+    # 6. Live Collaboration Notifications
+    with st.container(border=True):
+        st.markdown("#### :material/notifications: 6. Live Collaboration Notifications")
+        st.caption(
+            "Control real-time bottom-left toast banners when other collaborators save updates."
+        )
+        mute_val = st.toggle(
+            "Pause live collaboration notifications",
+            value=bool(st.session_state.get("pref_mute_live_collab_notifications", False)),
+            key="_settings_mute_collab_toggle",
+            help=(
+                "Mute bottom-left live notifications when other collaborators save changes. "
+                "All changes and editor attribution continue to be tracked in each page's History table."
+            ),
+        )
+        st.session_state["pref_mute_live_collab_notifications"] = bool(mute_val)
+
+    footer_cols = st.columns([3, 1], vertical_alignment="center")
+    footer_cols[0].caption(
+        "Changes take effect immediately across your active session."
+    )
+    if footer_cols[1].button(
+        "Reset to defaults",
+        icon=":material/restart_alt:",
+        width="stretch",
+        key="_settings_reset_defaults_btn",
+    ):
+        st.session_state["pref_part_label_mode"] = "number_desc_nickname"
+        st.session_state["pref_show_factory_nickname"] = True
+        st.session_state["pref_show_factory_nickname_col"] = True
+        if scenario_id:
+            st.session_state[f"process_show_factory_nickname_{scenario_id}"] = True
+        st.session_state["pref_role_preset"] = "Industrial Engineer"
+        st.session_state["pref_table_view_density"] = "Compact"
+        st.session_state["pref_time_unit_override"] = "scenario"
+        st.session_state["pref_split_orientation_default"] = "top_bottom"
+        st.session_state["split_workspace_orientation"] = "top_bottom"
+        st.session_state["pref_canvas_zoom_default"] = "fit"
+        st.session_state["pref_jsa_ppe_display_mode"] = "cards"
+        st.session_state["pref_mute_live_collab_notifications"] = False
+        st.rerun()
+
+
+@st.dialog("Universal Help, Search, Feedback & Settings Hub", width="large")
 def open_universal_help_dialog(
     *,
     active_page_key: str,
@@ -2515,21 +2796,24 @@ def open_universal_help_dialog(
     scenario_id: str | None,
     editor_name: str = "",
 ) -> None:
-    """Render the 5-tab Universal Help, Search & Feedback Hub modal."""
+    """Render the 6-tab Universal Help, Search, Feedback & Settings Hub modal."""
     tab_options = [
         ":material/menu_book: Page Manual",
         ":material/search: Global Search",
         ":material/account_tree: Workflow Guide",
         ":material/help_center: Glossary & Pro-Tips",
         ":material/bug_report: Bug Reports & Ideas",
+        ":material/tune: Settings",
     ]
     requested = st.session_state.pop("help_hub_requested_tab", "")
     if requested == "feedback":
         st.session_state["help_hub_active_tab_control"] = tab_options[4]
     elif requested == "search":
         st.session_state["help_hub_active_tab_control"] = tab_options[1]
+    elif requested == "settings":
+        st.session_state["help_hub_active_tab_control"] = tab_options[5]
 
-    tab_manual, tab_search, tab_workflow, tab_glossary, tab_feedback = st.tabs(
+    tab_manual, tab_search, tab_workflow, tab_glossary, tab_feedback, tab_settings = st.tabs(
         tab_options
     )
 
@@ -2557,6 +2841,9 @@ def open_universal_help_dialog(
             editor_name=editor_name,
         )
 
+    with tab_settings:
+        _render_settings_tab(project_id, scenario_id)
+
 
 def render_floating_help_button(
     *,
@@ -2566,7 +2853,7 @@ def render_floating_help_button(
     scenario_id: str | None,
     editor_name: str = "",
 ) -> None:
-    """Render the persistent bottom-right floating Help & Search trigger button."""
+    """Render the persistent bottom-right floating Help & Settings trigger button."""
     st.html(
         """
         <style>
@@ -2595,13 +2882,13 @@ def render_floating_help_button(
     badge_suffix = f" ({open_count})" if open_count > 0 else ""
     with st.container(key="floating_help_hub_container"):
         if st.button(
-            f"Help & search{badge_suffix}",
+            f"Help & settings{badge_suffix}",
             icon=":material/help:",
             type="primary",
             key="floating_help_hub_trigger_btn",
             help=(
                 f"Open Help Manual for '{active_page_title}', Global Project Search, "
-                "Critical Thread Guide, Op ID Decoder, and Bug / Feature Tracker."
+                "Critical Thread Guide, Op ID Decoder, Bug / Feature Tracker, and Workspace Settings."
             ),
         ):
             open_universal_help_dialog(

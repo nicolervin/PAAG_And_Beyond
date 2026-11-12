@@ -26,8 +26,83 @@ from utils.table_filters import (
 
 
 DEFAULT_SELECTION_COLUMN = "selected"
-_TABLE_UI_REV_20261102 = 4
+_TABLE_UI_REV_20261102 = 6
 DECIMAL_COMPARISON_PLACES = 9
+
+FACTORY_NICKNAME_PREF_KEY = "pref_show_factory_nickname"
+PART_LABEL_MODE_PREF_KEY = "pref_part_label_mode"
+
+
+def get_part_label_mode() -> str:
+    """Return the active part label display mode ('number_desc_nickname', 'number_nickname', or 'number_desc_only')."""
+    try:
+        if not bool(st.session_state.get(FACTORY_NICKNAME_PREF_KEY, True)):
+            return "number_desc_only"
+        mode = str(st.session_state.get(PART_LABEL_MODE_PREF_KEY, "number_desc_nickname") or "number_desc_nickname")
+        if mode in {"number_desc_nickname", "number_nickname", "number_desc_only"}:
+            return mode
+        return "number_desc_nickname"
+    except Exception:
+        return "number_desc_nickname"
+
+
+def is_factory_nickname_enabled() -> bool:
+    """Return whether Factory Nickname inline display is enabled in the current session."""
+    try:
+        if str(st.session_state.get(PART_LABEL_MODE_PREF_KEY, "")) == "number_desc_only":
+            return False
+        return bool(st.session_state.get(FACTORY_NICKNAME_PREF_KEY, True))
+    except Exception:
+        return True
+
+
+def format_part_label(
+    part_number: object,
+    description: object = "",
+    factory_nickname: object = "",
+    *,
+    separator: str = " — ",
+    include_part_number: bool = True,
+    show_nickname: bool | None = None,
+) -> str:
+    """Format a part identifier and/or description, honoring the user's part label preference."""
+    p_num = (
+        ""
+        if part_number is None or (not isinstance(part_number, str) and pd.isna(part_number))
+        else str(part_number).strip()
+    )
+    p_desc = (
+        ""
+        if description is None or (not isinstance(description, str) and pd.isna(description))
+        else str(description).strip()
+    )
+    p_nick = (
+        ""
+        if factory_nickname is None
+        or (not isinstance(factory_nickname, str) and pd.isna(factory_nickname))
+        else str(factory_nickname).strip()
+    )
+    mode = get_part_label_mode() if show_nickname is None else ("number_desc_nickname" if show_nickname else "number_desc_only")
+    use_nick = mode != "number_desc_only" if show_nickname is None else bool(show_nickname)
+
+    if use_nick and mode == "number_nickname" and p_nick and p_nick.casefold() != p_num.casefold():
+        if include_part_number:
+            return f'{p_num}{separator}"{p_nick}"' if p_num else f'"{p_nick}"'
+        return f'"{p_nick}"'
+
+    nick_suffix = ""
+    if use_nick and p_nick and p_nick.casefold() not in {p_desc.casefold(), p_num.casefold()}:
+        nick_suffix = f' ("{p_nick}")'
+    if include_part_number:
+        if p_num and p_desc:
+            base = f"{p_num}{separator}{p_desc}"
+        else:
+            base = p_num or p_desc
+    else:
+        base = p_desc or p_num
+    if base:
+        return f"{base}{nick_suffix}"
+    return f'"{p_nick}"' if (use_nick and p_nick) else ""
 
 _UNSAVED_SOURCES_KEY = "_active_unsaved_sources"
 _PENDING_UNSAVED_NAV_KEY = "_pending_unsaved_nav"

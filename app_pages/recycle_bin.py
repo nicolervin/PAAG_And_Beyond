@@ -1,15 +1,25 @@
+import importlib as _importlib
+import sys as _sys
+
 import pandas as pd
 import streamlit as st
+
+if "utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "undo_recycle_bin_restore"):
+    if "utils.recycle_bin_store" in _sys.modules:
+        _importlib.reload(_sys.modules["utils.recycle_bin_store"])
+    _importlib.reload(_sys.modules["utils.store"])
 
 from utils.scope_ui import page_title_with_scope
 from utils.store import (
     RECYCLE_BIN_RETENTION_DAYS,
     audit_history,
     detect_recycle_bin_restore_conflicts,
+    get_last_undoable_recycle_bin_restore,
     list_recycle_bin_items,
     permanently_delete_recycle_bin_items,
     projects,
     restore_recycle_bin_items,
+    undo_recycle_bin_restore,
 )
 from utils.table_filters import (
     apply_pending_table_editor_reset,
@@ -60,6 +70,10 @@ items_df = list_recycle_bin_items(
     project_id=project_id if not include_all_projects else None,
     include_all_projects=include_all_projects,
 )
+last_undoable_restore = get_last_undoable_recycle_bin_restore(
+    project_id=project_id if not include_all_projects else None,
+    include_all_projects=include_all_projects,
+)
 
 with col_info:
     if items_df.empty:
@@ -75,6 +89,28 @@ if items_df.empty:
             "No deleted items are in the Recycle Bin for this view. Items deleted across the app will appear here automatically for 30 days.",
             icon=":material/delete_outline:",
         )
+        if last_undoable_restore:
+            undo_lbl = f"{last_undoable_restore['entity_type']}: {last_undoable_restore['entity_label']}"
+            if st.button(
+                f"Undo last restore ({undo_lbl})",
+                icon=":material/undo:",
+                type="secondary",
+                key="recycle_bin_empty_undo_restore_btn",
+                help=f"Move '{undo_lbl}' back to the Recycle Bin.",
+            ):
+                try:
+                    undone = undo_recycle_bin_restore(
+                        str(last_undoable_restore["audit_log_id"]),
+                        editor_name=current_editor or "Collaborator",
+                    )
+                    request_table_editor_reset(editor_key)
+                    st.toast(
+                        f"Undid restore of '{undone['entity_label']}' (moved back to Recycle Bin).",
+                        icon=":material/undo:",
+                    )
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
 else:
     table_df = items_df.copy()
     table_df.insert(0, "Select", False)
@@ -206,6 +242,39 @@ else:
         disabled=not selected_ids,
         key="destructive_recycle_bin_perm_delete_btn",
     )
+    undo_restore_label = (
+        f"Undo last restore ({last_undoable_restore['entity_label']})"
+        if last_undoable_restore
+        else "Undo last restore"
+    )
+    if len(undo_restore_label) > 48:
+        undo_restore_label = undo_restore_label[:45] + "...)"
+    undo_restore_clicked = btn_bar.button(
+        undo_restore_label,
+        icon=":material/undo:",
+        type="secondary",
+        disabled=last_undoable_restore is None,
+        key="recycle_bin_undo_restore_btn",
+        help=(
+            f"Undo restore of {last_undoable_restore['entity_type']}: {last_undoable_restore['entity_label']} and move it back to the Recycle Bin."
+            if last_undoable_restore
+            else "No recent Recycle Bin restore is available to undo."
+        ),
+    )
+    if undo_restore_clicked and last_undoable_restore:
+        try:
+            undone = undo_recycle_bin_restore(
+                str(last_undoable_restore["audit_log_id"]),
+                editor_name=current_editor or "Collaborator",
+            )
+            request_table_editor_reset(editor_key)
+            st.toast(
+                f"Undid restore of '{undone['entity_label']}' (moved back to Recycle Bin).",
+                icon=":material/undo:",
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
 
     if restore_clicked and selected_ids:
         try:

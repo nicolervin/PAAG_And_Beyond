@@ -194,7 +194,7 @@ class FishboneCanvasConnectionsTests(unittest.TestCase):
         contexts = work_element_op_contexts(self.project_id, scenario_id)
         self.assertIn(work_id, contexts)
         self.assertTrue(contexts[work_id]["complete"])
-        self.assertTrue(contexts[work_id]["op_id"].startswith("M1+M2.S1"))
+        self.assertEqual(contexts[work_id]["op_id"], "Shared Subassembly.01.1")
 
     def test_assign_parts_with_step_number(self) -> None:
         m_id = add_assembly_section(self.project_id, "Main Line", "Main spine", None, "")

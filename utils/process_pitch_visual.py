@@ -1111,9 +1111,15 @@ def render_pitch_canvas(
                 h_badges.append(f'<span class="h-badge">{_text(ht_clean)}</span>')
         h_cell = " ".join(h_badges) if h_badges else '<span class="text-muted">—</span>'
 
+        try:
+            from utils.table_ui import is_factory_nickname_enabled as _is_fn_enabled
+
+            _show_slide_fn = _is_fn_enabled()
+        except Exception:
+            _show_slide_fn = True
         nick_row = (
             f'<div class="part-nick-text" title="Factory Nickname: {p_nick}">{p_nick}</div>'
-            if p_nick
+            if (p_nick and _show_slide_fn)
             else '<div class="part-nick-space">&nbsp;</div>'
         )
 
@@ -6574,4 +6580,4 @@ def render_paag_pptx_deck(
     return buf.getvalue()
 
 
-_PROCESS_PITCH_VISUAL_REV_20261102 = 14
+_PROCESS_PITCH_VISUAL_REV_20261102 = 15

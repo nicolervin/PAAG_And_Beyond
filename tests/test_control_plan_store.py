@@ -647,9 +647,9 @@ class ControlPlanStoreTests(unittest.TestCase):
         self.assertEqual(
             projected_operations["op_id"].tolist()[:3],
             [
-                "M1.01-WA1-001.1",
-                "M1.01-WA2-001.1",
-                "M1.01-WA10-001.1",
+                "Main.01-WA1-001.1",
+                "Main.01-WA2-001.1",
+                "Main.01-WA10-001.1",
             ],
         )
         self.assertEqual(item_count_after, item_count_before)

@@ -17,6 +17,8 @@ PPE_ICONS_DIR = ASSETS_DIR / "ppe_icons"
 JSA_ICONS_DIR = ASSETS_DIR / "jsa_icons"
 EHS_LOGO_PATH = ASSETS_DIR / "ehs_icon" / "LOGO.png"
 
+_SAFETY_STORE_HOT_RELOAD_REV = 5
+
 STANDARD_BASELINE_PPE: list[str] = [
     "Cut Level 2 Gloves",
     "Safety Glasses",
@@ -416,6 +418,62 @@ JSA_ACTION_PRESETS: list[str] = list(
 )
 
 
+_AUTO_PPE_CATALOG_PHRASES: list[str] = sorted(
+    {
+        phrase
+        for item in PPE_CATALOG
+        for phrase in (
+            str(item.get("hazard") or "").strip(),
+            str(item.get("mitigation") or "").strip(),
+        )
+        if phrase
+    },
+    key=len,
+    reverse=True,
+)
+
+
+def _strip_auto_ppe_text(value: object, *, is_auto_ppe_row: bool = False) -> str:
+    """Return empty string if value is auto-populated PPE catalog boilerplate rather than EHS-entered text."""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if is_auto_ppe_row:
+        if s.casefold() in {
+            "none",
+            "n/a",
+            "safety glasses, cut-resistant gloves, and required workstation footwear.",
+            "safety toed shoes, safety glasses, cut-resistant gloves",
+        }:
+            return ""
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if parts and all(normalize_ppe_name(p).casefold() in _PPE_BY_CASEFOLD for p in parts):
+            return ""
+    rem = s
+    for phrase in _AUTO_PPE_CATALOG_PHRASES:
+        if phrase in rem:
+            rem = rem.replace(phrase, "")
+    rem_clean = rem.strip(" \t\r\n|,;.-")
+    if not rem_clean:
+        return ""
+    return s
+
+
+def _strip_yamazumi_area_text(val: object) -> str:
+    """Remove auto-generated 'Yamazumi area: ...' text or suffixes from job steps and descriptions."""
+    s = str(val or "").strip()
+    if not s:
+        return ""
+    if s.casefold().startswith("yamazumi area:"):
+        return ""
+    for sep in (" — ", " - ", " —", " -", "—", "-"):
+        marker = f"{sep}yamazumi area:"
+        idx = s.casefold().find(marker)
+        if idx >= 0:
+            return s[:idx].strip()
+    return s
+
+
 def derive_ppe_hazards_and_actions(raw_ppe: object) -> tuple[str, str]:
     """Derive default JSA Potential Errors / Hazards and Action strings from a step's PPE."""
     rollup = resolve_pitch_ppe_rollup(raw_ppe)
@@ -670,7 +728,7 @@ def safety_requirements(
         "active",
         "source_snapshot_json", "source_acknowledged_at",
         "created_at", "updated_at",
-        "work_element_label", "pitch", "pitch_id",
+        "work_element_label", "section_name", "pitch", "pitch_id",
         "sync_status", "upstream_changed", "upstream_diff_summary",
     ]
     with connection() as conn:
@@ -681,9 +739,11 @@ def safety_requirements(
             raise ValueError("The active planning scenario no longer exists.")
 
         pitch_rows = conn.execute(
-            """SELECT p.id, p.pitch_number
+            """SELECT p.id, p.pitch_number,
+                      COALESCE(NULLIF(TRIM(sec.name), ''), NULLIF(TRIM(a.name), ''), '') AS section_name
                FROM yamazumi_pitches p
                JOIN yamazumi_areas a ON a.id = p.area_id
+               LEFT JOIN assembly_sections sec ON sec.id = a.section_id
                WHERE p.project_id = ? AND a.scenario_id = ?""",
             (project_id, scenario_id),
         ).fetchall()
@@ -695,6 +755,15 @@ def safety_requirements(
         pitch_num_by_id = {
             str(r["id"]): str(r["pitch_number"] or "").strip()
             for r in pitch_rows
+        }
+        pitch_sec_by_id = {
+            str(r["id"]): str(r["section_name"] or "").strip()
+            for r in pitch_rows
+        }
+        pitch_sec_by_num = {
+            str(r["pitch_number"] or "").strip(): str(r["section_name"] or "").strip()
+            for r in pitch_rows
+            if str(r["pitch_number"] or "").strip()
         }
 
         rows = conn.execute(
@@ -733,7 +802,17 @@ def safety_requirements(
                       work.platform_height_in AS platform_height_in,
                       work.pit_depth_in AS pit_depth_in,
                       COALESCE(work.resource_type, 'Human') AS resource_type,
-                      COALESCE(work.resource_detail, '') AS resource_detail
+                      COALESCE(work.resource_detail, '') AS resource_detail,
+                      COALESCE(
+                          (SELECT COALESCE(NULLIF(TRIM(sec.name), ''), NULLIF(TRIM(a.name), ''), '')
+                           FROM yamazumi_elements yamazumi
+                           JOIN yamazumi_areas a ON a.id = yamazumi.area_id
+                           LEFT JOIN assembly_sections sec ON sec.id = a.section_id
+                           WHERE yamazumi.project_id = requirement.project_id
+                             AND yamazumi.process_element_id = requirement.work_element_id
+                           ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                          ''
+                      ) AS work_section_name
                FROM safety_requirements requirement
                JOIN work_elements work
                  ON work.id=requirement.work_element_id
@@ -763,7 +842,17 @@ def safety_requirements(
                                ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
                               ''
                           ) AS yamazumi_pitch_id,
-                          COALESCE(work.station, '') AS pitch
+                          COALESCE(work.station, '') AS pitch,
+                          COALESCE(
+                              (SELECT COALESCE(NULLIF(TRIM(sec.name), ''), NULLIF(TRIM(a.name), ''), '')
+                               FROM yamazumi_elements yamazumi
+                               JOIN yamazumi_areas a ON a.id = yamazumi.area_id
+                               LEFT JOIN assembly_sections sec ON sec.id = a.section_id
+                               WHERE yamazumi.project_id = work.project_id
+                                 AND yamazumi.process_element_id = work.id
+                               ORDER BY yamazumi.sequence, yamazumi.id LIMIT 1),
+                              ''
+                          ) AS work_section_name
                    FROM work_elements work
                    WHERE work.project_id=? AND work.scenario_id=?
                    ORDER BY work.sequence, work.id""",
@@ -788,9 +877,14 @@ def safety_requirements(
                 d["pitch"] = pitch_num_by_id[y_pid]
         else:
             d["pitch_id"] = pitch_id_by_num.get(raw_pitch, "")
+        d["section_name"] = (
+            pitch_sec_by_id.get(d["pitch_id"], "")
+            or pitch_sec_by_num.get(str(d.get("pitch") or "").strip(), "")
+            or str(d.get("work_section_name") or "").strip()
+        )
         d["ppe"] = parse_ppe(d.get("ppe"))
-        d["potential_hazards"] = str(d.get("potential_hazards") or "")
-        d["proposed_actions"] = str(d.get("proposed_actions") or "")
+        d["potential_hazards"] = _strip_auto_ppe_text(d.get("potential_hazards"))
+        d["proposed_actions"] = _strip_auto_ppe_text(d.get("proposed_actions"))
         d["source_snapshot_json"] = str(d.get("source_snapshot_json") or "")
         d["source_acknowledged_at"] = str(d.get("source_acknowledged_at") or "")
         live_snap = build_safety_process_snapshot(d)
@@ -818,6 +912,11 @@ def safety_requirements(
             else:
                 resolved_pid = pitch_id_by_num.get(raw_pitch, "")
                 resolved_pitch = raw_pitch
+            resolved_sec = (
+                pitch_sec_by_id.get(resolved_pid, "")
+                or pitch_sec_by_num.get(resolved_pitch, "")
+                or str(we_row["work_section_name"] or "").strip()
+            )
             result_rows.append(
                 {
                     "id": f"__unassigned__::{we_id}",
@@ -834,6 +933,7 @@ def safety_requirements(
                     "created_at": "",
                     "updated_at": "",
                     "work_element_label": str(we_row["work_element_label"] or ""),
+                    "section_name": resolved_sec,
                     "pitch": resolved_pitch,
                     "pitch_id": resolved_pid,
                     "work_sequence": int(we_row["work_sequence"] or 0),
@@ -869,6 +969,7 @@ def safety_requirements(
             "created_at": pd.Series(dtype="string"),
             "updated_at": pd.Series(dtype="string"),
             "work_element_label": pd.Series(dtype="string"),
+            "section_name": pd.Series(dtype="string"),
             "pitch": pd.Series(dtype="string"),
             "pitch_id": pd.Series(dtype="string"),
             "sync_status": pd.Series(dtype="string"),
@@ -1263,6 +1364,7 @@ def pitch_ppe_poster_summary(
                        COALESCE(p.ppe_poster_job_override, '') AS ppe_poster_job_override,
                        COALESCE(p.ppe_poster_workstation_override, '') AS ppe_poster_workstation_override,
                        COALESCE(p.ppe_poster_section_override, '') AS ppe_poster_section_override,
+                       COALESCE(p.jsa_rows_override_json, '') AS jsa_rows_override_json,
                        a.id AS area_id,
                        a.name AS area_name,
                        COALESCE(sec.name, '') AS section_name,
@@ -1331,9 +1433,9 @@ def pitch_ppe_poster_summary(
         seen_pitch_we.add(pair_key)
 
         label = (
-            str(wrow["yamazumi_description"] or "").strip()
-            or str(wrow["operation"] or "").strip()
-            or str(wrow["description"] or "").strip()
+            _strip_yamazumi_area_text(wrow["yamazumi_description"])
+            or _strip_yamazumi_area_text(wrow["operation"])
+            or _strip_yamazumi_area_text(wrow["description"])
             or "Work element"
         )
         we_reqs = safety_by_we.get(we_id, [])
@@ -1368,6 +1470,16 @@ def pitch_ppe_poster_summary(
 
         pitch_elements = elements_by_pitch.get(pid, [])
         all_pitch_ppe_lists = [el["ppe"] for el in pitch_elements if el["ppe"]]
+        raw_jsa_override = str(prow["jsa_rows_override_json"] or "").strip()
+        if not all_pitch_ppe_lists and raw_jsa_override:
+            try:
+                parsed_jsa_ov = json.loads(raw_jsa_override)
+                if isinstance(parsed_jsa_ov, dict) and "effective_ppe" in parsed_jsa_ov:
+                    ov_ppe = parse_ppe(parsed_jsa_ov.get("effective_ppe"))
+                    if ov_ppe:
+                        all_pitch_ppe_lists = [ov_ppe]
+            except Exception:
+                pass
         rollup = resolve_pitch_ppe_rollup(all_pitch_ppe_lists)
 
         unassigned_elements = [el["label"] for el in pitch_elements if not el["has_ppe"]]
@@ -1540,6 +1652,7 @@ def pitch_jsa_poster_summary(
                        COALESCE(NULLIF(TRIM(p.jsa_plant_code), ''), '') AS jsa_plant_code,
                        COALESCE(p.jsa_important_notice, '') AS jsa_important_notice,
                        COALESCE(p.jsa_include_pitch_photos, 1) AS jsa_include_pitch_photos,
+                       COALESCE(p.jsa_rows_override_json, '') AS jsa_rows_override_json,
                        a.id AS area_id,
                        a.name AS area_name,
                        COALESCE(sec.name, '') AS section_name,
@@ -1631,12 +1744,12 @@ def pitch_jsa_poster_summary(
         seen_pitch_we.add(pair_key)
 
         op_label = (
-            str(wrow["yamazumi_description"] or "").strip()
-            or str(wrow["operation"] or "").strip()
-            or str(wrow["description"] or "").strip()
+            _strip_yamazumi_area_text(wrow["yamazumi_description"])
+            or _strip_yamazumi_area_text(wrow["operation"])
+            or _strip_yamazumi_area_text(wrow["description"])
             or "Work element"
         )
-        proc_desc = str(wrow["description"] or "").strip()
+        proc_desc = _strip_yamazumi_area_text(wrow["description"])
         if proc_desc and proc_desc.casefold() != op_label.casefold():
             job_step_text = f"{op_label} — {proc_desc}"
         else:
@@ -1650,26 +1763,19 @@ def pitch_jsa_poster_summary(
         primary_req_id = str(we_reqs[0]["id"]) if we_reqs else ""
         for req in we_reqs:
             we_ppe_raw.extend(parse_ppe(req.get("ppe")))
-            hz = str(req.get("potential_hazards") or "").strip()
+            hz = _strip_auto_ppe_text(req.get("potential_hazards"))
             if hz and hz not in stored_hazards_list:
                 stored_hazards_list.append(hz)
-            ac = str(req.get("proposed_actions") or "").strip()
+            ac = _strip_auto_ppe_text(req.get("proposed_actions"))
             if ac and ac not in stored_actions_list:
                 stored_actions_list.append(ac)
-            rdesc = str(req.get("requirement_description") or "").strip()
-            if rdesc and not rdesc.startswith("PPE:") and rdesc not in req_desc_list:
-                req_desc_list.append(rdesc)
 
         we_ppe_unique = parse_ppe(we_ppe_raw)
-        auto_hazards, auto_actions = derive_ppe_hazards_and_actions(we_ppe_unique)
+        auto_hazards, auto_actions = ("", "")
         stored_hazards = " | ".join(stored_hazards_list)
         stored_actions = " | ".join(stored_actions_list)
-        effective_hazards = (
-            stored_hazards
-            or (" | ".join(req_desc_list) if req_desc_list else "")
-            or auto_hazards
-        )
-        effective_actions = stored_actions or auto_actions
+        effective_hazards = stored_hazards
+        effective_actions = stored_actions
 
         pitch_elem_list = elements_by_pitch.setdefault(resolved_pitch_id, [])
         pitch_elem_list.append(
@@ -1705,6 +1811,16 @@ def pitch_jsa_poster_summary(
         pitch_elements = elements_by_pitch.get(pid, [])
         pitch_we_ids = {el["work_element_id"] for el in pitch_elements}
         all_pitch_ppe_lists = [el["ppe"] for el in pitch_elements if el["ppe"]]
+        raw_override_json_pre = str(prow["jsa_rows_override_json"] or "").strip()
+        if not all_pitch_ppe_lists and raw_override_json_pre:
+            try:
+                parsed_ov_pre = json.loads(raw_override_json_pre)
+                if isinstance(parsed_ov_pre, dict) and "effective_ppe" in parsed_ov_pre:
+                    ov_ppe_pre = parse_ppe(parsed_ov_pre.get("effective_ppe"))
+                    if ov_ppe_pre:
+                        all_pitch_ppe_lists = [ov_ppe_pre]
+            except Exception:
+                pass
         rollup = resolve_pitch_ppe_rollup(all_pitch_ppe_lists)
 
         # Collect PAAG pitch visual aid photos for this pitch
@@ -1725,7 +1841,11 @@ def pitch_jsa_poster_summary(
         job_title_override = str(prow["jsa_job_title_override"] or "").strip()
         effective_job_title = job_title_override or default_job_title
 
-        plant_code_override = str(prow["jsa_plant_code"] or "").strip()
+        raw_plant_override = str(prow["jsa_plant_code"] or "").strip()
+        if raw_plant_override == "AP1" and default_building_loc:
+            plant_code_override = ""
+        else:
+            plant_code_override = raw_plant_override
         effective_plant_code = plant_code_override or default_building_loc or "AP1"
 
         target_op_name = p_name or p_num or "workstation"
@@ -1739,32 +1859,87 @@ def pitch_jsa_poster_summary(
         include_pitch_photos = bool(int(prow["jsa_include_pitch_photos"] or 0))
 
         eff_ppe_names = rollup["effective_names"]
-        put_on_ppe_action = (
-            ", ".join(eff_ppe_names)
-            if eff_ppe_names
-            else "Safety glasses, cut-resistant gloves, and required workstation footwear."
-        )
+        put_on_ppe_action = ", ".join(eff_ppe_names) if eff_ppe_names else ""
+        for el in pitch_elements:
+            if not str(el.get("section_name") or "").strip():
+                el["section_name"] = sec_name
         auto_ppe_row = {
             "step_number": 0,
             "work_element_id": "",
             "requirement_id": "",
+            "section_name": sec_name,
             "job_step": "Put on PPE",
             "operation": "Put on PPE",
-            "description": "Don required pitch PPE prior to starting work.",
+            "description": "",
             "tool": "",
             "torque": "",
             "ppe": eff_ppe_names,
             "has_ppe": bool(eff_ppe_names),
-            "stored_potential_hazards": "None",
-            "stored_proposed_actions": put_on_ppe_action,
-            "auto_potential_hazards": "None",
-            "auto_proposed_actions": put_on_ppe_action,
-            "potential_hazards": "None",
-            "proposed_actions": put_on_ppe_action,
+            "stored_potential_hazards": "",
+            "stored_proposed_actions": "",
+            "auto_potential_hazards": "",
+            "auto_proposed_actions": "",
+            "potential_hazards": "",
+            "proposed_actions": "",
             "is_auto_ppe_row": True,
         }
 
         jsa_table_rows = [auto_ppe_row, *pitch_elements]
+        raw_override_json = str(prow["jsa_rows_override_json"] or "").strip()
+        if raw_override_json:
+            try:
+                parsed_override = json.loads(raw_override_json)
+                if isinstance(parsed_override, dict):
+                    saved_rows_list = parsed_override.get("rows") or []
+                    known_we_ids = set(str(x) for x in (parsed_override.get("known_we_ids") or []) if str(x).strip())
+                elif isinstance(parsed_override, list):
+                    saved_rows_list = parsed_override
+                    known_we_ids = set()
+                else:
+                    saved_rows_list = []
+                    known_we_ids = set()
+                if saved_rows_list:
+                    elem_by_we = {str(el["work_element_id"]): el for el in pitch_elements}
+                    reconstructed: list[dict[str, Any]] = []
+                    seen_saved_we: set[str] = set()
+                    for idx_r, s_row in enumerate(saved_rows_list):
+                        if not isinstance(s_row, dict):
+                            continue
+                        we_id_val = str(s_row.get("work_element_id") or "").strip()
+                        is_auto = bool(s_row.get("is_auto_ppe_row"))
+                        if we_id_val and we_id_val not in elem_by_we and we_id_val in known_we_ids:
+                            # This work element was moved off this pitch in Yamazumi
+                            continue
+                        if we_id_val:
+                            seen_saved_we.add(we_id_val)
+                        base_elem = elem_by_we.get(we_id_val, {})
+                        reconstructed.append(
+                            {
+                                **base_elem,
+                                "step_number": idx_r,
+                                "work_element_id": we_id_val,
+                                "section_name": str(s_row.get("section_name") or base_elem.get("section_name") or sec_name or ""),
+                                "job_step": _strip_yamazumi_area_text(s_row.get("job_step")),
+                                "potential_hazards": _strip_auto_ppe_text(
+                                    s_row.get("potential_hazards"),
+                                    is_auto_ppe_row=is_auto,
+                                ),
+                                "proposed_actions": _strip_auto_ppe_text(
+                                    s_row.get("proposed_actions"),
+                                    is_auto_ppe_row=is_auto,
+                                ),
+                                "is_auto_ppe_row": is_auto,
+                            }
+                        )
+                    # Append any newly rebalanced PAAG work elements not previously in known_we_ids
+                    for el in pitch_elements:
+                        w_id = str(el["work_element_id"])
+                        if w_id not in seen_saved_we and w_id not in known_we_ids:
+                            reconstructed.append(el)
+                    if reconstructed:
+                        jsa_table_rows = reconstructed
+            except Exception:
+                pass
 
         summaries.append(
             {
@@ -1878,6 +2053,373 @@ def save_pitch_jsa_poster_settings(
         "plant_code": clean_plant,
         "important_notice_override": clean_notice,
         "include_pitch_photos": bool(clean_photos),
+        "timestamp": timestamp,
+    }
+
+
+def save_pitch_jsa_poster_full(
+    project_id: str,
+    scenario_id: str,
+    pitch_id: str,
+    payload: dict[str, Any],
+    editor_name: str = "Collaborator",
+) -> dict[str, Any]:
+    """Persist full JSA Poster edits (header fields, PPE selection, step hazards/actions, and custom rows)."""
+    editor = str(editor_name or "").strip() or "Collaborator"
+    pid = str(pitch_id or "").strip()
+    if not pid:
+        raise ValueError("Select a valid pitch before saving the JSA Poster.")
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid JSA Poster save payload.")
+
+    clean_plant = str(payload.get("plantCode") or "").strip()
+    clean_title = str(payload.get("jobTitle") or "").strip()
+    clean_notice = str(payload.get("importantNotice") or "").strip()
+    raw_steps = payload.get("steps")
+    steps_list = raw_steps if isinstance(raw_steps, list) else []
+    raw_eff_ppe = payload.get("effectivePPE")
+    selected_jsa_ppe = parse_ppe(raw_eff_ppe) if isinstance(raw_eff_ppe, list) else None
+    raw_ppe_by_we = payload.get("ppeByWorkElement")
+    ppe_by_we_map: dict[str, list[str]] | None = None
+    if isinstance(raw_ppe_by_we, dict):
+        ppe_by_we_map = {
+            str(k).strip(): parse_ppe(v if isinstance(v, list) else [])
+            for k, v in raw_ppe_by_we.items()
+            if str(k).strip()
+        }
+
+    timestamp = now_iso()
+
+    with connection() as conn:
+        prow = conn.execute(
+            """SELECT p.id, p.pitch_number, COALESCE(p.pitch_name, '') AS pitch_name
+               FROM yamazumi_pitches p
+               JOIN yamazumi_areas a ON a.id = p.area_id
+               WHERE p.id = ? AND p.project_id = ? AND a.scenario_id = ?""",
+            (pid, project_id, scenario_id),
+        ).fetchone()
+        if not prow:
+            raise ValueError("The selected pitch no longer belongs to the active scenario.")
+
+        # Determine all PAAG work elements currently on this pitch
+        we_on_pitch_rows = conn.execute(
+            """SELECT w.id AS work_element_id
+               FROM work_elements w
+               LEFT JOIN yamazumi_elements y
+                 ON y.project_id = w.project_id AND y.process_element_id = w.id
+               WHERE w.project_id = ? AND w.scenario_id = ?
+                 AND (y.pitch_id = ? OR LOWER(TRIM(COALESCE(w.station, ''))) = LOWER(TRIM(?)))""",
+            (project_id, scenario_id, pid, str(prow["pitch_number"] or "")),
+        ).fetchall()
+        known_we_ids = [str(r["work_element_id"]) for r in we_on_pitch_rows if str(r["work_element_id"] or "").strip()]
+
+        normalized_rows: list[dict[str, Any]] = []
+        we_step_updates: list[dict[str, Any]] = []
+        for s in steps_list:
+            if not isinstance(s, dict):
+                continue
+            s_sec = str(s.get("section_name") or "").strip()
+            j_step = _strip_yamazumi_area_text(s.get("job_step"))
+            p_haz = str(s.get("potential_hazards") or "").strip()
+            p_act = str(s.get("proposed_actions") or "").strip()
+            we_id = str(s.get("work_element_id") or "").strip()
+            is_auto = bool(s.get("is_auto_ppe_row"))
+            # Skip trailing completely empty blank rows unless they are the only row
+            if not j_step and not p_haz and not p_act and not we_id and not is_auto:
+                continue
+            normalized_rows.append(
+                {
+                    "work_element_id": we_id,
+                    "section_name": s_sec,
+                    "job_step": j_step,
+                    "potential_hazards": p_haz,
+                    "proposed_actions": p_act,
+                    "is_auto_ppe_row": is_auto,
+                }
+            )
+            if we_id:
+                we_step_updates.append(
+                    {
+                        "work_element_id": we_id,
+                        "potential_hazards": p_haz,
+                        "proposed_actions": p_act,
+                    }
+                )
+
+        ppe_only_mode = bool(payload.get("ppeOnly"))
+        if not ppe_only_mode:
+            override_payload_dict: dict[str, Any] = {
+                "rows": normalized_rows,
+                "known_we_ids": known_we_ids,
+            }
+            # Only store pitch-level effective_ppe fallback when the pitch has no PAAG work elements;
+            # when work elements exist on the pitch, PPE is stored per work_element_id so it moves with the task.
+            if selected_jsa_ppe is not None and not known_we_ids:
+                override_payload_dict["effective_ppe"] = selected_jsa_ppe
+            override_payload_json = json.dumps(
+                override_payload_dict,
+                ensure_ascii=False,
+            )
+
+            conn.execute(
+                """UPDATE yamazumi_pitches
+                   SET jsa_job_title_override = ?,
+                       jsa_plant_code = ?,
+                       jsa_important_notice = ?,
+                       jsa_rows_override_json = ?,
+                       updated_at = ?
+                   WHERE id = ? AND project_id = ?""",
+                (clean_title, clean_plant, clean_notice, override_payload_json, timestamp, pid, project_id),
+            )
+
+        # Also update safety_requirements for any linked PAAG work elements edited in the JSA table
+        updated_req_count = 0
+        if we_step_updates:
+            valid_we_ids = {str(w["work_element_id"]) for w in we_step_updates}
+            we_inputs = _fetch_work_element_snapshot_inputs(
+                conn, project_id, scenario_id, list(valid_we_ids)
+            )
+            for item in we_step_updates:
+                w_id = item["work_element_id"]
+                haz_val = item["potential_hazards"]
+                act_val = item["proposed_actions"]
+                existing_req = conn.execute(
+                    """SELECT * FROM safety_requirements
+                       WHERE project_id = ? AND scenario_id = ? AND work_element_id = ?
+                       ORDER BY active DESC, created_at, id LIMIT 1""",
+                    (project_id, scenario_id, w_id),
+                ).fetchone()
+                we_row = we_inputs.get(w_id)
+                live_snap_json = (
+                    json.dumps(build_safety_process_snapshot(we_row), sort_keys=True)
+                    if we_row
+                    else ""
+                )
+                if existing_req:
+                    conn.execute(
+                        """UPDATE safety_requirements
+                           SET potential_hazards = ?,
+                               proposed_actions = ?,
+                               source_snapshot_json = ?,
+                               source_acknowledged_at = ?,
+                               updated_at = ?
+                           WHERE id = ? AND project_id = ? AND scenario_id = ?""",
+                        (
+                            haz_val,
+                            act_val,
+                            live_snap_json,
+                            timestamp,
+                            timestamp,
+                            str(existing_req["id"]),
+                            project_id,
+                            scenario_id,
+                        ),
+                    )
+                    updated_req_count += 1
+                elif haz_val or act_val:
+                    req_id = str(uuid4())
+                    conn.execute(
+                        """INSERT INTO safety_requirements
+                           (id, project_id, scenario_id, work_element_id,
+                            requirement_description, ppe, potential_hazards, proposed_actions,
+                            active, source_snapshot_json, source_acknowledged_at,
+                            created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, ?, ?, ?, ?)""",
+                        (
+                            req_id,
+                            project_id,
+                            scenario_id,
+                            w_id,
+                            haz_val or act_val or "JSA step requirement",
+                            haz_val,
+                            act_val,
+                            live_snap_json,
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    updated_req_count += 1
+
+        # Synchronize per-task PPE selections (ppeByWorkElement) or fallback pitch PPE to safety_requirements
+        if ppe_by_we_map is not None and known_we_ids:
+            we_placeholders = ",".join("?" for _ in known_we_ids)
+            pitch_req_rows = conn.execute(
+                f"""SELECT id, work_element_id, ppe, COALESCE(potential_hazards, '') AS potential_hazards,
+                           COALESCE(proposed_actions, '') AS proposed_actions
+                    FROM safety_requirements
+                    WHERE project_id = ? AND scenario_id = ? AND active = 1
+                      AND work_element_id IN ({we_placeholders})
+                    ORDER BY created_at, id""",
+                [project_id, scenario_id, *known_we_ids],
+            ).fetchall()
+            reqs_by_we: dict[str, list[dict[str, Any]]] = {}
+            for r in pitch_req_rows:
+                reqs_by_we.setdefault(str(r["work_element_id"]), []).append(dict(r))
+            we_inputs_all = _fetch_work_element_snapshot_inputs(
+                conn, project_id, scenario_id, list(known_we_ids)
+            )
+            for w_id in known_we_ids:
+                if w_id not in ppe_by_we_map:
+                    continue
+                new_ppe_list = parse_ppe(ppe_by_we_map.get(w_id) or [])
+                ex_list = reqs_by_we.get(w_id, [])
+                ex = ex_list[0] if ex_list else None
+                existing_ppe_list = parse_ppe([p for row_r in ex_list for p in parse_ppe(row_r.get("ppe"))])
+                if set(new_ppe_list) == set(existing_ppe_list) and len(ex_list) <= 1:
+                    continue
+                ppe_serialized = serialize_ppe(new_ppe_list)
+                we_row = we_inputs_all.get(w_id)
+                live_snap_json = (
+                    json.dumps(build_safety_process_snapshot(we_row), sort_keys=True)
+                    if we_row
+                    else ""
+                )
+                if ex:
+                    next_h = _strip_auto_ppe_text(ex.get("potential_hazards"))
+                    next_a = _strip_auto_ppe_text(ex.get("proposed_actions"))
+                    conn.execute(
+                        """UPDATE safety_requirements
+                           SET ppe = ?, potential_hazards = ?, proposed_actions = ?,
+                               source_snapshot_json = ?, source_acknowledged_at = ?, updated_at = ?
+                           WHERE id = ? AND project_id = ? AND scenario_id = ?""",
+                        (
+                            ppe_serialized,
+                            next_h,
+                            next_a,
+                            live_snap_json,
+                            timestamp,
+                            timestamp,
+                            str(ex["id"]),
+                            project_id,
+                            scenario_id,
+                        ),
+                    )
+                    for extra_row in ex_list[1:]:
+                        if str(extra_row.get("ppe") or "").strip():
+                            conn.execute(
+                                """UPDATE safety_requirements
+                                   SET ppe = '', updated_at = ?
+                                   WHERE id = ? AND project_id = ? AND scenario_id = ?""",
+                                (timestamp, str(extra_row["id"]), project_id, scenario_id),
+                            )
+                    updated_req_count += 1
+                elif new_ppe_list:
+                    conn.execute(
+                        """INSERT INTO safety_requirements
+                           (id, project_id, scenario_id, work_element_id,
+                            requirement_description, ppe, potential_hazards, proposed_actions,
+                            active, source_snapshot_json, source_acknowledged_at,
+                            created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, '', '', 1, ?, ?, ?, ?)""",
+                        (
+                            str(uuid4()),
+                            project_id,
+                            scenario_id,
+                            w_id,
+                            f"PPE: {', '.join(new_ppe_list)}",
+                            ppe_serialized,
+                            live_snap_json,
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    updated_req_count += 1
+        elif selected_jsa_ppe is not None and known_we_ids:
+            we_placeholders = ",".join("?" for _ in known_we_ids)
+            pitch_req_rows = conn.execute(
+                f"""SELECT id, work_element_id, ppe, COALESCE(potential_hazards, '') AS potential_hazards,
+                           COALESCE(proposed_actions, '') AS proposed_actions
+                    FROM safety_requirements
+                    WHERE project_id = ? AND scenario_id = ? AND active = 1
+                      AND work_element_id IN ({we_placeholders})
+                    ORDER BY created_at, id""",
+                [project_id, scenario_id, *known_we_ids],
+            ).fetchall()
+            current_all_ppe: list[list[str]] = [parse_ppe(r["ppe"]) for r in pitch_req_rows if parse_ppe(r["ppe"])]
+            current_eff_names = set(resolve_pitch_ppe_rollup(current_all_ppe)["effective_names"])
+            desired_eff_names = set(selected_jsa_ppe)
+            added_ppe = [p for p in selected_jsa_ppe if p not in current_eff_names]
+            removed_ppe = {p for p in current_eff_names if p not in desired_eff_names}
+            if added_ppe or removed_ppe:
+                we_inputs_all = _fetch_work_element_snapshot_inputs(
+                    conn, project_id, scenario_id, list(known_we_ids)
+                )
+                req_by_we = {}
+                for r in pitch_req_rows:
+                    req_by_we.setdefault(str(r["work_element_id"]), dict(r))
+                for w_id in known_we_ids:
+                    ex = req_by_we.get(w_id)
+                    existing_ppe_list = parse_ppe(ex["ppe"]) if ex else []
+                    new_ppe_list = [p for p in existing_ppe_list if p not in removed_ppe]
+                    for ap in added_ppe:
+                        if ap not in new_ppe_list:
+                            new_ppe_list.append(ap)
+                    new_ppe_list = parse_ppe(new_ppe_list)
+                    if set(new_ppe_list) == set(existing_ppe_list):
+                        continue
+                    ppe_serialized = serialize_ppe(new_ppe_list)
+                    we_row = we_inputs_all.get(w_id)
+                    live_snap_json = (
+                        json.dumps(build_safety_process_snapshot(we_row), sort_keys=True)
+                        if we_row
+                        else ""
+                    )
+                    if ex:
+                        conn.execute(
+                            """UPDATE safety_requirements
+                               SET ppe = ?, source_snapshot_json = ?, source_acknowledged_at = ?, updated_at = ?
+                               WHERE id = ? AND project_id = ? AND scenario_id = ?""",
+                            (ppe_serialized, live_snap_json, timestamp, timestamp, str(ex["id"]), project_id, scenario_id),
+                        )
+                        updated_req_count += 1
+                    elif new_ppe_list:
+                        conn.execute(
+                            """INSERT INTO safety_requirements
+                               (id, project_id, scenario_id, work_element_id,
+                                requirement_description, ppe, potential_hazards, proposed_actions,
+                                active, source_snapshot_json, source_acknowledged_at,
+                                created_at, updated_at)
+                               VALUES (?, ?, ?, ?, ?, ?, '', '', 1, ?, ?, ?, ?)""",
+                            (
+                                str(uuid4()),
+                                project_id,
+                                scenario_id,
+                                w_id,
+                                f"PPE: {', '.join(new_ppe_list)}",
+                                ppe_serialized,
+                                live_snap_json,
+                                timestamp,
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+                        updated_req_count += 1
+
+        record_audit_event(
+            project_id,
+            "Safety requirements",
+            "Save JSA poster",
+            max(1, len(normalized_rows)),
+            editor,
+            {
+                "scenario_id": scenario_id,
+                "pitch_id": pid,
+                "pitch_number": str(prow["pitch_number"] or ""),
+                "job_title": clean_title,
+                "plant_code": clean_plant,
+                "row_count": len(normalized_rows),
+                "updated_paag_steps": updated_req_count,
+                "updated_at": timestamp,
+            },
+            _conn=conn,
+        )
+
+    return {
+        "pitch_id": pid,
+        "row_count": len(normalized_rows),
+        "updated_paag_steps": updated_req_count,
         "timestamp": timestamp,
     }
 
@@ -2535,6 +3077,7 @@ __domain_exports__ = [
     'apply_standard_baseline_ppe', 'pitch_ppe_poster_summary',
     'save_pitch_ppe_poster_overrides', 'resolve_pitch_ppe_rollup',
     'pitch_jsa_poster_summary', 'save_pitch_jsa_poster_settings',
+    'save_pitch_jsa_poster_full',
     'save_pitch_jsa_steps', 'autofill_blank_jsa_hazards_from_ppe',
     'tag_ppe_to_work_elements', 'update_ppe_item_element_tags_on_pitch',
     'derive_ppe_hazards_and_actions',

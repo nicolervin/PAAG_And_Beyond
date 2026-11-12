@@ -902,13 +902,13 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         self.assertEqual(handling_sb.value, "Consume")
         self.assertFalse(qty_input.disabled)
 
-        # Switching to Handle disables the Quantity box
+        # Switching to Handle keeps the Quantity box enabled
         handling_sb.select("Handle").run(timeout=30)
         self.assertEqual(list(app.exception), [])
         qty_input_handle = app.number_input(
             key=f"process_pairing_quantity_{self.scenario_id}_{self.section_id}_{yam_id}_{part_id}"
         )
-        self.assertTrue(qty_input_handle.disabled)
+        self.assertFalse(qty_input_handle.disabled)
 
         # Switching back to Consume re-enables Quantity and saves the entered quantity
         handling_sb = app.selectbox(
@@ -1706,7 +1706,7 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         submit_btn = app.button(
             key=f"process_pairing_submit_{self.scenario_id}_{self.section_id}_{yam_id}"
         )
-        self.assertIn("2 parts", submit_btn.label)
+        self.assertEqual(submit_btn.label, "Create PAAG Elements (work, parts)")
         submit_btn.click().run(timeout=30)
         self.assertEqual(list(app.exception), [])
         self.assertEqual(list(app.error), [])
@@ -2156,7 +2156,7 @@ class AvailableFishbonePartsFiltersTests(unittest.TestCase):
         self.assertEqual(list(app.exception), [])
 
         loc_sb = app.selectbox(key=placement_key)
-        self.assertTrue(loc_sb.disabled)
+        self.assertFalse(loc_sb.disabled)
         self.assertEqual(loc_sb.value, assign_1)
 
         grp_name_key = (

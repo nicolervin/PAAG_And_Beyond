@@ -149,7 +149,7 @@ from utils.table_ui import (
 )
 import utils.yamazumi_board as _yamazumi_board_mod
 
-if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 23:
+if getattr(_yamazumi_board_mod, "_YAMAZUMI_BOARD_HOT_RELOAD_REV", 0) < 24:
     _importlib.reload(_yamazumi_board_mod)
 
 from utils.yamazumi_board import merge_yamazumi_pitch_variants, yamazumi_board
@@ -2002,15 +2002,56 @@ else:
     st.session_state[area_widget_key] = [default_area_id]
     if populated_area_ids:
         st.session_state[area_default_initialized_key] = True
+pending_area_switch_key = f"yamazumi_pending_area_switch_{scenario_id}"
 if area_widget_key in st.session_state:
     valid_widget_areas = [
         str(v)
         for v in (st.session_state.get(area_widget_key) or [])
         if str(v) in area_labels
     ]
-    st.session_state[area_widget_key] = (
+    candidate_widget_areas = (
         valid_widget_areas if valid_widget_areas else [default_area_id]
     )
+    prev_synced_areas = [
+        str(v)
+        for v in (st.session_state.get(area_last_synced_key) or [])
+        if str(v) in area_labels
+    ]
+    if (
+        prev_synced_areas
+        and not pending_area_id
+        and candidate_widget_areas != prev_synced_areas
+    ):
+        prev_primary_aid = prev_synced_areas[0]
+        prev_has_board_draft = any(
+            isinstance(
+                st.session_state.get(
+                    f"yamazumi_board_draft_{project_id}_{scenario_id}_{aid}"
+                ),
+                dict,
+            )
+            and bool(
+                st.session_state.get(
+                    f"yamazumi_board_draft_{project_id}_{scenario_id}_{aid}"
+                )
+            )
+            for aid in prev_synced_areas
+        )
+        prev_has_table_edits = (
+            table_has_unsaved_changes(
+                f"yamazumi_pitch_editor_{scenario_id}_{prev_primary_aid}",
+                native_row_selection=True,
+            )
+            or table_has_unsaved_changes(
+                f"yamazumi_element_editor_{scenario_id}_{prev_primary_aid}",
+                native_row_selection=True,
+            )
+        )
+        if prev_has_board_draft or prev_has_table_edits:
+            st.session_state[pending_area_switch_key] = list(candidate_widget_areas)
+            candidate_widget_areas = list(prev_synced_areas)
+            st.session_state[area_selector_key] = list(prev_synced_areas)
+    st.session_state[area_widget_key] = candidate_widget_areas
 with top_controls_slot:
     settings_controls = st.container(horizontal=True, vertical_alignment="bottom")
     selected_areas = settings_controls.multiselect(
@@ -2326,15 +2367,6 @@ if multi_area_selected:
     ].copy()
 else:
     elements = yamazumi_elements(project_id, area_id)
-criticality_by_work_element = work_element_criticality(project_id, scenario_id)
-
-
-def criticality_for_process_link(value: object) -> list[str]:
-    if value is None or pd.isna(value):
-        return []
-    return list(criticality_by_work_element.get(str(value), []))
-
-
 if not elements.empty:
     parsed_variants_list = [
         [
@@ -2348,9 +2380,6 @@ if not elements.empty:
     elements["model_variants"] = parsed_variants_list
     elements["model_variant"] = [
         values[0] if values else "All models" for values in parsed_variants_list
-    ]
-    elements["criticality"] = [
-        criticality_for_process_link(val) for val in elements["process_element_id"]
     ]
 
 defined_work_regions: set[str] = set()
@@ -3006,10 +3035,10 @@ def handle_yamazumi_move() -> None:
     current_draft = st.session_state.get(board_draft_key)
     valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
     if not isinstance(current_draft, dict):
-        current_draft = build_stack_draft(baseline_elements)
+        current_draft = build_stack_draft(persisted_elements)
     else:
         current_draft = reconcile_stack_draft(
-            current_draft, baseline_elements, valid_pitch_ids=valid_p_ids
+            current_draft, persisted_elements, valid_pitch_ids=valid_p_ids
         )
     try:
         pre_move_snapshot = {
@@ -3148,13 +3177,33 @@ def handle_edit_pitch_request() -> None:
         st.session_state[edit_pitch_dialog_key] = target_pid
 
 
+def _clear_edit_element_widget_state(target_element_id: object, *, clear_baseline: bool = True) -> None:
+    eid = str(target_element_id or "").strip()
+    if not eid:
+        return
+    for prefix in (
+        "edit_element_pitch_",
+        "edit_element_description_",
+        "edit_element_time_",
+        "edit_element_variants_",
+        "edit_element_work_type_",
+        "edit_element_work_region_",
+    ):
+        st.session_state.pop(f"{prefix}{eid}", None)
+    for k in list(st.session_state.keys()):
+        if str(k).startswith(f"edit_element_variants_{eid}_"):
+            st.session_state.pop(k, None)
+    if clear_baseline:
+        st.session_state.pop(f"edit_element_baseline_{eid}", None)
+        st.session_state.pop(f"edit_element_conflict_{eid}", None)
+
+
 def handle_edit_element_request() -> None:
     request = _board_trigger("edit_element")
     if request.get("element_id"):
         target_eid = str(request["element_id"])
         close_other_yamazumi_dialogs(edit_element_dialog_key)
-        st.session_state.pop(f"edit_element_baseline_{target_eid}", None)
-        st.session_state.pop(f"edit_element_conflict_{target_eid}", None)
+        _clear_edit_element_widget_state(target_eid)
         if not elements.empty:
             m_rows = elements.loc[elements["id"].astype(str) == target_eid]
             if not m_rows.empty:
@@ -3381,6 +3430,7 @@ def add_element_dialog() -> None:
                 dest_stack = stack_id(target_pitch_id)
                 active_board_draft.setdefault(dest_stack, []).append(new_element_id)
                 st.session_state[board_draft_key] = active_board_draft
+            st.session_state.pop(board_clean_baseline_key, None)
             record_audit_event(
                 project_id, "Yamazumi elements", "Add from interactive board", 1,
                 st.session_state.get("current_editor", ""),
@@ -3638,8 +3688,7 @@ def close_edit_element_dialog() -> None:
         else str(prev_target or "")
     ).strip()
     if prev_eid:
-        st.session_state.pop(f"edit_element_baseline_{prev_eid}", None)
-        st.session_state.pop(f"edit_element_conflict_{prev_eid}", None)
+        _clear_edit_element_widget_state(prev_eid)
 
 
 def close_move_pitch_dialog() -> None:
@@ -4432,8 +4481,8 @@ def edit_element_dialog(
                 project_id, "Yamazumi elements", "Edit from interactive board", 1,
                 st.session_state.get("current_editor", ""), {"element_id": updated_element_id or element_id, "description": description},
             )
-            st.session_state.pop(conflict_key, None)
-            st.session_state.pop(baseline_key, None)
+            _clear_edit_element_widget_state(element_id)
+            st.session_state.pop(board_clean_baseline_key, None)
             st.session_state.pop(state_key, None)
             request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
@@ -4946,13 +4995,74 @@ with interactive_yamazumi_tab:
         "Pitch stacks follow Op ID pitch-address order, with Subassembly and Kitter "
         "feeders immediately before the pitch they feed. Drag work within or between "
         "stacks; order is measured outward from the assembly-flow centerline and remains "
-        "a draft until Save & Refresh.",
-        help=(
-            "CTQ comes from a linked PFMEA Classification of E, P, P-, Q, or E-. "
-            "Safety comes from an active Safety requirement linked to the same Process step."
-        ),
+        "a draft until Save & Refresh."
     )
     persisted_board_elements = elements.to_dict("records")
+    valid_p_ids_for_rescue = (
+        set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
+    )
+    other_area_drafts: list[tuple[str, dict, list[str]]] = []
+    for _aid in selected_area_ids:
+        if str(_aid) == str(area_id):
+            continue
+        _other_d_key = f"yamazumi_board_draft_{project_id}_{scenario_id}_{_aid}"
+        _other_d = st.session_state.get(_other_d_key)
+        if isinstance(_other_d, dict) and _other_d:
+            _other_m = list(
+                st.session_state.get(
+                    f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{_aid}"
+                )
+                or []
+            )
+            other_area_drafts.append((str(_aid), _other_d, _other_m))
+    if other_area_drafts:
+        _merged_draft = st.session_state.get(board_draft_key)
+        if not isinstance(_merged_draft, dict) or not _merged_draft:
+            _merged_draft = build_stack_draft(persisted_board_elements)
+        else:
+            _merged_draft = reconcile_stack_draft(
+                _merged_draft,
+                persisted_board_elements,
+                valid_pitch_ids=valid_p_ids_for_rescue,
+            )
+        _merged_moved = list(st.session_state.get(board_moved_ids_key) or [])
+        for _aid, _other_d, _other_m in other_area_drafts:
+            for _s_key, _s_eids in _other_d.items():
+                _dest_stack = stack_id(_s_key)
+                for _idx_pos, _m_eid in enumerate(_s_eids or []):
+                    _m_eid_str = str(_m_eid or "").strip()
+                    if not _m_eid_str:
+                        continue
+                    try:
+                        _merged_draft = apply_stack_drop(
+                            _merged_draft,
+                            element_id=_m_eid_str,
+                            pitch_id=None
+                            if _dest_stack == UNASSIGNED_STACK_ID
+                            else _dest_stack,
+                            insert_index=_idx_pos,
+                        )
+                    except ValueError:
+                        pass
+            for _m_id in _other_m:
+                _m_id_str = str(_m_id or "").strip()
+                if _m_id_str and _m_id_str not in _merged_moved:
+                    _merged_moved.append(_m_id_str)
+            st.session_state.pop(
+                f"yamazumi_board_draft_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_clean_baseline_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{_aid}", None
+            )
+        st.session_state[board_draft_key] = reconcile_stack_draft(
+            _merged_draft,
+            persisted_board_elements,
+            valid_pitch_ids=valid_p_ids_for_rescue,
+        )
+        st.session_state[board_moved_ids_key] = _merged_moved
     baseline_board_elements = st.session_state.get(board_clean_baseline_key)
     if not isinstance(baseline_board_elements, list) or not baseline_board_elements:
         baseline_board_elements = [dict(e) for e in persisted_board_elements]
@@ -5033,7 +5143,7 @@ with interactive_yamazumi_tab:
     if isinstance(raw_board_draft, dict):
         valid_p_ids = set(pitches["id"].dropna().astype(str)) if not pitches.empty else set()
         board_draft = reconcile_stack_draft(
-            raw_board_draft, baseline_board_elements, valid_pitch_ids=valid_p_ids
+            raw_board_draft, persisted_board_elements, valid_pitch_ids=valid_p_ids
         )
         if board_draft != raw_board_draft:
             st.session_state[board_draft_key] = board_draft
@@ -5043,8 +5153,12 @@ with interactive_yamazumi_tab:
         draft_differs(persisted_board_elements, board_draft)
         or draft_differs(baseline_board_elements, board_draft)
     )
+    if not has_board_draft and isinstance(board_draft, dict):
+        st.session_state.pop(board_draft_key, None)
+        st.session_state.pop(board_moved_ids_key, None)
+        board_draft = None
     board_elements = (
-        apply_stack_draft_to_elements(baseline_board_elements, board_draft)
+        apply_stack_draft_to_elements(persisted_board_elements, board_draft)
         if has_board_draft else persisted_board_elements
     )
     ordered_board_pitches = order_yamazumi_pitches_for_board(pitches)
@@ -5264,14 +5378,32 @@ with interactive_yamazumi_tab:
                     "centerline_outward_stacks": result["affected_stacks"],
                 },
             )
-            st.session_state.pop(board_draft_key, None)
-            st.session_state.pop(board_clean_baseline_key, None)
-            st.session_state.pop(board_moved_ids_key, None)
-            st.session_state.pop(board_undo_stack_key, None)
-            st.session_state.pop(board_redo_stack_key, None)
+            for _aid in [*selected_area_ids, str(area_id)]:
+                st.session_state.pop(
+                    f"yamazumi_board_draft_{project_id}_{scenario_id}_{_aid}", None
+                )
+                st.session_state.pop(
+                    f"yamazumi_board_clean_baseline_{project_id}_{scenario_id}_{_aid}",
+                    None,
+                )
+                st.session_state.pop(
+                    f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{_aid}", None
+                )
+                st.session_state.pop(
+                    f"yamazumi_board_undo_stack_{project_id}_{scenario_id}_{_aid}", None
+                )
+                st.session_state.pop(
+                    f"yamazumi_board_redo_stack_{project_id}_{scenario_id}_{_aid}", None
+                )
             if result["enabled_variants"]:
                 request_table_editor_reset(pitch_editor_key)
             request_table_editor_reset(element_editor_key)
+            switch_target_areas = st.session_state.pop(
+                f"yamazumi_switch_areas_after_save_{scenario_id}", None
+            )
+            if isinstance(switch_target_areas, list) and switch_target_areas:
+                st.session_state[area_selector_key] = list(switch_target_areas)
+                st.session_state.pop(area_last_synced_key, None)
             st.toast(
                 f"Saved {len(result['affected_stacks'])} Yamazumi stack(s)"
                 + (
@@ -5293,7 +5425,89 @@ gui_delete_dialog_open = bool(
     st.session_state.get(gui_pitch_delete_key)
     or st.session_state.get(gui_element_delete_key)
 )
-if st.session_state.get(gui_pitch_delete_key):
+@st.dialog("Unsaved Yamazumi Changes", dismissible=False)
+def confirm_area_switch_unsaved_dialog() -> None:
+    target_area_ids = [
+        str(v)
+        for v in (st.session_state.get(pending_area_switch_key) or [])
+        if str(v) in area_labels
+    ]
+    if not target_area_ids:
+        st.session_state.pop(pending_area_switch_key, None)
+        st.rerun()
+        return
+    target_names = [area_labels[aid] for aid in target_area_ids]
+    target_label = (
+        target_names[0]
+        if len(target_names) == 1
+        else f"{len(target_names)} Yamazumi areas ({', '.join(target_names[:3])})"
+    )
+    has_unsaved_tables = (
+        table_has_unsaved_changes(pitch_editor_key, native_row_selection=True)
+        or table_has_unsaved_changes(element_editor_key, native_row_selection=True)
+    )
+    st.warning(
+        f"You have unsaved Yamazumi changes in **{selected_areas_label}**.",
+        icon=":material/warning:",
+    )
+    st.write(
+        f"Save or discard your changes before switching **Yamazumi Area** to **{target_label}**."
+    )
+    actions = st.container(horizontal=True)
+    if has_board_draft and not has_unsaved_tables:
+        if actions.button(
+            "Save & Switch Areas",
+            type="primary",
+            icon=":material/save:",
+            key=f"save_and_switch_area_{scenario_id}",
+        ):
+            st.session_state[f"yamazumi_switch_areas_after_save_{scenario_id}"] = list(
+                target_area_ids
+            )
+            st.session_state.pop(pending_area_switch_key, None)
+            st.session_state[board_pending_save_key] = True
+            st.rerun()
+    if actions.button(
+        "Discard & Switch Areas",
+        icon=":material/undo:",
+        key=f"discard_and_switch_area_{scenario_id}",
+    ):
+        for _aid in [*selected_area_ids, str(area_id)]:
+            st.session_state.pop(
+                f"yamazumi_board_draft_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_clean_baseline_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_moved_ids_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_undo_stack_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_redo_stack_{project_id}_{scenario_id}_{_aid}", None
+            )
+            st.session_state.pop(
+                f"yamazumi_board_draft_error_{project_id}_{scenario_id}_{_aid}", None
+            )
+        request_table_editor_reset(pitch_editor_key)
+        request_table_editor_reset(element_editor_key)
+        st.session_state.pop(pending_area_switch_key, None)
+        st.session_state[area_selector_key] = list(target_area_ids)
+        st.session_state.pop(area_last_synced_key, None)
+        st.rerun()
+    if actions.button(
+        "Stay on Current Area(s)",
+        key=f"stay_on_current_area_{scenario_id}",
+    ):
+        st.session_state.pop(pending_area_switch_key, None)
+        st.rerun()
+
+
+if st.session_state.get(pending_area_switch_key):
+    confirm_area_switch_unsaved_dialog()
+elif st.session_state.get(gui_pitch_delete_key):
     confirm_gui_pitch_delete()
 elif st.session_state.get(gui_element_delete_key):
     confirm_gui_element_delete()
@@ -5621,10 +5835,7 @@ with yamazumi_tables_tab:
                 element_table_source["model_variant"],
             )
         ]
-        element_table_source["criticality"] = [
-            criticality_for_process_link(val)
-            for val in element_table_source["process_element_id"]
-        ]
+
     element_table_pitches = pitch_table_source.copy()
 
     table_defined_work_regions: set[str] = set()
@@ -5856,14 +6067,17 @@ with yamazumi_tables_tab:
     pitch_has_unsaved_edits = table_has_unsaved_changes(
         pitch_editor_key, native_row_selection=True
     )
-    delete_pitch_disabled = has_board_draft
+    has_selected_pitch_rows = bool(move_selected_ids) or not selected_pitches.empty
+    delete_pitch_disabled = has_board_draft or not has_selected_pitch_rows
     copy_pitch_disabled = (
-        pitch_has_unsaved_edits
+        not move_selected_ids
+        or pitch_has_unsaved_edits
         or not selected_pitches.empty
         or has_board_draft
     )
     move_pitch_disabled = (
-        len(area_labels) < 2
+        not move_selected_ids
+        or len(area_labels) < 2
         or pitch_has_unsaved_edits
         or not selected_pitches.empty
         or has_board_draft
@@ -5881,7 +6095,7 @@ with yamazumi_tables_tab:
         delete_action_disabled=delete_pitch_disabled,
         delete_action_help=(
             "Save or undo current Yamazumi board changes first."
-            if delete_pitch_disabled
+            if has_board_draft
             else "Select one or more pitches in the Select column and click Delete Pitches to remove them."
         ),
         secondary_action_label="Copy Pitches",
@@ -5893,7 +6107,7 @@ with yamazumi_tables_tab:
             if not selected_pitches.empty
             else (
                 "Save or undo other Yamazumi changes first."
-                if copy_pitch_disabled
+                if (pitch_has_unsaved_edits or has_board_draft)
                 else "Select one or more pitches in the Select column and click Copy Pitches to copy them to another planning scenario."
             )
         ),
@@ -5909,7 +6123,7 @@ with yamazumi_tables_tab:
                 if not selected_pitches.empty
                 else (
                     "Save or undo other Yamazumi changes first."
-                    if move_pitch_disabled
+                    if (pitch_has_unsaved_edits or has_board_draft)
                     else "Select one or more pitches in the Select column and click Move Pitches to move them to another Yamazumi area."
                 )
             )
@@ -6139,7 +6353,7 @@ with yamazumi_tables_tab:
     } if not active_pitches.empty else {}
     element_columns = [
         "id", "area_id", "selected", "area_name", "pitch_id", "model_variants", "work_type", "description", "time_s", "work_region",
-        "criticality", "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
+        "sequence", "source", "process_element_id", "process_sync_status", "updated_at",
     ]
     if element_table_source.empty:
         element_rows = pd.DataFrame({
@@ -6154,7 +6368,6 @@ with yamazumi_tables_tab:
             "description": pd.Series(dtype="string"),
             "time_s": pd.Series(dtype="Float64"),
             "work_region": pd.Series(dtype="string"),
-            "criticality": pd.Series(dtype="object"),
             "sequence": pd.Series(dtype="Int64"),
             "source": pd.Series(dtype="string"),
             "process_element_id": pd.Series(dtype="string"),
@@ -6177,10 +6390,10 @@ with yamazumi_tables_tab:
     visible_elements = filter_table(
         element_rows,
         key=f"yamazumi_element_filters_{scenario_id}_{element_filter_scope}",
-        dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region", "criticality"],
-        search_columns=["area_name", "description", "pitch", "model_variants", "work_region", "criticality"],
-        labels={"area_name": "Yamazumi Area", "model_variants": "Model Variant", "criticality": "Criticality"},
-        multi_value_columns=["model_variants", "criticality"],
+        dropdown_columns=["area_name", "pitch", "model_variants", "work_type", "work_region"],
+        search_columns=["area_name", "description", "pitch", "model_variants", "work_region"],
+        labels={"area_name": "Yamazumi Area", "model_variants": "Model Variant"},
+        multi_value_columns=["model_variants"],
         reset_widget_keys=[element_editor_key],
     )
     pitch_options = ["Unassigned", *pitch_label_by_id.values()]
@@ -6190,7 +6403,7 @@ with yamazumi_tables_tab:
     }
     element_column_order = [
         "selected", "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-        "work_region", "criticality", "sequence",
+        "work_region", "sequence",
     ]
     element_area_name_options = [area_labels[aid] for aid in effective_element_area_ids if aid in area_labels]
     element_column_config = {
@@ -6230,16 +6443,6 @@ with yamazumi_tables_tab:
         "work_region": st.column_config.SelectboxColumn(
             "Work Region", options=table_work_region_options, required=True, default="None"
         ),
-        "criticality": st.column_config.MultiselectColumn(
-            "Criticality",
-            options=["CTQ", "Safety"],
-            color=["orange", "red"],
-            disabled=True,
-            help=(
-                "CTQ comes from qualifying PFMEA Classification codes. Safety comes "
-                "from active Safety requirements linked to the Process step."
-            ),
-        ),
         "sequence": st.column_config.NumberColumn("Order", min_value=1, step=1, format="%d"),
         "source": None,
         "process_element_id": None,
@@ -6252,7 +6455,7 @@ with yamazumi_tables_tab:
             editor_key=element_editor_key,
             sort_columns=[
                 "area_name", "pitch", "model_variants", "work_type", "description", "time_s",
-                "work_region", "criticality", "sequence",
+                "work_region", "sequence",
             ],
             labels={
                 "area_name": "Yamazumi Area", "model_variants": "Model Variants",
@@ -6263,7 +6466,7 @@ with yamazumi_tables_tab:
         ),
         editor_key=element_editor_key,
     )
-    element_disabled_cols = ["id", "area_id", "criticality", "source", "process_element_id", "process_sync_status", "updated_at"]
+    element_disabled_cols = ["id", "area_id", "source", "process_element_id", "process_sync_status", "updated_at"]
     edited_elements = st.data_editor(
         element_editor_rows,
         key=element_editor_key,
@@ -6315,9 +6518,11 @@ with yamazumi_tables_tab:
     element_has_unsaved_edits = table_has_unsaved_changes(
         element_editor_key, native_row_selection=True
     )
-    delete_element_disabled = False
+    has_selected_element_rows = bool(copy_selected_element_ids) or not selected_elements.empty
+    delete_element_disabled = has_board_draft or not has_selected_element_rows
     copy_element_disabled = (
-        element_has_unsaved_edits
+        not copy_selected_element_ids
+        or element_has_unsaved_edits
         or not selected_elements.empty
         or has_board_draft
     )
@@ -6334,7 +6539,7 @@ with yamazumi_tables_tab:
         delete_action_disabled=delete_element_disabled,
         delete_action_help=(
             "Save or undo current Yamazumi board changes first."
-            if delete_element_disabled
+            if has_board_draft
             else "Select one or more work elements in the Select column and click Delete Work Element to remove them."
         ),
         additional_action_label="Copy Work Element",
@@ -6346,7 +6551,7 @@ with yamazumi_tables_tab:
             if not selected_elements.empty
             else (
                 "Save or undo other Yamazumi changes first."
-                if copy_element_disabled
+                if (element_has_unsaved_edits or has_board_draft)
                 else "Select one or more work elements in the Select column and click Copy Work Element to choose a destination pitch in the active scenario."
             )
         ),

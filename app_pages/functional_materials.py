@@ -13,6 +13,7 @@ from utils.store import (
     set_process_part_option_handling_type,
 )
 from utils.table_ui import (
+    format_part_label,
     guarded_tabs,
     register_unsaved_source,
     render_audit_history_table,
@@ -111,7 +112,12 @@ elif review_tab.open:
                                 "station": str(o.get("station") or ""),
                                 "operation": str(o.get("operation") or ""),
                                 "part_number": str(o.get("part_number") or ""),
-                                "part_description": str(o.get("part_description") or ""),
+                                "part_description": format_part_label(
+                                    o.get("part_number"),
+                                    o.get("part_description"),
+                                    o.get("factory_nickname"),
+                                    include_part_number=False,
+                                ),
                                 "handling_type": str(o.get("handling_type") or "Unclassified"),
                                 "upstream_diff_summary": str(o.get("upstream_diff_summary") or ""),
                             }
@@ -195,7 +201,12 @@ elif review_tab.open:
                 for opt in filtered:
                     opt_id = opt["option_id"]
                     p_num = opt["part_number"]
-                    p_desc = opt.get("part_description") or ""
+                    p_desc = format_part_label(
+                        p_num,
+                        opt.get("part_description"),
+                        opt.get("factory_nickname"),
+                        include_part_number=False,
+                    )
                     op_title = opt.get("operation") or "Operation"
                     stn = opt.get("station") or ""
                     sec_name = opt.get("section_name") or ""

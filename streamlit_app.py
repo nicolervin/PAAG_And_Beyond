@@ -9,6 +9,10 @@ if (
     or ("utils.store" in _sys.modules and not hasattr(_sys.modules["utils.store"], "link_part_variants"))
     or ("utils.fishbone_store" in _sys.modules and getattr(_sys.modules["utils.fishbone_store"], "_FISHBONE_STORE_HOT_RELOAD_REV", 0) < 2)
     or ("utils.yamazumi_store" in _sys.modules and getattr(_sys.modules["utils.yamazumi_store"], "_YAMAZUMI_STORE_HOT_RELOAD_REV", 0) < 10)
+    or ("utils.table_ui" in _sys.modules and getattr(_sys.modules["utils.table_ui"], "_TABLE_UI_REV_20261102", 0) < 6)
+    or ("utils.help_hub" in _sys.modules and getattr(_sys.modules["utils.help_hub"], "_HELP_HUB_REV_20261110", 0) < 3)
+    or ("utils.safety_store" in _sys.modules and getattr(_sys.modules["utils.safety_store"], "_SAFETY_STORE_HOT_RELOAD_REV", 0) < 2)
+    or ("utils.ppe_poster" in _sys.modules and getattr(_sys.modules["utils.ppe_poster"], "_PPE_POSTER_HOT_RELOAD_REV", 0) < 2)
 ):
     for _mod_name in (
         "utils.time_units",
@@ -26,6 +30,8 @@ if (
         "utils.yamazumi_store",
         "utils.process_store",
         "utils.quality_store",
+        "utils.safety_store",
+        "utils.ppe_poster",
         "utils.help_hub",
         "utils.store",
     ):
@@ -141,20 +147,21 @@ st.html(
     div[class*="st-key-destructive_"] button [data-testid="stIconMaterial"] {
         color: #ffffff !important;
     }
-    div[class*="st-key-destructive_"] button:hover {
+    div[class*="st-key-destructive_"] button:hover:not(:disabled) {
         background-color: #a71919 !important;
         border-color: #a71919 !important;
         color: #ffffff !important;
     }
-    div[class*="st-key-destructive_"] button:focus,
-    div[class*="st-key-destructive_"] button:active {
+    div[class*="st-key-destructive_"] button:focus:not(:disabled),
+    div[class*="st-key-destructive_"] button:active:not(:disabled) {
         background-color: #8e0000 !important;
         border-color: #8e0000 !important;
         color: #ffffff !important;
         box-shadow: none !important;
     }
     div[class*="st-key-destructive_"] button:disabled {
-        opacity: 0.45;
+        opacity: 0.4 !important;
+        cursor: not-allowed !important;
     }
     div[data-testid="stDataFrame"] button[aria-label="Delete row(s)"] {
         display: none !important;
@@ -796,6 +803,7 @@ with st.sidebar:
             on_change=_on_current_editor_change,
             args=(editor_value_key,),
         )
+        st.session_state.setdefault("pref_show_factory_nickname", True)
         collab_session_id = str(st.session_state.setdefault("_collab_session_id", str(_uuid4())))
         st.session_state.setdefault("_rendered_write_epoch", get_write_epoch())
         record_collaborator_heartbeat(
@@ -843,13 +851,24 @@ with st.sidebar:
                     extra = f" +{len(peers) - 5} more" if len(peers) > 5 else ""
                     st.caption(f"🟢 **Live ({len(peers)}):** {', '.join(peer_labels)}{extra}")
 
+                st.session_state.setdefault("pref_mute_live_collab_notifications", False)
+                st.session_state["_sidebar_mute_live_collab_toggle"] = bool(
+                    st.session_state.get("pref_mute_live_collab_notifications", False)
+                )
+
+                def _on_sidebar_mute_collab_toggle() -> None:
+                    st.session_state["pref_mute_live_collab_notifications"] = bool(
+                        st.session_state.get("_sidebar_mute_live_collab_toggle", False)
+                    )
+
                 notifications_paused = st.toggle(
                     "Pause live notifications",
-                    key="mute_live_collab_notifications",
+                    key="_sidebar_mute_live_collab_toggle",
                     help=(
                         "Mute bottom-left live notifications when other collaborators save changes. "
                         "All changes and editor attribution continue to be tracked in each page's History table."
                     ),
+                    on_change=_on_sidebar_mute_collab_toggle,
                 )
 
                 rendered_epoch = int(st.session_state.get("_rendered_write_epoch", 0) or 0)
@@ -950,7 +969,7 @@ with st.sidebar:
     st.caption("NPI process planning · local prototype")
     open_fb_count = open_app_feedback_count(st.session_state.get("project_id"))
     help_button_label = (
-        f"Help & search ({open_fb_count})" if open_fb_count > 0 else "Help & search"
+        f"Help & settings ({open_fb_count})" if open_fb_count > 0 else "Help & settings"
     )
     if st.button(
         help_button_label,
@@ -960,7 +979,7 @@ with st.sidebar:
         key="sidebar_help_hub_btn",
         help=(
             f"Open Help Manual for '{navigation.title}', Global Project Search, "
-            "Critical Thread Guide, Op ID Decoder, and Bug / Feature Tracker."
+            "Critical Thread Guide, Op ID Decoder, Bug / Feature Tracker, and Workspace Settings."
         ),
     ):
         open_universal_help_dialog(
@@ -1054,7 +1073,7 @@ else:
         </style>
         """
     )
-    split_orientation = str(st.session_state.get(split_orientation_key) or "top_bottom")
+    split_orientation = str(st.session_state.get(split_orientation_key) or st.session_state.get("pref_split_orientation_default") or "top_bottom")
 
     if split_orientation == "side_by_side":
         # Side-by-side mode (if user toggles to columns)

@@ -565,15 +565,7 @@ export default function(component) {
           ? scaledHeightPx
           : 34
         el.style.setProperty('--element-height', `${elementHeight}px`)
-        const criticality = (item.criticality || []).map(tag => {
-          const normalized = String(tag).toLowerCase()
-          const source = tag === 'CTQ'
-            ? 'Derived from PFMEA Classification'
-            : 'Derived from an active Safety requirement'
-          return `<span class="criticality-tag ${normalized}" title="${source}">${escapeHtml(tag)}</span>`
-        }).join('')
-        if (criticality) el.classList.add('has-criticality')
-        el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span>${criticality ? `<span class="criticality">${criticality}</span>` : ''}<button type="button" class="edit-element" title="Edit work element">Edit</button>`
+        el.innerHTML = `<strong>${formatTime(item.time_s)}</strong><span class="element-description">${item.description}</span><button type="button" class="edit-element" title="Edit work element">Edit</button>`
         el.title = `${item.description} · ${formatTime(item.time_s)} · ${item.work_region || 'None'}`
         el.ondragstart = event => {
           board.classList.add('is-dragging')
@@ -1723,11 +1715,11 @@ export default function(component) {
 }
 """
 
-_YAMAZUMI_BOARD_HOT_RELOAD_REV = 23
+_YAMAZUMI_BOARD_HOT_RELOAD_REV = 24
 
-# Supersedes paag_yamazumi_drag_board_v34 through v47
+# Supersedes paag_yamazumi_drag_board_v34 through v50
 _YAMAZUMI_BOARD = st.components.v2.component(
-    "paag_yamazumi_drag_board_v50",
+    "paag_yamazumi_drag_board_v51",
     html=_HTML,
     css=_CSS,
     js=_JS,
