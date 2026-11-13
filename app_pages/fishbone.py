@@ -50,12 +50,15 @@ from utils.table_filters import (
     apply_pending_table_editor_reset,
     can_redo_last_table_edit,
     can_undo_last_table_edit,
+    clear_saved_table_filters,
     filter_table,
     has_unsaved_table_changes,
     last_table_undo_redo_message,
     logical_table_editor_key,
     matches_filter_value,
     merge_filtered_edits,
+    mount_table_layout_preservation_script,
+    preserve_filters_across_save,
     redo_last_table_edit,
     request_table_editor_reset,
     split_filter_values,
@@ -110,6 +113,7 @@ page_title_with_scope(
         "available on this page depends on the currently selected scenario."
     ),
 )
+mount_table_layout_preservation_script()
 st.caption("Build the Fishbone framework first, then place approved Parts Catalog content into its sections and subassemblies.")
 if not project_id or not scenario_id:
     st.stop()
@@ -569,6 +573,9 @@ if assign_parts_tab.open:
             ] = "Ready for another use"
             pool_controls = st.container(horizontal=True)
             placement_filter_key = f"fishbone_placement_filters_{project_id}"
+            _saved_placement_filter_key = f"_saved_{placement_filter_key}"
+            if placement_filter_key not in st.session_state and _saved_placement_filter_key in st.session_state:
+                st.session_state[placement_filter_key] = list(st.session_state[_saved_placement_filter_key])
             placement_filters = pool_controls.multiselect(
                 "Show",
                 ["Not placed", "Ready for another use", "Placed"],
@@ -576,16 +583,35 @@ if assign_parts_tab.open:
                 placeholder="All placement states",
                 key=placement_filter_key,
             )
-            part_search = pool_controls.text_input("Search parts", placeholder="Part number or part name")
+            st.session_state[_saved_placement_filter_key] = list(placement_filters)
+
+            pool_search_key = f"fishbone_pool_search_{project_id}"
+            _saved_pool_search_key = f"_saved_{pool_search_key}"
+            if pool_search_key not in st.session_state and _saved_pool_search_key in st.session_state:
+                st.session_state[pool_search_key] = st.session_state[_saved_pool_search_key]
+            part_search = pool_controls.text_input(
+                "Search parts",
+                placeholder="Part number or part name",
+                key=pool_search_key,
+            )
+            st.session_state[_saved_pool_search_key] = part_search
+
             pool_feature_options = sorted(
                 {label for labels in feature_labels_by_part.values() for label in labels}, key=str.casefold
             )
+            pool_features_key = f"fishbone_pool_features_{project_id}"
+            _saved_pool_features_key = f"_saved_{pool_features_key}"
+            if pool_features_key not in st.session_state and _saved_pool_features_key in st.session_state:
+                st.session_state[pool_features_key] = [
+                    opt for opt in st.session_state[_saved_pool_features_key] if opt in pool_feature_options
+                ]
             selected_pool_features = pool_controls.multiselect(
                 "Features",
                 options=pool_feature_options,
                 placeholder="All feature configurations",
-                key=f"fishbone_pool_features_{project_id}",
+                key=pool_features_key,
             )
+            st.session_state[_saved_pool_features_key] = list(selected_pool_features)
             visible_parts = part_pool.copy()
             if placement_filters:
                 placement_state = visible_parts["fishbone_section"].where(
@@ -633,7 +659,9 @@ if assign_parts_tab.open:
                     return
                 row = visible_parts.iloc[click["row"]]
                 st.session_state[f"parts_selected_id_{project_id}"] = str(row["id"])
+                clear_saved_table_filters(f"part_catalog_filters_{project_id}")
                 st.session_state[f"part_catalog_filters_{project_id}_keyword"] = str(row["part_number"])
+                st.session_state[f"_saved_filter_kw_part_catalog_filters_{project_id}_keyword"] = str(row["part_number"])
                 st.session_state["part_catalog_filters_keyword"] = str(row["part_number"])
                 st.session_state["part_catalog_filters_source"] = []
                 st.session_state["part_catalog_filters_revision"] = []
@@ -902,7 +930,9 @@ if assign_parts_tab.open:
                 part_id = str(assignment_editor.iloc[click["row"]]["part_id"])
                 part_number = str(assignment_editor.iloc[click["row"]]["part_number"])
                 st.session_state[f"parts_selected_id_{project_id}"] = part_id
+                clear_saved_table_filters(f"part_catalog_filters_{project_id}")
                 st.session_state[f"part_catalog_filters_{project_id}_keyword"] = part_number
+                st.session_state[f"_saved_filter_kw_part_catalog_filters_{project_id}_keyword"] = part_number
                 st.session_state["part_catalog_filters_keyword"] = part_number
                 st.session_state["part_catalog_filters_source"] = []
                 st.session_state["part_catalog_filters_revision"] = []
@@ -920,6 +950,7 @@ if assign_parts_tab.open:
                 st.session_state[assignment_undo_key] = current_assignment_undo
                 st.session_state[f"fishbone_pending_additional_uses_{project_id}"] = sorted(staged_ids)
                 st.session_state[f"fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
+                st.session_state[f"_saved_fishbone_placement_filters_{project_id}"] = ["Ready for another use"]
                 st.toast("Part returned to Place Parts into Fishbone and is ready to place again.", icon=":material/arrow_upward:")
 
             edited_assignments = st.data_editor(
@@ -1165,6 +1196,13 @@ if assign_parts_tab.open:
                         },
                     )
                     st.session_state[assignment_undo_key] = current_assignment_undo
+                    preserve_filters_across_save(
+                        f"fishbone_assignment_filters_{project_id}_{scenario_id}",
+                        full_assignment_editor,
+                        assignments_to_save,
+                        dropdown_columns=["section", "revision", "model_applicability"],
+                        multi_value_columns=["model_applicability"],
+                    )
                     request_table_editor_reset(assignment_editor_key)
                     assign_save_details: list[str] = []
                     if added_assignment_ids:
@@ -3749,7 +3787,12 @@ if fishbone_tab.open:
                 )
                 sec_cols = [c for c in ["name", "section_type", "sequence", "active"] if c in visible_sections.columns]
                 display_sections = visible_sections[sec_cols].copy() if not visible_sections.empty else pd.DataFrame(columns=["name", "section_type", "sequence", "active"])
-                st.dataframe(display_sections, width="stretch", hide_index=True)
+                st.dataframe(
+                    display_sections,
+                    width="stretch",
+                    hide_index=True,
+                    key=f"fishbone_canvas_sections_table_{project_id}",
+                )
 
             with st.expander("Parts Placement Table", expanded=False):
                 st.caption("Parts placed into Fishbone assembly sections and subassemblies.")
@@ -3762,6 +3805,7 @@ if fishbone_tab.open:
                         display_assignments,
                         width="stretch",
                         hide_index=True,
+                        key=f"fishbone_canvas_assignments_table_{project_id}_{scenario_id}",
                     )
                 else:
                     st.info("No parts placed yet.")
@@ -4321,6 +4365,39 @@ def _render_framework_maintenance():
                     },
                 )
                 st.session_state[framework_undo_key] = current_plan_snapshot
+                preserve_filters_across_save(
+                    f"assembly_framework_filters_{project_id}",
+                    full_framework,
+                    framework_to_save,
+                    dropdown_columns=["section_type", "parent_assembly", "active"],
+                )
+                if "id" in full_framework.columns and "name" in full_framework.columns and "name" in framework_to_save.columns:
+                    _old_sec_names = {
+                        str(r["id"]): str(r["name"] or "").strip()
+                        for _, r in full_framework.iterrows()
+                    }
+                    _new_sec_names = {
+                        str(r["id"]): str(r["name"] or "").strip()
+                        for _, r in framework_to_save.iterrows()
+                    }
+                    _renamed_sec_map = {
+                        old_n: _new_sec_names[sid]
+                        for sid, old_n in _old_sec_names.items()
+                        if sid in _new_sec_names and old_n and _new_sec_names[sid] and old_n != _new_sec_names[sid]
+                    }
+                    if _renamed_sec_map:
+                        _asgn_sec_key = f"fishbone_assignment_filters_{project_id}_{scenario_id}_section"
+                        _curr_asgn_sec = list(
+                            st.session_state.get(_asgn_sec_key)
+                            or st.session_state.get(f"_saved_filter_col_{_asgn_sec_key}")
+                            or []
+                        )
+                        if _curr_asgn_sec:
+                            _updated_asgn_sec = list(
+                                dict.fromkeys(_renamed_sec_map.get(str(v), str(v)) for v in _curr_asgn_sec)
+                            )
+                            st.session_state[f"_pending_filter_col_{_asgn_sec_key}"] = list(_updated_asgn_sec)
+                            st.session_state[f"_saved_filter_col_{_asgn_sec_key}"] = list(_updated_asgn_sec)
                 request_table_editor_reset(framework_editor_key)
                 st.toast(
                     f"Saved {count} Fishbone section(s)"

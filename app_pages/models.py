@@ -1613,18 +1613,22 @@ else:
         confirm_duplicate_model_save()
 
     st.divider()
-    visual_heading_cols = st.columns([6, 1], vertical_alignment="bottom")
-    with visual_heading_cols[0]:
-        editable_table_heading("Complexity tree visual")
-    with visual_heading_cols[1]:
-        if st.button(
-            "Print",
-            icon=":material/print:",
-            key=f"btn_print_complexity_tree_visual_{project_id}",
-            width="stretch",
-            help="Print or export the Complexity tree visual to PDF",
-        ):
-            st.session_state[f"complexity_tree_print_active_{project_id}"] = True
+    editable_table_heading("Complexity tree visual")
+    st.html(
+        "<style>"
+        '[class*="st-key-btn_print_complexity_tree_visual_"] {'
+        "position:fixed !important;left:-9999px !important;top:-9999px !important;"
+        "width:1px !important;height:1px !important;overflow:hidden !important;"
+        "opacity:0 !important;pointer-events:none !important;margin:0 !important;padding:0 !important;"
+        "}"
+        "</style>"
+    )
+    if st.button(
+        "Print",
+        icon=":material/print:",
+        key=f"btn_print_complexity_tree_visual_{project_id}",
+    ):
+        st.session_state[f"complexity_tree_print_active_{project_id}"] = True
     category_values = sorted(
         {
             str(category).strip()
@@ -1877,6 +1881,7 @@ else:
             "<style>"
             ".complexity-tree-shell{position:relative;box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin-top:6px;border:1px solid var(--st-border-color,#cbd5e1);border-radius:var(--st-base-radius,8px);overflow:hidden;background:var(--st-background-color,#ffffff);}"
             ".complexity-tree-shell.fullscreen-visual,.complexity-tree-shell:fullscreen{position:fixed;inset:0;z-index:999995;width:100vw;height:100vh;max-width:100vw;min-width:0;margin:0;border:0;border-radius:0;display:flex;flex-direction:column;overflow:hidden;background:var(--st-background-color,#ffffff);}"
+            "[data-testid=\"stDialog\"],[data-testid=\"stModal\"],[data-baseweb=\"modal\"]{z-index:1000050 !important;}"
             ".complexity-tree-toolbar{position:sticky;left:0;top:0;z-index:30;width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px 12px;padding:8px 14px;border-bottom:1px solid var(--st-border-color,#cbd5e1);background:var(--st-secondary-background-color,#f8fafc);flex-wrap:wrap;flex:0 0 auto;}"
             ".complexity-tree-shell.fullscreen-visual .complexity-tree-toolbar,.complexity-tree-shell:fullscreen .complexity-tree-toolbar{padding:10px 16px;box-shadow:0 2px 8px rgba(0,0,0,.08);}"
             ".complexity-tree-toolbar-title{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-width:0;}"
@@ -1947,6 +1952,16 @@ else:
             ".ct-choice-select-cb{width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--st-primary-color,#2563eb);flex-shrink:0;}"
             ".ct-choice-preview{font-size:.74rem;font-weight:700;padding:2px 7px;border-radius:4px;min-width:0;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(15,23,42,.12);}"
             ".ct-choice-shades{display:inline-flex;align-items:center;gap:3px;}"
+            ".ct-model-expand-btn{display:flex;align-items:center;justify-content:space-between;gap:6px;width:100%;padding:4px 8px;border:1px dashed var(--st-border-color,#cbd5e1);border-radius:5px;background:var(--st-secondary-background-color,#f8fafc);color:var(--st-text-color,#0f172a);font:inherit;font-size:.73rem;font-weight:600;cursor:pointer;text-align:left;}"
+            ".ct-model-expand-btn:hover,.ct-model-expand-btn.is-open{border-color:var(--st-primary-color,#2563eb);color:var(--st-primary-color,#2563eb);background:rgba(37,99,235,.06);border-style:solid;}"
+            ".ct-model-members-drawer{display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px dashed var(--st-border-color,#cbd5e1);max-height:340px;overflow-y:auto;}"
+            ".ct-model-member-item{display:flex;flex-direction:column;gap:5px;padding:6px 8px;border:1px solid var(--st-border-color,#e2e8f0);border-radius:6px;background:var(--st-secondary-background-color,#f8fafc);}"
+            ".ct-model-member-item.is-split-model{border-color:var(--st-primary-color,#2563eb);background:rgba(37,99,235,.05);}"
+            ".ct-model-member-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;}"
+            ".ct-model-member-id{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto;}"
+            ".ct-model-num-pill{display:inline-flex;align-items:center;align-self:flex-start;padding:2px 7px;border-radius:4px;border:1.5px solid #0f172a;font-size:.74rem;font-weight:700;line-height:1.25;word-break:break-all;}"
+            ".ct-model-name-text{font-size:.72rem;font-weight:600;color:var(--st-secondary-text-color,#475569);line-height:1.25;word-break:break-word;}"
+            ".ct-model-split-badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:999px;background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd;font-size:.66rem;font-weight:700;white-space:nowrap;}"
             ".complexity-tree-viewport{position:relative;box-sizing:border-box;flex:1 1 auto;width:100%;max-width:100%;min-width:0;padding:12px 14px 16px;overflow-x:auto;overflow-y:visible;}"
             ".complexity-tree-shell.fullscreen-visual .complexity-tree-viewport,.complexity-tree-shell:fullscreen .complexity-tree-viewport{flex:1 1 auto;min-height:0;padding:16px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable both-edges;cursor:grab;}"
             ".complexity-tree-shell.is-panning .complexity-tree-viewport{cursor:grabbing !important;user-select:none;}"
@@ -2134,6 +2149,22 @@ else:
                 "groupKey": "|".join(str(m) for m in group["model_numbers"]),
                 "modelNumbers": [str(m) for m in group["model_numbers"]],
                 "modelNames": [str(n) for n in group["model_names"]],
+                "modelDetails": [
+                    {
+                        "modelId": str(m_id),
+                        "modelNumber": str(m_num),
+                        "modelName": str(m_name),
+                        "headerLines": _build_group_model_label_lines(
+                            {"model_names": [m_name], "model_numbers": [m_num]},
+                            selected_model_labels,
+                        ),
+                    }
+                    for m_id, m_num, m_name in zip(
+                        group["model_ids"],
+                        group["model_numbers"],
+                        group["model_names"],
+                    )
+                ],
                 "modelHeaderHtml": "<br>".join(lines),
                 "displayLabel": " / ".join(str(m) for m in group["model_numbers"]),
                 "defaultHeaderBg": "#ffffff",
@@ -2353,6 +2384,8 @@ else:
                 "projectId": str(project_id),
                 "gridTemplate": grid_template,
                 "modelHeaderHeight": model_header_height,
+                "selectedModelLabels": selected_model_labels,
+                "activeModelTotal": active_model_total,
                 "features": spec_features,
                 "columns": spec_columns,
             }
@@ -2387,6 +2420,7 @@ else:
                 rootWin.__paagComplexityTreeColorsByProject = rootWin.__paagComplexityTreeColorsByProject || {{}};
                 rootWin.__paagComplexityTreeSavedPaletteByProject = rootWin.__paagComplexityTreeSavedPaletteByProject || {{}};
                 rootWin.__paagComplexityTreeOpenPalettes = rootWin.__paagComplexityTreeOpenPalettes || {{}};
+                rootWin.__paagComplexityTreeExpandedModelGroups = rootWin.__paagComplexityTreeExpandedModelGroups || {{}};
                 rootWin.__paagComplexityTreeSelectedChoices = rootWin.__paagComplexityTreeSelectedChoices || {{}};
                 rootWin.__paagComplexityTreeDraftCustomHex = rootWin.__paagComplexityTreeDraftCustomHex || "#287ec2";
                 rootWin.__paagComplexityTreeSidebarFilter = rootWin.__paagComplexityTreeSidebarFilter || "all";
@@ -2668,15 +2702,35 @@ else:
                     }} catch (e) {{}}
                 }}
 
+                function getBaseGroupHeaderHex(baseCol, customColors) {{
+                    const modelsMap = (customColors && customColors.models) || {{}};
+                    const gKey = (baseCol && (baseCol.baseGroupKey || baseCol.groupKey)) || "";
+                    const chosenHex = (gKey && modelsMap[gKey]) || modelsMap["__all__"] || null;
+                    if (chosenHex) {{
+                        return normalizeHexColor(chosenHex, "#ffffff");
+                    }}
+                    return normalizeHexColor((baseCol && baseCol.defaultHeaderBg) || "#ffffff", "#ffffff");
+                }}
+
                 function resolveModelHeaderColor(col, customColors) {{
                     const modelsMap = (customColors && customColors.models) || {{}};
-                    let chosenHex = modelsMap[col.groupKey] || null;
-                    if (!chosenHex && Array.isArray(col.modelNumbers)) {{
-                        for (let i = 0; i < col.modelNumbers.length; i++) {{
-                            const mKey = "model::" + String(col.modelNumbers[i]);
-                            if (modelsMap[mKey]) {{
-                                chosenHex = modelsMap[mKey];
-                                break;
+                    let chosenHex = null;
+                    if (col && (col.isSplitColumn || (typeof col.groupKey === "string" && col.groupKey.indexOf("model::") === 0))) {{
+                        const sNum = col.splitModelNumber || String(col.groupKey || "").slice(7);
+                        chosenHex = modelsMap["split::" + sNum] || modelsMap[col.groupKey] || modelsMap["model::" + sNum] || null;
+                    }} else if (col) {{
+                        chosenHex = modelsMap[col.groupKey] || null;
+                        if (!chosenHex && Array.isArray(col.modelNumbers) && col.modelNumbers.length === 1) {{
+                            const singleNum = String(col.modelNumbers[0] || "");
+                            chosenHex = modelsMap["split::" + singleNum] || modelsMap["model::" + singleNum] || null;
+                        }}
+                        if (!chosenHex && Array.isArray(col.modelNumbers)) {{
+                            for (let i = 0; i < col.modelNumbers.length; i++) {{
+                                const mNum = String(col.modelNumbers[i]);
+                                if (!modelsMap["split::" + mNum] && modelsMap["model::" + mNum]) {{
+                                    chosenHex = modelsMap["model::" + mNum];
+                                    break;
+                                }}
                             }}
                         }}
                     }}
@@ -2692,8 +2746,8 @@ else:
                         }};
                     }}
                     return {{
-                        bg: col.defaultHeaderBg || "#ffffff",
-                        text: col.defaultHeaderText || "#0f172a",
+                        bg: (col && col.defaultHeaderBg) || "#ffffff",
+                        text: (col && col.defaultHeaderText) || "#0f172a",
                         isCustom: false,
                     }};
                 }}
@@ -2870,11 +2924,149 @@ else:
                     }} catch (e) {{}}
                 }}
 
+                function buildColumnHeaderLines(modelDetailsList, selectedModelLabels) {{
+                    const labels = (Array.isArray(selectedModelLabels) && selectedModelLabels.length > 0)
+                        ? selectedModelLabels
+                        : ["Model number"];
+                    if (labels.length === 1 && labels[0] === "Model name") {{
+                        const seen = [];
+                        (modelDetailsList || []).forEach(function(md) {{
+                            const nm = String((md && md.modelName) || "").trim() || "Model name not defined";
+                            const esc = escapeAttr(nm);
+                            if (seen.indexOf(esc) === -1) seen.push(esc);
+                        }});
+                        return seen;
+                    }}
+                    if (labels.length === 1 && labels[0] === "Model number") {{
+                        return (modelDetailsList || []).map(function(md) {{
+                            return escapeAttr(String((md && md.modelNumber) || ""));
+                        }});
+                    }}
+                    const out = [];
+                    (modelDetailsList || []).forEach(function(md) {{
+                        if (Array.isArray(md.headerLines) && md.headerLines.length > 0) {{
+                            md.headerLines.forEach(function(ln) {{ out.push(String(ln)); }});
+                            return;
+                        }}
+                        const nm = String((md && md.modelName) || "").trim() || "Model name not defined";
+                        const num = String((md && md.modelNumber) || "");
+                        labels.forEach(function(lType) {{
+                            if (lType === "Model name") out.push(escapeAttr(nm));
+                            else if (lType === "Model number") out.push(escapeAttr(num));
+                        }});
+                    }});
+                    return out;
+                }}
+
+                function buildColumnsWithSplits(spec, customColors) {{
+                    if (!spec || !Array.isArray(spec.columns)) return [];
+                    const modelsMap = (customColors && customColors.models) || {{}};
+                    const selectedLabels = spec.selectedModelLabels || ["Model number"];
+                    const expanded = [];
+                    let defaultIdxCounter = 0;
+
+                    spec.columns.forEach(function(baseCol) {{
+                        const rawNums = Array.isArray(baseCol.modelNumbers) ? baseCol.modelNumbers : [];
+                        const rawNames = Array.isArray(baseCol.modelNames) ? baseCol.modelNames : [];
+                        const allDetails = (Array.isArray(baseCol.modelDetails) && baseCol.modelDetails.length > 0)
+                            ? baseCol.modelDetails.map(function(md) {{ return Object.assign({{}}, md); }})
+                            : rawNums.map(function(mNum, idx) {{
+                                return {{
+                                    modelId: String(mNum),
+                                    modelNumber: String(mNum),
+                                    modelName: String(rawNames[idx] || ""),
+                                }};
+                            }});
+
+                        const baseHex = getBaseGroupHeaderHex(baseCol, customColors);
+
+                        if (allDetails.length <= 1) {{
+                            const singleLines = buildColumnHeaderLines(allDetails, selectedLabels);
+                            expanded.push(Object.assign({{}}, baseCol, {{
+                                baseGroupKey: baseCol.groupKey,
+                                modelDetails: allDetails,
+                                allGroupModelDetails: allDetails,
+                                headerLineCount: Math.max(1, singleLines.length),
+                                defaultIndex: defaultIdxCounter++,
+                                isSplitColumn: false,
+                            }}));
+                            return;
+                        }}
+
+                        const remainingDetails = [];
+                        const splitDetails = [];
+                        allDetails.forEach(function(md) {{
+                            const mNum = String(md.modelNumber || "");
+                            const splitRaw = modelsMap["split::" + mNum];
+                            const splitHex = splitRaw ? normalizeHexColor(splitRaw, "") : "";
+                            if (splitHex && splitHex !== baseHex) {{
+                                splitDetails.push(md);
+                            }} else {{
+                                remainingDetails.push(md);
+                            }}
+                        }});
+
+                        if (splitDetails.length === 0) {{
+                            const fullLines = buildColumnHeaderLines(allDetails, selectedLabels);
+                            expanded.push(Object.assign({{}}, baseCol, {{
+                                baseGroupKey: baseCol.groupKey,
+                                modelDetails: allDetails,
+                                allGroupModelDetails: allDetails,
+                                headerLineCount: Math.max(1, fullLines.length),
+                                defaultIndex: defaultIdxCounter++,
+                                isSplitColumn: false,
+                            }}));
+                            return;
+                        }}
+
+                        if (remainingDetails.length > 0) {{
+                            const remNums = remainingDetails.map(function(md) {{ return String(md.modelNumber || ""); }});
+                            const remNames = remainingDetails.map(function(md) {{ return String(md.modelName || ""); }});
+                            const remLines = buildColumnHeaderLines(remainingDetails, selectedLabels);
+                            expanded.push(Object.assign({{}}, baseCol, {{
+                                groupKey: baseCol.groupKey,
+                                baseGroupKey: baseCol.groupKey,
+                                modelNumbers: remNums,
+                                modelNames: remNames,
+                                modelDetails: remainingDetails,
+                                allGroupModelDetails: allDetails,
+                                modelHeaderHtml: remLines.join("\\x3cbr>"),
+                                displayLabel: remNums.join(" / "),
+                                headerLineCount: Math.max(1, remLines.length),
+                                defaultIndex: defaultIdxCounter++,
+                                isSplitColumn: false,
+                            }}));
+                        }}
+
+                        splitDetails.forEach(function(md, sIdx) {{
+                            const mNum = String(md.modelNumber || "");
+                            const mName = String(md.modelName || "");
+                            const spLines = buildColumnHeaderLines([md], selectedLabels);
+                            const isFirstWhenAllSplit = (remainingDetails.length === 0 && sIdx === 0);
+                            expanded.push(Object.assign({{}}, baseCol, {{
+                                groupKey: "model::" + mNum,
+                                baseGroupKey: baseCol.groupKey,
+                                splitModelNumber: mNum,
+                                modelNumbers: [mNum],
+                                modelNames: [mName],
+                                modelDetails: [md],
+                                allGroupModelDetails: isFirstWhenAllSplit ? allDetails : [md],
+                                modelHeaderHtml: spLines.join("\\x3cbr>"),
+                                displayLabel: mNum,
+                                headerLineCount: Math.max(1, spLines.length),
+                                defaultIndex: defaultIdxCounter++,
+                                isSplitColumn: true,
+                            }}));
+                        }});
+                    }});
+
+                    return expanded;
+                }}
+
                 function computeOrderedColumns(spec) {{
                     if (!spec || !Array.isArray(spec.columns)) return [];
-                    const defaultCols = spec.columns.map(function(col, idx) {{
-                        return Object.assign({{}}, col, {{ defaultIndex: idx }});
-                    }});
+                    const customColors = getSavedCustomColors(spec.projectId);
+                    const defaultCols = buildColumnsWithSplits(spec, customColors);
                     const savedOrder = getSavedModelOrder(spec.projectId);
                     if (!savedOrder || savedOrder.length === 0) {{
                         return defaultCols;
@@ -2902,9 +3094,11 @@ else:
                 }}
 
                 function isCustomOrderActive(cols, spec) {{
-                    if (!spec || !Array.isArray(spec.columns) || cols.length !== spec.columns.length) return false;
+                    if (!spec || !Array.isArray(spec.columns) || !Array.isArray(cols)) return false;
+                    const defaultCols = buildColumnsWithSplits(spec, getSavedCustomColors(spec.projectId));
+                    if (cols.length !== defaultCols.length) return false;
                     for (let i = 0; i < cols.length; i++) {{
-                        if (cols[i].groupKey !== spec.columns[i].groupKey) return true;
+                        if (cols[i].groupKey !== defaultCols[i].groupKey) return true;
                     }}
                     return false;
                 }}
@@ -3195,9 +3389,102 @@ else:
                             overflow: hidden !important;
                             pointer-events: none !important;
                         }}
+                        html.paag-complexity-tree-fullscreen-active #portal,
+                        html.paag-complexity-tree-fullscreen-active [data-testid="stDialog"],
                         html.paag-complexity-tree-fullscreen-active [data-testid="stModal"],
-                        html.paag-complexity-tree-fullscreen-active [data-baseweb="modal"] {{
-                            z-index: 1000010 !important;
+                        html.paag-complexity-tree-fullscreen-active [data-baseweb="modal"],
+                        html.paag-complexity-tree-fullscreen-active [role="dialog"] {{
+                            z-index: 1000050 !important;
+                        }}
+                        .ct-model-expand-btn {{
+                            display: flex;
+                            align-items: center;
+                            justify-content: space-between;
+                            gap: 6px;
+                            width: 100%;
+                            padding: 4px 8px;
+                            border: 1px dashed var(--st-border-color, #cbd5e1);
+                            border-radius: 5px;
+                            background: var(--st-secondary-background-color, #f8fafc);
+                            color: var(--st-text-color, #0f172a);
+                            font: inherit;
+                            font-size: 0.73rem;
+                            font-weight: 600;
+                            cursor: pointer;
+                            text-align: left;
+                        }}
+                        .ct-model-expand-btn:hover,
+                        .ct-model-expand-btn.is-open {{
+                            border-color: var(--st-primary-color, #2563eb);
+                            color: var(--st-primary-color, #2563eb);
+                            background: rgba(37, 99, 235, 0.06);
+                            border-style: solid;
+                        }}
+                        .ct-model-members-drawer {{
+                            display: flex;
+                            flex-direction: column;
+                            gap: 6px;
+                            padding-top: 6px;
+                            border-top: 1px dashed var(--st-border-color, #cbd5e1);
+                            max-height: 340px;
+                            overflow-y: auto;
+                        }}
+                        .ct-model-member-item {{
+                            display: flex;
+                            flex-direction: column;
+                            gap: 5px;
+                            padding: 6px 8px;
+                            border: 1px solid var(--st-border-color, #e2e8f0);
+                            border-radius: 6px;
+                            background: var(--st-secondary-background-color, #f8fafc);
+                        }}
+                        .ct-model-member-item.is-split-model {{
+                            border-color: var(--st-primary-color, #2563eb);
+                            background: rgba(37, 99, 235, 0.05);
+                        }}
+                        .ct-model-member-top {{
+                            display: flex;
+                            align-items: flex-start;
+                            justify-content: space-between;
+                            gap: 6px;
+                        }}
+                        .ct-model-member-id {{
+                            display: flex;
+                            flex-direction: column;
+                            gap: 2px;
+                            min-width: 0;
+                            flex: 1 1 auto;
+                        }}
+                        .ct-model-num-pill {{
+                            display: inline-flex;
+                            align-items: center;
+                            align-self: flex-start;
+                            padding: 2px 7px;
+                            border-radius: 4px;
+                            border: 1.5px solid #0f172a;
+                            font-size: 0.74rem;
+                            font-weight: 700;
+                            line-height: 1.25;
+                            word-break: break-all;
+                        }}
+                        .ct-model-name-text {{
+                            font-size: 0.72rem;
+                            font-weight: 600;
+                            color: var(--st-secondary-text-color, #475569);
+                            line-height: 1.25;
+                            word-break: break-word;
+                        }}
+                        .ct-model-split-badge {{
+                            display: inline-flex;
+                            align-items: center;
+                            padding: 1px 6px;
+                            border-radius: 999px;
+                            background: #dbeafe;
+                            color: #1d4ed8;
+                            border: 1px solid #93c5fd;
+                            font-size: 0.66rem;
+                            font-weight: 700;
+                            white-space: nowrap;
                         }}
                     `;
                     if (styleEl.textContent !== desiredCss) {{
@@ -3211,6 +3498,7 @@ else:
                     return {{
                         shell: shell,
                         body: shell.querySelector("#complexity-tree-body"),
+                        toolbarSummary: shell.querySelector("#complexity-tree-toolbar-summary"),
                         sidebar: shell.querySelector("#complexity-tree-sidebar"),
                         sidebarControls: shell.querySelector("#complexity-tree-sidebar-controls"),
                         sidebarList: shell.querySelector("#complexity-tree-sidebar-list"),
@@ -3230,12 +3518,18 @@ else:
                     const els = getElements();
                     if (!els || !els.content || !spec) return;
                     const totalCols = cols.length;
-                    const hdrH = Number(spec.modelHeaderHeight) || 42;
+                    let maxHeaderLines = 1;
+                    cols.forEach(function(col) {{
+                        const lCnt = Number(col.headerLineCount) || String(col.modelHeaderHtml || "").split("\\x3cbr>").length || 1;
+                        if (lCnt > maxHeaderLines) maxHeaderLines = lCnt;
+                    }});
+                    const hdrH = Math.max(42, maxHeaderLines * 22 + 12);
+                    const dynamicGridTemplate = "minmax(130px, 1.2fr) repeat(" + Math.max(1, totalCols) + ", minmax(max-content, 1fr))";
                     const customColors = getSavedCustomColors(spec.projectId);
                     const html = [];
                     html.push(
                         '\\x3cdiv class="complexity-tree-grid" style="display:grid;grid-template-columns:' +
-                        spec.gridTemplate +
+                        dynamicGridTemplate +
                         ';gap:10px 8px;align-items:center;">'
                     );
 
@@ -3245,8 +3539,9 @@ else:
                             const isFirst = cIdx === 0 ? "true" : "false";
                             const isLast = cIdx === totalCols - 1 ? "true" : "false";
                             const hdrColor = resolveModelHeaderColor(col, customColors);
+                            const isHighlightedCol = (typeof movedColIndex === "number" && movedColIndex === cIdx);
                             html.push(
-                                '\\x3cdiv class="ct-model-col-header" data-row-pos="' + rowPos + '" data-col-index="' + cIdx + '" ' +
+                                '\\x3cdiv class="ct-model-col-header' + (isHighlightedCol ? ' ct-merged-box-flash' : '') + '" data-row-pos="' + rowPos + '" data-col-index="' + cIdx + '" ' +
                                 'data-group-key="' + escapeAttr(col.groupKey) + '" data-is-first="' + isFirst + '" data-is-last="' + isLast + '" ' +
                                 'title="Drag left or right to move this model column (matching adjacent feature boxes merge automatically)" ' +
                                 'style="font-weight:700;line-height:1.45;white-space:nowrap;word-break:keep-all;overflow-wrap:normal;' +
@@ -3320,6 +3615,20 @@ else:
                     buildModelRow("bottom");
                     html.push('\\x3c/div>');
                     els.content.innerHTML = html.join("");
+                    if (els.toolbarSummary && spec) {{
+                        const activeTotal = Number(spec.activeModelTotal) || totalCols;
+                        const featTotal = Array.isArray(spec.features) ? spec.features.length : 0;
+                        els.toolbarSummary.textContent =
+                            activeTotal + " active model" + (activeTotal === 1 ? "" : "s") + " · " +
+                            totalCols + " model group" + (totalCols === 1 ? "" : "s") + " · " +
+                            featTotal + " feature" + (featTotal === 1 ? "" : "s");
+                    }}
+                    if (els.sidebarCount && spec) {{
+                        const featTotal = Array.isArray(spec.features) ? spec.features.length : 0;
+                        els.sidebarCount.textContent =
+                            totalCols + " model" + (totalCols === 1 ? "" : "s") + " · " +
+                            featTotal + " feature" + (featTotal === 1 ? "" : "s");
+                    }}
                     if (els.resetColsBtn) {{
                         els.resetColsBtn.disabled = !isCustomOrderActive(cols, spec);
                     }}
@@ -3507,11 +3816,19 @@ else:
                     const showFeatures = (activeFilter === "all" || activeFilter === "features");
 
                     if (showModels) {{
+                        const expandedModelGroups = rootWin.__paagComplexityTreeExpandedModelGroups || {{}};
                         const matchingCols = cols.filter(function(col) {{
                             if (!query) return true;
                             const lbl = String(col.displayLabel || col.groupKey || "").toLowerCase();
                             const names = Array.isArray(col.modelNames) ? col.modelNames.join(" ").toLowerCase() : "";
-                            return lbl.indexOf(query) !== -1 || names.indexOf(query) !== -1;
+                            const allDets = Array.isArray(col.allGroupModelDetails) ? col.allGroupModelDetails : [];
+                            const detMatch = allDets.some(function(d) {{
+                                return (
+                                    String(d.modelNumber || "").toLowerCase().indexOf(query) !== -1 ||
+                                    String(d.modelName || "").toLowerCase().indexOf(query) !== -1
+                                );
+                            }});
+                            return lbl.indexOf(query) !== -1 || names.indexOf(query) !== -1 || detMatch;
                         }});
                         if (matchingCols.length > 0 || !query) {{
                             html.push(
@@ -3556,8 +3873,10 @@ else:
                             }}
                             matchingCols.forEach(function(col) {{
                                 const resolved = resolveModelHeaderColor(col, customColors);
+                                const isSplitCol = Boolean(col.isSplitColumn && col.splitModelNumber);
                                 const hasSpecificCustom = Boolean(
                                     customColors.models && (
+                                        (isSplitCol && customColors.models["split::" + col.splitModelNumber]) ||
                                         customColors.models[col.groupKey] ||
                                         (Array.isArray(col.modelNumbers) && col.modelNumbers.some(function(m) {{ return Boolean(customColors.models["model::" + m]); }}))
                                     )
@@ -3580,16 +3899,105 @@ else:
                                         'style="background:' + sw + ';">\\x3c/button>'
                                     );
                                 }}).join("");
+
+                                const allDetails = (!isSplitCol && Array.isArray(col.allGroupModelDetails) && col.allGroupModelDetails.length > 0)
+                                    ? col.allGroupModelDetails
+                                    : (Array.isArray(col.modelDetails) ? col.modelDetails : (col.modelNumbers || []).map(function(m, idx) {{
+                                        return {{
+                                            modelNumber: String(m),
+                                            modelName: String((col.modelNames && col.modelNames[idx]) || "")
+                                        }};
+                                    }}));
+                                const canExpandModels = allDetails.length > 0;
+                                const isGroupExpanded = Boolean(expandedModelGroups[col.groupKey] || (query && !isSplitCol));
+
+                                let expandedModelsHtml = "";
+                                if (canExpandModels && isGroupExpanded) {{
+                                    const baseColObj = findBaseColumnForModel(spec, allDetails[0] ? allDetails[0].modelNumber : "") || col;
+                                    const baseGroupHex = getBaseGroupHeaderHex(baseColObj, customColors);
+                                    const memberRows = allDetails.filter(function(det) {{
+                                        if (!query) return true;
+                                        const gLbl = String(col.displayLabel || "").toLowerCase();
+                                        if (gLbl.indexOf(query) !== -1) return true;
+                                        return (
+                                            String(det.modelNumber || "").toLowerCase().indexOf(query) !== -1 ||
+                                            String(det.modelName || "").toLowerCase().indexOf(query) !== -1
+                                        );
+                                    }}).map(function(det) {{
+                                        const mNum = String(det.modelNumber || "");
+                                        const mName = String(det.modelName || "");
+                                        const splitRaw = customColors.models ? customColors.models["split::" + mNum] : "";
+                                        const mBg = splitRaw ? normalizeHexColor(splitRaw, baseGroupHex) : baseGroupHex;
+                                        const mText = getContrastingTextColor(mBg);
+                                        const isModelSplit = Boolean(splitRaw && normalizeHexColor(splitRaw, "") !== baseGroupHex);
+                                        const mPaletteKey = "model-split:" + mNum;
+                                        const isMPaletteOpen = Boolean(openPalettes[mPaletteKey]);
+                                        const mSwatches = MODEL_PRESET_SWATCHES.map(function(sw) {{
+                                            const isAct = isModelSplit && normalizeHexColor(sw, "") === normalizeHexColor(mBg, "");
+                                            return (
+                                                '\\x3cbutton type="button" class="ct-shade-dot' + (isAct ? ' is-active-shade' : '') + '" ' +
+                                                'data-ct-swatch-type="model-split" data-ct-target-key="' + escapeAttr(mNum) + '" ' +
+                                                'data-ct-model-number="' + escapeAttr(mNum) + '" ' +
+                                                'data-ct-swatch-color="' + sw + '" ' +
+                                                'title="Assign ' + sw + ' to ' + escapeAttr(mNum) + ' (creates separate column if different from group)" ' +
+                                                'style="background:' + sw + ';">\\x3c/button>'
+                                            );
+                                        }}).join("");
+                                        return (
+                                            '\\x3cdiv class="ct-model-member-item' + (isModelSplit ? ' is-split-model' : '') + '">' +
+                                            '\\x3cdiv class="ct-model-member-top">' +
+                                            '\\x3cdiv class="ct-model-member-id">' +
+                                            '\\x3cspan class="ct-model-num-pill" style="background:' + mBg + ';color:' + mText + ';" title="Model number: ' + escapeAttr(mNum) + '">' +
+                                            escapeAttr(mNum) +
+                                            '\\x3c/span>' +
+                                            (mName
+                                                ? '\\x3cspan class="ct-model-name-text" title="Model name: ' + escapeAttr(mName) + '">Model name: \\x3cstrong>' + escapeAttr(mName) + '\\x3c/strong>\\x3c/span>'
+                                                : '\\x3cspan class="ct-model-name-text" style="font-style:italic;opacity:.75;">No model name\\x3c/span>') +
+                                            '\\x3c/div>' +
+                                            '\\x3cdiv class="ct-color-actions">' +
+                                            (isModelSplit ? '\\x3cspan class="ct-model-split-badge" title="Assigned its own column in the visual">New col\\x3c/span>' : '') +
+                                            '\\x3cbutton type="button" class="ct-family-pill-btn' + (isMPaletteOpen ? ' is-open' : '') + '" style="padding:2px 5px;" ' +
+                                            'data-ct-toggle-palette="' + escapeAttr(mPaletteKey) + '" title="Pick custom color or shade for ' + escapeAttr(mNum) + '">🎨\\x3c/button>' +
+                                            (isModelSplit
+                                                ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-reset-type="model-split" data-ct-model-number="' + escapeAttr(mNum) + '" title="Reset ' + escapeAttr(mNum) + ' back into group column">↺\\x3c/button>'
+                                                : '') +
+                                            '\\x3c/div>' +
+                                            '\\x3c/div>' +
+                                            '\\x3cdiv class="ct-preset-swatches" style="margin-top:1px;">' + mSwatches + '\\x3c/div>' +
+                                            (isMPaletteOpen ? buildPaletteDrawerHtml("model-split", mNum, mBg, null, spec.projectId, 0) : '') +
+                                            '\\x3c/div>'
+                                        );
+                                    }}).join("");
+                                    expandedModelsHtml = (
+                                        '\\x3cdiv class="ct-model-members-drawer">' +
+                                        '\\x3cdiv style="font-size:.63rem;color:var(--st-secondary-text-color,#64748b);line-height:1.25;">' +
+                                        'Assign a different color to any model below to split it into its own column:' +
+                                        '\\x3c/div>' +
+                                        memberRows +
+                                        '\\x3c/div>'
+                                    );
+                                }}
+
+                                const expandBtnLabel = isGroupExpanded
+                                    ? ('▴ Hide model list (' + allDetails.length + ')')
+                                    : ('▾ Expand models (' + allDetails.length + ')');
+
                                 html.push(
                                     '\\x3cdiv class="ct-sidebar-card" data-sidebar-model-group="' + escapeAttr(col.groupKey) + '">' +
                                     '\\x3cdiv class="ct-sidebar-row">' +
                                     '\\x3cdiv style="min-width:0;flex:1 1 auto;">' +
-                                    '\\x3cdiv class="ct-choice-preview" style="max-width:165px;background:' + resolved.bg + ';color:' + resolved.text + ';border-color:#0f172a;">' +
+                                    '\\x3cdiv style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">' +
+                                    '\\x3cdiv class="ct-choice-preview" data-ct-toggle-model-group="' + escapeAttr(col.groupKey) + '" title="Click to expand/collapse full model numbers &amp; model names (' + escapeAttr(titleText) + ')" style="max-width:165px;cursor:pointer;background:' + resolved.bg + ';color:' + resolved.text + ';border-color:#0f172a;">' +
                                     escapeAttr(titleText) +
                                     '\\x3c/div>' +
-                                    (subText ? '\\x3cspan class="ct-sidebar-sublabel" style="margin-top:2px;">' + escapeAttr(subText) + '\\x3c/span>' : '') +
+                                    (isSplitCol ? '\\x3cspan class="ct-model-split-badge" title="Split into its own model column">Split col\\x3c/span>' : '') +
+                                    '\\x3c/div>' +
+                                    (subText ? '\\x3cspan class="ct-sidebar-sublabel" data-ct-toggle-model-group="' + escapeAttr(col.groupKey) + '" title="Click to expand full list of model numbers and model names" style="margin-top:2px;cursor:pointer;">' + escapeAttr(subText) + '\\x3c/span>' : '') +
                                     '\\x3c/div>' +
                                     '\\x3cdiv class="ct-color-actions">' +
+                                    (canExpandModels
+                                        ? '\\x3cbutton type="button" class="ct-model-expand-btn' + (isGroupExpanded ? ' is-open' : '') + '" data-ct-toggle-model-group="' + escapeAttr(col.groupKey) + '" title="Expand all model numbers and model names in this group">' + expandBtnLabel + '\\x3c/button>'
+                                        : '') +
                                     '\\x3cbutton type="button" class="ct-family-pill-btn' + (isModelOpen ? ' is-open' : '') + '" data-ct-toggle-palette="' + escapeAttr(pKey) + '" title="Open shade palette &amp; custom colors for ' + escapeAttr(titleText) + '">Palette ' + (isModelOpen ? '▴' : '▾') + '\\x3c/button>' +
                                     (hasSpecificCustom
                                         ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-reset-type="model" data-ct-group-key="' + escapeAttr(col.groupKey) + '" title="Reset color for ' + escapeAttr(titleText) + '">↺\\x3c/button>'
@@ -3598,6 +4006,7 @@ else:
                                     '\\x3c/div>' +
                                     '\\x3cdiv class="ct-preset-swatches">' + modelSwatches + '\\x3c/div>' +
                                     (isModelOpen ? buildPaletteDrawerHtml("model", col.groupKey, resolved.bg, null, spec.projectId, 0) : '') +
+                                    expandedModelsHtml +
                                     '\\x3c/div>'
                                 );
                             }});
@@ -3762,21 +4171,100 @@ else:
                     bindSidebarColorEvents(els.sidebarList);
                 }}
 
+                function findBaseColumnForModel(spec, modelNum) {{
+                    const mStr = String(modelNum || "");
+                    const baseCols = (spec && Array.isArray(spec.columns)) ? spec.columns : [];
+                    for (let i = 0; i < baseCols.length; i += 1) {{
+                        const bc = baseCols[i];
+                        if (Array.isArray(bc.modelNumbers) && bc.modelNumbers.indexOf(mStr) !== -1) {{
+                            return bc;
+                        }}
+                    }}
+                    return null;
+                }}
+
                 function applyModelColorChange(groupKey, hexVal) {{
                     const state = rootWin.__paagComplexityTreeState;
                     if (!state || !state.spec) return;
                     const cfg = getSavedCustomColors(state.spec.projectId);
                     const cleanHex = normalizeHexColor(hexVal, "#ffffff");
-                    cfg.models[groupKey] = cleanHex;
                     const cols = state.cols || state.spec.columns || [];
+                    let targetCol = null;
+                    cols.forEach(function(col) {{
+                        if (col.groupKey === groupKey) {{
+                            targetCol = col;
+                        }}
+                    }});
+                    if (targetCol && targetCol.isSplitColumn && targetCol.splitModelNumber) {{
+                        applyIndividualModelColorChange(targetCol.splitModelNumber, cleanHex);
+                        return;
+                    }}
+                    cfg.models[groupKey] = cleanHex;
                     cols.forEach(function(col) {{
                         if (col.groupKey === groupKey && Array.isArray(col.modelNumbers)) {{
                             col.modelNumbers.forEach(function(m) {{
-                                cfg.models["model::" + String(m)] = cleanHex;
+                                const mStr = String(m);
+                                if (!cfg.models["split::" + mStr]) {{
+                                    cfg.models["model::" + mStr] = cleanHex;
+                                }}
                             }});
                         }}
                     }});
                     saveCustomColors(state.spec.projectId, cfg);
+                    state.cols = computeOrderedColumns(state.spec);
+                    renderComplexityTreeGrid(state.cols, state.spec, null);
+                }}
+
+                function applyIndividualModelColorChange(modelNumber, hexVal) {{
+                    const state = rootWin.__paagComplexityTreeState;
+                    if (!state || !state.spec) return;
+                    const mStr = String(modelNumber || "").trim();
+                    if (!mStr) return;
+                    const cfg = getSavedCustomColors(state.spec.projectId);
+                    const cleanHex = normalizeHexColor(hexVal, "#ffffff");
+                    const baseCol = findBaseColumnForModel(state.spec, mStr);
+                    const baseGroupHex = getBaseGroupHeaderHex(baseCol, cfg);
+                    if (baseCol && Array.isArray(baseCol.modelNumbers) && baseCol.modelNumbers.length <= 1) {{
+                        cfg.models[baseCol.groupKey] = cleanHex;
+                        cfg.models["model::" + mStr] = cleanHex;
+                        delete cfg.models["split::" + mStr];
+                    }} else if (cleanHex === baseGroupHex) {{
+                        delete cfg.models["split::" + mStr];
+                        if (baseCol && cfg.models[baseCol.groupKey]) {{
+                            cfg.models["model::" + mStr] = cfg.models[baseCol.groupKey];
+                        }} else {{
+                            delete cfg.models["model::" + mStr];
+                        }}
+                    }} else {{
+                        cfg.models["split::" + mStr] = cleanHex;
+                        cfg.models["model::" + mStr] = cleanHex;
+                    }}
+                    saveCustomColors(state.spec.projectId, cfg);
+                    state.cols = computeOrderedColumns(state.spec);
+                    let highlightIdx = null;
+                    state.cols.forEach(function(c, idx) {{
+                        if (c.isSplitColumn && c.splitModelNumber === mStr) {{
+                            highlightIdx = idx;
+                        }}
+                    }});
+                    renderComplexityTreeGrid(state.cols, state.spec, highlightIdx);
+                }}
+
+                function resetIndividualModelColor(modelNumber) {{
+                    const state = rootWin.__paagComplexityTreeState;
+                    if (!state || !state.spec) return;
+                    const mStr = String(modelNumber || "").trim();
+                    if (!mStr) return;
+                    const cfg = getSavedCustomColors(state.spec.projectId);
+                    delete cfg.models["split::" + mStr];
+                    const baseCol = findBaseColumnForModel(state.spec, mStr);
+                    if (baseCol && cfg.models[baseCol.groupKey]) {{
+                        cfg.models["model::" + mStr] = cfg.models[baseCol.groupKey];
+                    }} else {{
+                        delete cfg.models["model::" + mStr];
+                    }}
+                    saveCustomColors(state.spec.projectId, cfg);
+                    state.cols = computeOrderedColumns(state.spec);
                     renderComplexityTreeGrid(state.cols, state.spec, null);
                 }}
 
@@ -3786,6 +4274,7 @@ else:
                     const cfg = getSavedCustomColors(state.spec.projectId);
                     cfg.models["__all__"] = normalizeHexColor(hexVal, "#ffffff");
                     saveCustomColors(state.spec.projectId, cfg);
+                    state.cols = computeOrderedColumns(state.spec);
                     renderComplexityTreeGrid(state.cols, state.spec, null);
                 }}
 
@@ -3872,6 +4361,18 @@ else:
 
                 function bindSidebarColorEvents(listEl) {{
                     if (!listEl) return;
+
+                    listEl.querySelectorAll("[data-ct-toggle-model-group]").forEach(function(toggleEl) {{
+                        toggleEl.onclick = function(ev) {{
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const gKey = toggleEl.getAttribute("data-ct-toggle-model-group") || "";
+                            if (!gKey) return;
+                            rootWin.__paagComplexityTreeExpandedModelGroups = rootWin.__paagComplexityTreeExpandedModelGroups || {{}};
+                            rootWin.__paagComplexityTreeExpandedModelGroups[gKey] = !rootWin.__paagComplexityTreeExpandedModelGroups[gKey];
+                            renderColorSidebarList();
+                        }};
+                    }});
 
                     listEl.querySelectorAll("input[data-ct-select-choice]").forEach(function(cb) {{
                         cb.onchange = function(ev) {{
@@ -3964,6 +4465,8 @@ else:
                                 applyAllModelsColorChange(sColor);
                             }} else if (sType === "model") {{
                                 applyModelColorChange(swBtn.getAttribute("data-ct-group-key") || targetKey, sColor);
+                            }} else if (sType === "model-split") {{
+                                applyIndividualModelColorChange(swBtn.getAttribute("data-ct-model-number") || targetKey, sColor);
                             }} else if (sType === "feature") {{
                                 applyFeatureRowColorChange(swBtn.getAttribute("data-ct-feature-id") || targetKey, sColor);
                             }} else if (sType === "choice") {{
@@ -4040,6 +4543,8 @@ else:
                                 }}
                             }} else if (mode === "model") {{
                                 applyModelColorChange(tKey, pickedHex);
+                            }} else if (mode === "model-split") {{
+                                applyIndividualModelColorChange(tKey, pickedHex);
                             }} else if (mode === "all-models") {{
                                 applyAllModelsColorChange(pickedHex);
                             }}
@@ -4067,16 +4572,31 @@ else:
                             if (!state || !state.spec) return;
                             const cfg = getSavedCustomColors(state.spec.projectId);
                             const rType = rstBtn.getAttribute("data-ct-reset-type");
-                            if (rType === "all-models") {{
+                            if (rType === "model-split") {{
+                                const mNum = rstBtn.getAttribute("data-ct-model-number") || "";
+                                resetIndividualModelColor(mNum);
+                                renderColorSidebarList();
+                                return;
+                            }} else if (rType === "all-models") {{
                                 delete cfg.models["__all__"];
                             }} else if (rType === "model") {{
                                 const gKey = rstBtn.getAttribute("data-ct-group-key") || "";
-                                delete cfg.models[gKey];
                                 const cols = state.cols || state.spec.columns || [];
+                                let targetCol = null;
+                                cols.forEach(function(col) {{
+                                    if (col.groupKey === gKey) targetCol = col;
+                                }});
+                                if (targetCol && targetCol.isSplitColumn && targetCol.splitModelNumber) {{
+                                    resetIndividualModelColor(targetCol.splitModelNumber);
+                                    renderColorSidebarList();
+                                    return;
+                                }}
+                                delete cfg.models[gKey];
                                 cols.forEach(function(col) {{
                                     if (col.groupKey === gKey && Array.isArray(col.modelNumbers)) {{
                                         col.modelNumbers.forEach(function(m) {{
                                             delete cfg.models["model::" + String(m)];
+                                            delete cfg.models["split::" + String(m)];
                                         }});
                                     }}
                                 }});
@@ -4102,6 +4622,7 @@ else:
                                 delete cfg.choiceShades[fId + "::" + cVal];
                             }}
                             saveCustomColors(state.spec.projectId, cfg);
+                            state.cols = computeOrderedColumns(state.spec);
                             renderComplexityTreeGrid(state.cols, state.spec, null);
                             renderColorSidebarList();
                         }};
@@ -4130,6 +4651,7 @@ else:
                     const state = rootWin.__paagComplexityTreeState;
                     if (!state || !state.spec) return;
                     saveCustomColors(state.spec.projectId, emptyColorConfig());
+                    state.cols = computeOrderedColumns(state.spec);
                     renderComplexityTreeGrid(state.cols, state.spec, null);
                     renderColorSidebarList();
                 }}
@@ -4320,8 +4842,7 @@ else:
 
                 async function toggleComplexityTreeFullScreen() {{
                     const isFs = isVisualFullScreen();
-                    const els = getElements();
-                    const fsTarget = (els && els.shell) ? els.shell : rootDoc.documentElement;
+                    const fsTarget = rootDoc.documentElement;
                     if (isFs) {{
                         rootWin.__paagComplexityTreeFallbackFullScreen = false;
                         try {{
@@ -4336,22 +4857,35 @@ else:
                         updateFullScreenControl();
                     }} else {{
                         rootWin.__paagComplexityTreeSidebarWasExpanded = isSidebarExpanded();
+                        rootWin.__paagComplexityTreeFallbackFullScreen = true;
                         try {{
                             if (typeof fsTarget.requestFullscreen === "function") {{
                                 await fsTarget.requestFullscreen();
                             }} else if (typeof fsTarget.webkitRequestFullscreen === "function") {{
                                 fsTarget.webkitRequestFullscreen();
-                            }} else {{
-                                rootWin.__paagComplexityTreeFallbackFullScreen = true;
                             }}
-                        }} catch (e) {{
-                            rootWin.__paagComplexityTreeFallbackFullScreen = true;
-                        }}
+                        }} catch (e) {{}}
                         updateFullScreenControl();
                     }}
                 }}
 
-                function triggerComplexityTreePrint() {{
+                async function triggerComplexityTreePrint() {{
+                    if (isVisualFullScreen()) {{
+                        rootWin.__paagComplexityTreeFallbackFullScreen = true;
+                        try {{
+                            if (rootDoc.fullscreenElement || rootDoc.webkitFullscreenElement) {{
+                                rootWin.__paagKeepFallbackOnFsExit = true;
+                                if (typeof rootDoc.exitFullscreen === "function") {{
+                                    await rootDoc.exitFullscreen();
+                                }} else if (typeof rootDoc.webkitExitFullscreen === "function") {{
+                                    rootDoc.webkitExitFullscreen();
+                                }}
+                            }}
+                        }} catch (e) {{
+                            rootWin.__paagKeepFallbackOnFsExit = false;
+                        }}
+                        updateFullScreenControl();
+                    }}
                     const printBtn = rootDoc.querySelector('[class*="st-key-btn_print_complexity_tree_visual_"] button');
                     if (printBtn && typeof printBtn.click === "function") {{
                         printBtn.click();
@@ -4579,6 +5113,14 @@ else:
                 }};
 
                 const onFullscreenChange = function() {{
+                    const fsEl = rootDoc.fullscreenElement || rootDoc.webkitFullscreenElement;
+                    if (!fsEl) {{
+                        if (rootWin.__paagKeepFallbackOnFsExit) {{
+                            rootWin.__paagKeepFallbackOnFsExit = false;
+                        }} else {{
+                            rootWin.__paagComplexityTreeFallbackFullScreen = false;
+                        }}
+                    }}
                     if (rootWin.__paagComplexityTreeActions) {{
                         rootWin.__paagComplexityTreeActions.updateFullScreenControl();
                     }}
@@ -4586,6 +5128,9 @@ else:
 
                 const onKeyDownCapture = function(event) {{
                     if (event.key === "Escape" && rootWin.__paagComplexityTreeFallbackFullScreen) {{
+                        if (rootDoc.querySelector('[data-testid="stDialog"], [data-testid="stModal"], [data-baseweb="modal"], [role="dialog"]')) {{
+                            return;
+                        }}
                         rootWin.__paagComplexityTreeFallbackFullScreen = false;
                         if (rootWin.__paagComplexityTreeActions) {{
                             rootWin.__paagComplexityTreeActions.updateFullScreenControl();
@@ -4887,6 +5432,19 @@ else:
             {
                 "groupKey": "|".join(str(m) for m in grp["model_numbers"]),
                 "modelNumbers": [str(m) for m in grp["model_numbers"]],
+                "modelNames": [str(n) for n in grp["model_names"]],
+                "modelDetails": [
+                    {
+                        "modelId": str(m_id),
+                        "modelNumber": str(m_num),
+                        "modelName": str(m_name),
+                    }
+                    for m_id, m_num, m_name in zip(
+                        grp["model_ids"],
+                        grp["model_numbers"],
+                        grp["model_names"],
+                    )
+                ],
                 "modelHeaderHtml": "<br>".join(lns),
                 "cells": [],
             }
@@ -5079,6 +5637,7 @@ else:
                     "projectId": str(project_id),
                     "gridTemplate": g_tmpl,
                     "modelHeaderHeight": m_hdr_height,
+                    "selectedModelLabels": list(target_model_labels),
                     "features": print_spec_features,
                     "columns": print_spec_columns,
                 }
@@ -5106,7 +5665,7 @@ else:
         for idx, (cat_label, grid_markup) in enumerate(pages_spec, start=1):
             page_badge = f"Page {idx} of {total_p}" if total_p > 1 else "Page 1 of 1"
             sheets_html.append(
-                f"""<section class="print-sheet">
+                f"""<section class="print-sheet" data-paper-size="{escape(paper_size)}">
   <header class="print-sheet-header">
     <div>
       <div class="print-sheet-title">{escape(project_name)} — Complexity Tree Visual</div>
@@ -5128,7 +5687,7 @@ else:
 <style>
   @page {{
     size: {page_css_size};
-    margin: 0.3in;
+    margin: 0.25in;
   }}
   * {{
     box-sizing: border-box;
@@ -5145,15 +5704,17 @@ else:
   }}
   .print-sheet {{
     background: #ffffff;
-    width: calc({page_w_in} - 0.6in);
-    min-height: calc({page_h_in} - 0.6in);
+    width: calc({page_w_in} - 0.5in);
+    max-width: 100%;
+    height: calc({page_h_in} - 0.5in);
+    max-height: calc({page_h_in} - 0.5in);
     margin: 12px auto;
-    padding: 14px 18px;
+    padding: 12px 16px;
     border: 1px solid #cbd5e1;
     border-radius: 8px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
     page-break-after: always;
     break-after: page;
     overflow: hidden;
@@ -5167,21 +5728,21 @@ else:
     justify-content: space-between;
     align-items: flex-start;
     border-bottom: 2px solid #0f172a;
-    padding-bottom: 8px;
+    padding-bottom: 6px;
     flex: 0 0 auto;
   }}
   .print-sheet-title {{
-    font-size: 1.15rem;
+    font-size: 1.1rem;
     font-weight: 800;
     color: #0f172a;
   }}
   .print-sheet-subtitle {{
-    font-size: 0.84rem;
+    font-size: 0.82rem;
     color: #334155;
     margin-top: 2px;
   }}
   .print-sheet-badge {{
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     font-weight: 700;
     color: #334155;
     background: #f1f5f9;
@@ -5191,14 +5752,16 @@ else:
     white-space: nowrap;
   }}
   .print-sheet-body {{
+    position: relative;
     flex: 1 1 auto;
-    display: flex;
-    align-items: flex-start;
-    justify-content: stretch;
+    min-height: 0;
     width: 100%;
     overflow: hidden;
   }}
   .print-tree-stage {{
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     transform-origin: top left;
   }}
@@ -5210,15 +5773,19 @@ else:
   @media print {{
     html, body {{
       background: #ffffff !important;
+      margin: 0 !important;
+      padding: 0 !important;
     }}
     .print-sheet {{
-      margin: 0 !important;
+      margin: 0 auto !important;
       border: none !important;
       border-radius: 0 !important;
-      width: 100% !important;
-      height: calc({page_h_in} - 0.6in) !important;
+      width: calc({page_w_in} - 0.5in) !important;
+      max-width: none !important;
+      height: calc({page_h_in} - 0.5in) !important;
+      max-height: calc({page_h_in} - 0.5in) !important;
       min-height: 0 !important;
-      padding: 4px 6px !important;
+      padding: 6px 10px !important;
     }}
   }}
 </style>
@@ -5370,9 +5937,155 @@ else:
     return "#" + toHex(r) + toHex(g) + toHex(b);
   }}
 
+  function printEscapeHtml(str) {{
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/\\x3c/g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }}
+
+  function printGetBaseGroupHex(baseCol, customColors) {{
+    const modelsMap = (customColors && customColors.models) || {{}};
+    if (baseCol && modelsMap[baseCol.groupKey]) {{
+      return printNormalizeHex(modelsMap[baseCol.groupKey], "#ffffff");
+    }}
+    if (baseCol && Array.isArray(baseCol.modelNumbers)) {{
+      for (let i = 0; i < baseCol.modelNumbers.length; i++) {{
+        const mStr = String(baseCol.modelNumbers[i]);
+        if (modelsMap["split::" + mStr]) continue;
+        if (modelsMap["model::" + mStr]) {{
+          return printNormalizeHex(modelsMap["model::" + mStr], "#ffffff");
+        }}
+      }}
+    }}
+    if (modelsMap["__all__"]) {{
+      return printNormalizeHex(modelsMap["__all__"], "#ffffff");
+    }}
+    return "#ffffff";
+  }}
+
+  function printBuildHeaderLines(detailsList, selectedLabels) {{
+    const labels = Array.isArray(selectedLabels) && selectedLabels.length > 0
+      ? selectedLabels
+      : ["Model number"];
+    if (labels.length === 1 && labels[0] === "Model name") {{
+      const seen = {{}};
+      const out = [];
+      detailsList.forEach(function(d) {{
+        const raw = String(d.modelName || "").trim() || "Model name not defined";
+        if (!seen[raw]) {{
+          seen[raw] = true;
+          out.push(printEscapeHtml(raw));
+        }}
+      }});
+      return out;
+    }}
+    if (labels.length === 1 && labels[0] === "Model number") {{
+      return detailsList.map(function(d) {{
+        return printEscapeHtml(String(d.modelNumber || ""));
+      }});
+    }}
+    const res = [];
+    detailsList.forEach(function(d) {{
+      labels.forEach(function(lt) {{
+        if (lt === "Model name") {{
+          res.push(printEscapeHtml(String(d.modelName || "").trim() || "Model name not defined"));
+        }} else if (lt === "Model number") {{
+          res.push(printEscapeHtml(String(d.modelNumber || "")));
+        }}
+      }});
+    }});
+    return res;
+  }}
+
+  function printBuildColumnsWithSplits(spec, customColors) {{
+    const baseCols = (spec && Array.isArray(spec.columns)) ? spec.columns : [];
+    const modelsMap = (customColors && customColors.models) || {{}};
+    const selectedLabels = spec ? spec.selectedModelLabels : ["Model number"];
+    const result = [];
+    baseCols.forEach(function(baseCol, baseIdx) {{
+      const rawDetails = Array.isArray(baseCol.modelDetails) && baseCol.modelDetails.length > 0
+        ? baseCol.modelDetails
+        : (baseCol.modelNumbers || []).map(function(m, idx) {{
+            return {{
+              modelId: "",
+              modelNumber: String(m),
+              modelName: String((baseCol.modelNames && baseCol.modelNames[idx]) || "")
+            }};
+          }});
+      const baseGroupHex = printGetBaseGroupHex(baseCol, customColors);
+      if (rawDetails.length <= 1) {{
+        result.push(Object.assign({{}}, baseCol, {{
+          defaultIndex: baseIdx * 1000
+        }}));
+        return;
+      }}
+      const remaining = [];
+      const splitItems = [];
+      rawDetails.forEach(function(det, mIdx) {{
+        const mNum = String(det.modelNumber || "");
+        const splitColorRaw = modelsMap["split::" + mNum];
+        const splitHex = splitColorRaw ? printNormalizeHex(splitColorRaw, "") : "";
+        if (splitHex && splitHex !== baseGroupHex) {{
+          splitItems.push({{ det: det, mIdx: mIdx }});
+        }} else {{
+          remaining.push(det);
+        }}
+      }});
+      if (splitItems.length === 0) {{
+        result.push(Object.assign({{}}, baseCol, {{
+          defaultIndex: baseIdx * 1000
+        }}));
+        return;
+      }}
+      if (remaining.length > 0) {{
+        const remNums = remaining.map(function(d) {{ return String(d.modelNumber); }});
+        const remNames = remaining.map(function(d) {{ return String(d.modelName || ""); }});
+        const remLines = printBuildHeaderLines(remaining, selectedLabels);
+        result.push(Object.assign({{}}, baseCol, {{
+          modelNumbers: remNums,
+          modelNames: remNames,
+          modelDetails: remaining,
+          modelHeaderHtml: remLines.join("\\x3cbr>"),
+          headerLineCount: remLines.length,
+          defaultIndex: baseIdx * 1000
+        }}));
+      }}
+      splitItems.forEach(function(item, sIdx) {{
+        const d = item.det;
+        const mNum = String(d.modelNumber);
+        const mName = String(d.modelName || "");
+        const sLines = printBuildHeaderLines([d], selectedLabels);
+        result.push(Object.assign({{}}, baseCol, {{
+          groupKey: "model::" + mNum,
+          baseGroupKey: baseCol.groupKey,
+          isSplitColumn: true,
+          splitModelNumber: mNum,
+          modelNumbers: [mNum],
+          modelNames: [mName],
+          modelDetails: [d],
+          modelHeaderHtml: sLines.join("\\x3cbr>"),
+          headerLineCount: sLines.length,
+          defaultIndex: baseIdx * 1000 + (item.mIdx + 1) + sIdx
+        }}));
+      }});
+    }});
+    return result;
+  }}
+
   function printResolveModelColor(col, customColors) {{
     const modelsMap = (customColors && customColors.models) || {{}};
-    let chosenHex = modelsMap[col.groupKey] || null;
+    let chosenHex = null;
+    if (col.isSplitColumn && col.splitModelNumber && modelsMap["split::" + col.splitModelNumber]) {{
+      chosenHex = modelsMap["split::" + col.splitModelNumber];
+    }}
+    if (!chosenHex && modelsMap[col.groupKey]) {{
+      chosenHex = modelsMap[col.groupKey];
+    }}
+    if (!chosenHex && col.baseGroupKey && modelsMap[col.baseGroupKey]) {{
+      chosenHex = modelsMap[col.baseGroupKey];
+    }}
     if (!chosenHex && Array.isArray(col.modelNumbers)) {{
       for (let i = 0; i < col.modelNumbers.length; i++) {{
         const mKey = "model::" + String(col.modelNumbers[i]);
@@ -5440,9 +6153,7 @@ else:
       );
       if ((!savedOrder || savedOrder.length === 0) && !hasColors) return;
 
-      let cols = spec.columns.map(function(col, idx) {{
-        return Object.assign({{}}, col, {{ defaultIndex: idx }});
-      }});
+      let cols = printBuildColumnsWithSplits(spec, savedColors);
       if (savedOrder && savedOrder.length > 0) {{
         const rankMap = new Map();
         savedOrder.forEach(function(mNum, idx) {{
@@ -5465,11 +6176,18 @@ else:
       }}
 
       const totalCols = cols.length;
-      const hdrH = Number(spec.modelHeaderHeight) || 42;
+      const dynamicGridTemplate =
+        "minmax(130px, 1.2fr) repeat(" + Math.max(1, totalCols) + ", minmax(max-content, 1fr))";
+      let maxHeaderLines = 1;
+      cols.forEach(function(c) {{
+        const lc = Number(c.headerLineCount) || String(c.modelHeaderHtml || "").split("\\x3cbr>").length || 1;
+        if (lc > maxHeaderLines) maxHeaderLines = lc;
+      }});
+      const hdrH = Math.max(42, maxHeaderLines * 22 + 12);
       const html = [];
       html.push(
         '\\x3cdiv class="complexity-visual-grid" style="display:grid;grid-template-columns:' +
-        spec.gridTemplate +
+        dynamicGridTemplate +
         ';gap:10px 8px;align-items:center;">'
       );
 
@@ -5540,31 +6258,68 @@ else:
       const body = sheet.querySelector('.print-sheet-body');
       const stage = sheet.querySelector('.print-tree-stage');
       if (!body || !stage) return;
+
+      stage.style.transform = 'none';
       stage.style.zoom = '1';
-      stage.style.width = '100%';
-      const availW = body.clientWidth || 980;
+      stage.style.width = 'max-content';
+
+      const paperAttr = sheet.getAttribute('data-paper-size') || 'letter';
+      const maxBodyH = paperAttr === 'tabloid' ? 915 : 685;
+      const maxBodyW = paperAttr === 'tabloid' ? 1560 : 980;
       const headerEl = sheet.querySelector('.print-sheet-header');
-      const availH = (sheet.clientHeight - (headerEl ? headerEl.offsetHeight : 50) - 28) || 680;
-      const naturalW = stage.scrollWidth || availW;
-      const naturalH = stage.scrollHeight || availH;
-      const scaleW = naturalW > availW ? availW / naturalW : 1;
-      const scaleH = naturalH > availH ? availH / naturalH : 1;
-      const scale = Math.min(scaleW, scaleH, 1);
-      if (scale < 0.995) {{
-        stage.style.zoom = String(Math.max(0.35, scale));
+      const headerH = headerEl ? headerEl.offsetHeight : 48;
+      const measuredBodyW = body.clientWidth || (sheet.clientWidth ? sheet.clientWidth - 28 : maxBodyW);
+      const measuredBodyH = body.clientHeight || (sheet.clientHeight ? sheet.clientHeight - headerH - 26 : maxBodyH);
+      const availW = Math.max(320, measuredBodyW - 2);
+      const availH = Math.max(220, Math.min(measuredBodyH, maxBodyH) - 6);
+
+      const minContentW = stage.scrollWidth || stage.offsetWidth || availW;
+      const baseW = Math.max(availW, minContentW);
+      stage.style.width = baseW + 'px';
+
+      const baseH = stage.scrollHeight || stage.offsetHeight || availH;
+      const scaleW = baseW > availW ? availW / baseW : 1;
+      const scaleH = baseH > availH ? availH / baseH : 1;
+      let scale = Math.min(scaleW, scaleH, 1);
+
+      if (scale < 0.999) {{
+        scale = Math.max(0.2, scale);
+        const targetUnscaledW = Math.max(minContentW, Math.floor(availW / scale));
+        stage.style.width = targetUnscaledW + 'px';
+        const recheckH = stage.scrollHeight || stage.offsetHeight || baseH;
+        if (recheckH * scale > availH) {{
+          scale = Math.max(0.2, availH / recheckH);
+          stage.style.width = Math.max(minContentW, Math.floor(availW / scale)) + 'px';
+        }}
+        stage.style.transformOrigin = 'top left';
+        stage.style.transform = 'scale(' + scale.toFixed(4) + ')';
+      }} else {{
+        stage.style.width = availW + 'px';
+        stage.style.transform = 'none';
       }}
     }});
   }}
   fitComplexitySheets();
+  setTimeout(fitComplexitySheets, 60);
   window.addEventListener('load', function() {{ setTimeout(fitComplexitySheets, 60); }});
   window.addEventListener('resize', fitComplexitySheets);
   window.addEventListener('beforeprint', fitComplexitySheets);
+  if (window.matchMedia) {{
+    try {{
+      window.matchMedia('print').addEventListener('change', fitComplexitySheets);
+    }} catch (e) {{}}
+  }}
 </script>
 </body>
 </html>"""
 
     @st.dialog("Print Complexity Tree Visual", width="large")
     def print_complexity_tree_visual_dialog() -> None:
+        st.html(
+            "<style>"
+            "#portal,[data-testid=\"stDialog\"],[data-testid=\"stModal\"],[data-baseweb=\"modal\"],[role=\"dialog\"]{z-index:1000050 !important;}"
+            "</style>"
+        )
         _, close_col = st.columns([5.0, 1.4])
         with close_col:
             if st.button(

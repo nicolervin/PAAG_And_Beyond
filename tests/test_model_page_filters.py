@@ -240,6 +240,16 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertIn("buildPaletteDrawerHtml", ct_scripts[0])
         self.assertIn("resolveModelHeaderColor", ct_scripts[0])
         self.assertIn("resolveFeatureChoiceColor", ct_scripts[0])
+        self.assertIn("buildColumnsWithSplits", ct_scripts[0])
+        self.assertIn("applyIndividualModelColorChange", ct_scripts[0])
+        self.assertIn("resetIndividualModelColor", ct_scripts[0])
+        self.assertIn("ct-model-expand-btn", ct_scripts[0])
+        self.assertIn("ct-model-members-drawer", ct_scripts[0])
+        self.assertIn("data-ct-toggle-model-group", ct_scripts[0])
+        self.assertIn("const fsTarget = rootDoc.documentElement;", ct_scripts[0])
+        self.assertIn("rootWin.__paagKeepFallbackOnFsExit = true;", ct_scripts[0])
+        self.assertIn('[data-testid="stDialog"]', ct_scripts[0])
+        self.assertIn("z-index: 1000050 !important;", ct_scripts[0])
         script_inner = ct_scripts[0].split("<script>", 1)[1].rsplit("</script>", 1)[0]
         self.assertIsNone(
             re.search(r"<[/\w!]", script_inner),
@@ -262,7 +272,10 @@ class ModelPageFiltersTests(unittest.TestCase):
         print_deck_blocks = [b for b in print_html_blocks if "print-complexity-grid-host" in b]
         self.assertEqual(len(print_deck_blocks), 1)
         self.assertIn("data-print-spec-b64=", print_deck_blocks[0])
+        self.assertIn("data-paper-size=", print_deck_blocks[0])
+        self.assertIn("targetUnscaledW", print_deck_blocks[0])
         self.assertIn("applySavedOrderToPrintGrids", print_deck_blocks[0])
+        self.assertIn("printBuildColumnsWithSplits", print_deck_blocks[0])
         self.assertIn("resolveSavedColorsForPrint", print_deck_blocks[0])
         self.assertIn("print-model-col-header", print_deck_blocks[0])
         self.assertIn("white-space:nowrap", print_deck_blocks[0])
@@ -614,6 +627,93 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertEqual(app.session_state[feat_cat_key], ["Console Pro"])
         self.assertEqual(app.session_state[tree_name_key], ["Alpha 10 Renamed"])
         self.assertEqual(app.session_state[tree_feat_key], ["WW1"])
+
+    def test_product_structure_pages_preserve_filters_and_layout_strictly_scoped(self) -> None:
+        from utils.table_filters import (
+            _is_product_structure_filter_key,
+            preserve_filters_across_save,
+        )
+
+        # 1) Verify strict scope check on filter keys
+        for ps_key in (
+            f"part_catalog_filters_{self.project_id}",
+            f"fishbone_assignment_filters_{self.project_id}_scen1",
+            f"assembly_framework_filters_{self.project_id}",
+            f"pits_registry_filters_{self.project_id}",
+            f"model_definition_filters_{self.project_id}",
+            f"feature_definition_filters_{self.project_id}",
+            f"complexity_tree_filters_{self.project_id}",
+        ):
+            self.assertTrue(_is_product_structure_filter_key(ps_key), ps_key)
+
+        for non_ps_key in (
+            f"yamazumi_filters_{self.project_id}",
+            f"process_plan_filters_{self.project_id}",
+            f"quality_filters_{self.project_id}",
+            f"ergonomics_filters_{self.project_id}",
+            f"safety_filters_{self.project_id}",
+        ):
+            self.assertFalse(_is_product_structure_filter_key(non_ps_key), non_ps_key)
+
+        # 2) Verify preserve_filters_across_save remaps edited values for Product Structure tables
+        before_df = pd.DataFrame([
+            {"id": "p1", "subsystem": "Door", "make_buy": "Make"},
+            {"id": "p2", "subsystem": "Cabinet", "make_buy": "Buy"},
+        ])
+        after_df = pd.DataFrame([
+            {"id": "p1", "subsystem": "Outer Door", "make_buy": "Make"},
+            {"id": "p2", "subsystem": "Cabinet", "make_buy": "Buy"},
+        ])
+        import streamlit as st
+        filter_key = f"part_catalog_filters_{self.project_id}"
+        col_key = f"{filter_key}_subsystem"
+        st.session_state[col_key] = ["Door"]
+        st.session_state[f"_saved_filter_col_{col_key}"] = ["Door"]
+        preserve_filters_across_save(
+            filter_key,
+            before_df,
+            after_df,
+            dropdown_columns=["subsystem", "make_buy"],
+        )
+        self.assertEqual(st.session_state.get(f"_pending_filter_col_{col_key}"), ["Outer Door"])
+        self.assertEqual(st.session_state.get(f"_saved_filter_col_{col_key}"), ["Outer Door"])
+
+        # 3) Verify Parts Catalog page mounts layout keeper and preserves filters across Save & Refresh
+        scenarios = store.planning_scenarios(self.project_id)
+        scenario_id = str(scenarios[0]["id"])
+        ts = store.now_iso()
+        part_id = str(uuid4())
+        store.execute(
+            """INSERT INTO parts (id, project_id, part_number, description, subsystem, design_maturity, make_buy, model_applicability, updated_at)
+               VALUES (?, ?, 'PN-100', 'Door Handle', 'Door', 'P1', 'Make', 'All', ?)""",
+            (part_id, self.project_id, ts),
+        )
+        store.update_part_feature_rules(self.project_id, {part_id: ["All models"]})
+
+        parts_script = str(Path(__file__).resolve().parent.parent / "app_pages" / "parts.py")
+        parts_app = AppTest.from_file(parts_script, default_timeout=30)
+        parts_app.session_state["project_id"] = self.project_id
+        parts_app.session_state["scenario_id"] = scenario_id
+        parts_app.session_state["current_editor"] = "Tester"
+        parts_app.run()
+        self.assertFalse(parts_app.exception)
+        parts_html = [el.proto.body for el in parts_app.get("html")]
+        self.assertTrue(any("data-paag-table-layout-keeper" in b for b in parts_html))
+
+        # 4) Verify Fishbone, BOM, and Import PITs mount layout keeper
+        for rel_page in ("fishbone.py", "bom_tree.py", "pits_exchange.py"):
+            page_script = str(Path(__file__).resolve().parent.parent / "app_pages" / rel_page)
+            page_app = AppTest.from_file(page_script, default_timeout=30)
+            page_app.session_state["project_id"] = self.project_id
+            page_app.session_state["scenario_id"] = scenario_id
+            page_app.session_state["current_editor"] = "Tester"
+            page_app.run()
+            self.assertFalse(page_app.exception, f"Exception on {rel_page}: {page_app.exception}")
+            page_html = [el.proto.body for el in page_app.get("html")]
+            self.assertTrue(
+                any("data-paag-table-layout-keeper" in b for b in page_html),
+                f"Expected layout keeper on {rel_page}",
+            )
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ from utils.table_filters import (
     can_undo_last_table_edit,
     has_unsaved_table_changes,
     last_table_undo_redo_message,
+    mount_table_layout_preservation_script,
     redo_last_table_edit,
     request_table_editor_reset,
     undo_last_table_edit,
@@ -283,6 +284,7 @@ def parse_pasted_bom_text(text: str) -> list[dict[str, Any]]:
 
 
 page_title_with_scope("BOM", scope="project")
+mount_table_layout_preservation_script()
 st.caption(
     "Interactive product structure and CAD-style BOM tree by official model, "
     "with BOM authoring from scratch and gap reconciliation against the Parts Catalog and Fishbone diagram."
@@ -624,6 +626,13 @@ tab_view, tab_author = guarded_tabs(
 # ==============================================================================
 if tab_view.open:
     with tab_view:
+        _saved_mt_search_key = f"_saved_model_tree_search_{project_id}"
+        _saved_mt_status_key = f"_saved_model_tree_status_filter_{project_id}"
+        if "model_tree_search" not in st.session_state and _saved_mt_search_key in st.session_state:
+            st.session_state["model_tree_search"] = st.session_state[_saved_mt_search_key]
+        if "model_tree_status_filter" not in st.session_state and _saved_mt_status_key in st.session_state:
+            st.session_state["model_tree_status_filter"] = st.session_state[_saved_mt_status_key]
+
         col_s, col_f = st.columns([1.6, 1.1], gap="small")
         with col_s:
             search_query = st.text_input(
@@ -632,6 +641,7 @@ if tab_view.open:
                 key="model_tree_search",
                 help="Type a part number, description, or tracker to highlight and pull up in the tree.",
             )
+            st.session_state[_saved_mt_search_key] = search_query
 
         with col_f:
             status_filter = st.selectbox(
@@ -644,6 +654,7 @@ if tab_view.open:
                 ],
                 key="model_tree_status_filter",
             )
+            st.session_state[_saved_mt_status_key] = status_filter
 
         if not nodes:
             target_disp = model_options.get(selected_model_id, selected_model_id)
