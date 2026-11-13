@@ -3166,6 +3166,75 @@ def restore_complexity_planning_snapshot(project_id: str, snapshot: dict) -> Non
                 (row.get("model_applicability"), row.get("updated_at"), row.get("id"), project_id),
             )
 
+def build_feature_choice_rename_map(
+    old_choices: Iterable[object], new_choices: Iterable[object]
+) -> dict[str, str]:
+    """Map renamed or normalized allowed choices from old_choices to new_choices."""
+    old_list = list(
+        dict.fromkeys(
+            str(c).strip() for c in (old_choices or ()) if c is not None and str(c).strip()
+        )
+    )
+    new_list = list(
+        dict.fromkeys(
+            str(c).strip() for c in (new_choices or ()) if c is not None and str(c).strip()
+        )
+    )
+    if not old_list or not new_list or old_list == new_list:
+        return {}
+    old_set = set(old_list)
+    new_set = set(new_list)
+    rename_map: dict[str, str] = {}
+
+    # 1. Case-insensitive / formatting matches for choices no longer verbatim in new_list
+    new_by_casefold = {c.casefold(): c for c in new_list}
+    for old_c in old_list:
+        if old_c not in new_set and old_c.casefold() in new_by_casefold:
+            rename_map[old_c] = new_by_casefold[old_c.casefold()]
+
+    # 2. Positional 1-to-1 rename when the choice count is unchanged
+    if len(old_list) == len(new_list):
+        for old_c, new_c in zip(old_list, new_list):
+            if old_c != new_c and old_c not in new_set and old_c not in rename_map:
+                rename_map[old_c] = new_c
+
+    # 3. Removed-to-added 1-to-1 rename when choice count changed or order shifted
+    removed = [c for c in old_list if c not in new_set and c not in rename_map]
+    mapped_targets = set(rename_map.values())
+    added = [c for c in new_list if c not in old_set and c not in mapped_targets]
+    if removed and added:
+        if len(removed) == len(added):
+            for old_c, new_c in zip(removed, added):
+                rename_map[old_c] = new_c
+        else:
+            for idx in range(min(len(old_list), len(new_list))):
+                old_c = old_list[idx]
+                new_c = new_list[idx]
+                if (
+                    old_c in removed
+                    and new_c in added
+                    and old_c not in rename_map
+                    and new_c not in rename_map.values()
+                ):
+                    rename_map[old_c] = new_c
+            rem_after = [c for c in old_list if c not in new_set and c not in rename_map]
+            add_after = [
+                c for c in new_list if c not in old_set and c not in set(rename_map.values())
+            ]
+            if len(rem_after) == len(add_after) > 0:
+                for old_c, new_c in zip(rem_after, add_after):
+                    rename_map[old_c] = new_c
+
+    # 4. If the feature was reduced to a single allowed choice, map any removed choice to it
+    if len(new_list) == 1:
+        sole_choice = new_list[0]
+        for old_c in old_list:
+            if old_c not in new_set and old_c not in rename_map:
+                rename_map[old_c] = sole_choice
+
+    return rename_map
+
+
 def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
     required = {"id", "category", "name", "allowed_choices", "description", "active"}
     if not required.issubset(edited.columns):
@@ -3217,12 +3286,22 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
     timestamp = now_iso()
     with connection() as conn:
         existing_rows = conn.execute(
-            "SELECT id, subsystem FROM complexity_features WHERE project_id=?", (project_id,)
+            "SELECT id, subsystem, allowed_values FROM complexity_features WHERE project_id=?", (project_id,)
         ).fetchall()
         existing_ids = {row[0] for row in existing_rows}
         existing_subsystem_by_id = {
             str(row[0]): str(row[1] or "").strip() for row in existing_rows
         }
+        existing_allowed_by_id: dict[str, list[str]] = {}
+        for row in existing_rows:
+            try:
+                existing_allowed_by_id[str(row[0])] = [
+                    str(c).strip()
+                    for c in json.loads(row[2] or "[]")
+                    if c is not None and str(c).strip()
+                ]
+            except Exception:
+                existing_allowed_by_id[str(row[0])] = []
         retained_ids = {record["id"] for record in records}
         for feature_id in existing_ids - retained_ids:
             affected_part_ids = [row[0] for row in conn.execute(
@@ -3258,6 +3337,7 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                     "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
                     (timestamp, part_id, project_id),
                 )
+        any_choice_remapped = False
         for record in records:
             subsystem_val = (
                 record["subsystem"]
@@ -3275,6 +3355,44 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                  record["description"], record["sequence"], record["active"], timestamp),
             )
             choices = json.loads(record["allowed_values"])
+            old_choices = existing_allowed_by_id.get(record["id"], [])
+            rename_map = build_feature_choice_rename_map(old_choices, choices)
+            if rename_map:
+                any_choice_remapped = True
+                existing_mv = conn.execute(
+                    "SELECT model_id, value FROM model_feature_values WHERE project_id=? AND feature_id=?",
+                    (project_id, record["id"]),
+                ).fetchall()
+                for mv_row in existing_mv:
+                    old_val = str(mv_row["value"] or "")
+                    new_val = rename_map.get(old_val)
+                    if new_val and new_val != old_val:
+                        conn.execute(
+                            """UPDATE model_feature_values
+                               SET value=?, updated_at=?
+                               WHERE project_id=? AND model_id=? AND feature_id=?""",
+                            (new_val, timestamp, project_id, str(mv_row["model_id"]), record["id"]),
+                        )
+                existing_pr = conn.execute(
+                    "SELECT part_id, value FROM part_feature_rules WHERE project_id=? AND feature_id=?",
+                    (project_id, record["id"]),
+                ).fetchall()
+                for pr_row in existing_pr:
+                    old_val = str(pr_row["value"] or "")
+                    new_val = rename_map.get(old_val)
+                    if new_val and new_val != old_val:
+                        part_id_str = str(pr_row["part_id"])
+                        conn.execute(
+                            """DELETE FROM part_feature_rules
+                               WHERE project_id=? AND part_id=? AND feature_id=? AND value=?""",
+                            (project_id, part_id_str, record["id"], old_val),
+                        )
+                        conn.execute(
+                            """INSERT OR IGNORE INTO part_feature_rules
+                               (project_id, part_id, feature_id, value, updated_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (project_id, part_id_str, record["id"], new_val, timestamp),
+                        )
             placeholders = ", ".join("?" for _ in choices)
             conn.execute(
                 f"""DELETE FROM model_feature_values WHERE project_id=? AND feature_id=?
@@ -3296,6 +3414,47 @@ def update_complexity_features(project_id: str, edited: pd.DataFrame) -> int:
                 conn.execute(
                     "UPDATE parts SET model_applicability='', updated_at=? WHERE id=? AND project_id=?",
                     (timestamp, part_id, project_id),
+                )
+        if any_choice_remapped:
+            model_rows = conn.execute(
+                "SELECT id, model_number FROM project_models WHERE project_id=?", (project_id,)
+            ).fetchall()
+            value_rows = conn.execute(
+                "SELECT model_id, feature_id, value FROM model_feature_values WHERE project_id=?", (project_id,)
+            ).fetchall()
+            values_by_model = {
+                str(model["id"]): {
+                    str(value["feature_id"]): str(value["value"])
+                    for value in value_rows if str(value["model_id"]) == str(model["id"])
+                }
+                for model in model_rows
+            }
+            rule_rows = conn.execute(
+                "SELECT part_id, feature_id, value FROM part_feature_rules WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+            rules_by_part: dict[str, dict[str, set[str]]] = {}
+            for rule in rule_rows:
+                rules_by_part.setdefault(str(rule["part_id"]), {}).setdefault(
+                    str(rule["feature_id"]), set()
+                ).add(str(rule["value"]))
+            for part_id, part_rules in rules_by_part.items():
+                matching_numbers = [
+                    str(model["model_number"])
+                    for model in model_rows
+                    if all(
+                        values_by_model[str(model["id"])].get(feature_id) in choices
+                        for feature_id, choices in part_rules.items()
+                    )
+                ]
+                conn.execute(
+                    "UPDATE parts SET model_applicability=?, updated_at=? WHERE id=? AND project_id=?",
+                    (
+                        normalize_model_applicability(matching_numbers) if matching_numbers else "",
+                        timestamp,
+                        part_id,
+                        project_id,
+                    ),
                 )
     return len(records)
 
@@ -9481,6 +9640,7 @@ __domain_exports__ = [
     'update_part_feature_rules', 'infer_part_feature_rules',
     'apply_inferred_part_feature_rules', 'preview_inferred_part_feature_rules',
     'complexity_planning_snapshot', 'restore_complexity_planning_snapshot',
+    'build_feature_choice_rename_map',
     'update_complexity_features', 'update_complexity_tree',
     'model_planning_snapshot', '_insert_snapshot_rows',
     'restore_model_planning_snapshot', 'delete_project_models',

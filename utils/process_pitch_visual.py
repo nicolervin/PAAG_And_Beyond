@@ -11,6 +11,7 @@ from urllib.parse import quote_plus
 
 ELEMENTS_PER_PAGE = 5
 MEDIA_PER_PAGE = 6
+_PROCESS_PITCH_VISUAL_REV_20261102 = 15
 
 _SLIDE_LOGO_DATA_URI_CACHE: str | None = None
 
@@ -5086,8 +5087,8 @@ def _render_single_paag_pptx_slide(
     generated_label = f"{generated_on:%B} {generated_on.day}, {generated_on.year}"
 
     is_tabloid = paper_size == "tabloid"
-    slide_w_in = 17.0 if is_tabloid else 11.0
-    slide_h_in = 11.0 if is_tabloid else 8.5
+    slide_w_in = 17.0 if is_tabloid else 13.333
+    slide_h_in = 11.0 if is_tabloid else 7.5
     sc = 1.28 if is_tabloid else 1.0
 
     pitch_number = str(pitch.get("pitch_number") or "Unassigned Pitch").strip()
@@ -5284,8 +5285,8 @@ def _render_single_paag_pptx_slide(
         slide_rels.append((r_id, f"../media/{media_filename}"))
         return r_id, w_px, h_px
 
-    # Outer slide card
-    margin = 0.18
+    # Outer slide card (fills the widescreen presentation slide edge-to-edge like Print Preview)
+    margin = 0.05
     x0, y0 = margin, margin
     cw, ch = slide_w_in - 2 * margin, slide_h_in - 2 * margin
     shapes_xml.append(
@@ -5300,11 +5301,11 @@ def _render_single_paag_pptx_slide(
             line_hex="CBD5E1",
             line_pt=1.0,
             geom="roundRect",
-            round_adj=2500,
+            round_adj=2000,
         )
     )
 
-    px, py = 0.14 * sc, 0.12 * sc
+    px, py = 0.10 * sc, 0.08 * sc
     ix, iy = x0 + px, y0 + py
     iw, ih = cw - 2 * px, ch - 2 * py
 
@@ -5615,9 +5616,9 @@ def _render_single_paag_pptx_slide(
     # 3. MAIN BODY (Left Column + Right Visual Aid Grid)
     body_y = alerts_y + alerts_h + 0.07 * sc
     body_h = (iy + ih) - body_y
-    lw = iw * (0.33 if is_tabloid else 0.36)
+    lw = iw * (0.32 if is_tabloid else 0.34)
     lx = ix
-    col_gap = 0.10 * sc
+    col_gap = 0.08 * sc
     rx = lx + lw + col_gap
     rw = (ix + iw) - rx
 
@@ -6011,11 +6012,13 @@ def _render_single_paag_pptx_slide(
             paragraphs=[
                 _pptx_para_xml(
                     [
-                        _pptx_run_xml("YAMAZUMI  ", pt=9.5 * sc, color="334155", bold=True),
-                        _pptx_run_xml("■ Cycle  ", pt=7.8 * sc, color="16A34A", bold=True),
-                        _pptx_run_xml("■ Periodic  ", pt=7.8 * sc, color="D97706", bold=True),
-                        _pptx_run_xml("■ Fluctuation  ", pt=7.8 * sc, color="64748B", bold=True),
-                        _pptx_run_xml("— Takt", pt=7.8 * sc, color="DC2626", bold=True),
+                        _pptx_run_xml("YAMAZUMI    ", pt=9.5 * sc, color="334155", bold=True),
+                        _pptx_run_xml("■ ", pt=8.0 * sc, color="35C84A", bold=True),
+                        _pptx_run_xml("Cycle  ", pt=7.8 * sc, color="475569", bold=True),
+                        _pptx_run_xml("■ ", pt=8.0 * sc, color="EAB308", bold=True),
+                        _pptx_run_xml("Periodic  ", pt=7.8 * sc, color="475569", bold=True),
+                        _pptx_run_xml("■ ", pt=8.0 * sc, color="EF5350", bold=True),
+                        _pptx_run_xml("Fluct.", pt=7.8 * sc, color="475569", bold=True),
                     ],
                     align="l",
                 )
@@ -6035,8 +6038,8 @@ def _render_single_paag_pptx_slide(
     var_area_x = lx + 0.06 * sc
     var_area_w = lw - 0.12 * sc
     var_col_w = (var_area_w - 0.05 * sc * (num_vars - 1)) / num_vars
-    var_hdr_y = stack_y + 0.28 * sc
-    var_hdr_h = 0.24 * sc
+    var_hdr_y = stack_y + 0.27 * sc
+    var_hdr_h = 0.28 * sc
     track_y = var_hdr_y + var_hdr_h + 0.02 * sc
     track_h = max(0.6 * sc, (stack_y + stack_h - 0.06 * sc) - track_y)
 
@@ -6056,14 +6059,14 @@ def _render_single_paag_pptx_slide(
         ]
         v_total_s = sum(float(e.get("time_s") or 0.0) for e in v_els)
         hdr_runs = [
-            _pptx_run_xml(f"{v_name}: ", pt=8.5 * sc, color="0F172A", bold=True),
-            _pptx_run_xml(f"{_clean_number(v_total_s)}s", pt=8.5 * sc, color="0F172A", bold=True),
+            _pptx_run_xml(f"{v_name}: ", pt=8.0 * sc, color="0F172A", bold=True),
+            _pptx_run_xml(f"{_clean_number(v_total_s)}s", pt=8.0 * sc, color="0F172A", bold=True),
         ]
         if eff_takt_s > 0:
             util_pct = (v_total_s / eff_takt_s) * 100.0
-            u_color = "DC2626" if util_pct > 100.0 else "16A34A"
-            hdr_runs.append(_pptx_run_xml(f" / Takt {_clean_number(eff_takt_s)}s ", pt=8.0 * sc, color="64748B"))
-            hdr_runs.append(_pptx_run_xml(f"({util_pct:.0f}% util)", pt=8.2 * sc, color=u_color, bold=True))
+            u_color = "991B1B" if util_pct > 100.0 else "166534"
+            hdr_runs.append(_pptx_run_xml(f" / Takt {_clean_number(eff_takt_s)}s ", pt=7.6 * sc, color="64748B"))
+            hdr_runs.append(_pptx_run_xml(f"({util_pct:.0f}% util)", pt=7.8 * sc, color=u_color, bold=True))
 
         shapes_xml.append(
             _pptx_shape_xml(
@@ -6073,7 +6076,7 @@ def _render_single_paag_pptx_slide(
                 y_in=var_hdr_y,
                 w_in=var_col_w,
                 h_in=var_hdr_h,
-                paragraphs=[_pptx_para_xml(hdr_runs, align="l")],
+                paragraphs=[_pptx_para_xml(hdr_runs, align="ctr")],
                 fill_hex=None,
                 v_anchor="ctr",
                 pad_in=(0.01, 0.0, 0.01, 0.0),
@@ -6090,16 +6093,16 @@ def _render_single_paag_pptx_slide(
                 w_in=var_col_w,
                 h_in=track_h,
                 fill_hex="F8FAFC",
-                line_hex="E2E8F0",
+                line_hex="CBD5E1",
                 line_pt=0.6,
                 geom="roundRect",
-                round_adj=4000,
+                round_adj=3000,
             )
         )
 
         if v_els:
-            usable_track_h = track_h - 0.04 * sc
-            min_blk_h = min(0.28 * sc, usable_track_h / max(1, len(v_els)))
+            usable_track_h = track_h - 0.02 * sc
+            min_blk_h = min(0.32 * sc, usable_track_h / max(1, len(v_els)))
             raw_heights = [
                 max(min_blk_h, (float(e.get("time_s") or 0.0) / ref_time_s) * usable_track_h)
                 for e in v_els
@@ -6109,7 +6112,7 @@ def _render_single_paag_pptx_slide(
                 scale_h = usable_track_h / sum_h
                 raw_heights = [h * scale_h for h in raw_heights]
 
-            curr_bottom_y = track_y + track_h - 0.02 * sc
+            curr_bottom_y = track_y + track_h - 0.01 * sc
             for idx_e, e in enumerate(v_els):
                 bh = raw_heights[idx_e]
                 by = curr_bottom_y - bh
@@ -6120,33 +6123,33 @@ def _render_single_paag_pptx_slide(
                 w_type = str(e.get("work_type") or "").strip().lower()
                 e_color = str(e.get("motion_color") or "green").strip().lower()
                 if w_type == "periodic" or e_color == "orange":
-                    b_fill, b_line, b_txt = "FEF3C7", "F59E0B", "78350F"
+                    b_fill, b_line, b_txt = "FFD54F", "FFFFFF", "0F172A"
                 elif w_type == "fluctuation" or e_color == "gray":
-                    b_fill, b_line, b_txt = "F1F5F9", "94A3B8", "334155"
+                    b_fill, b_line, b_txt = "EF5350", "FFFFFF", "0F172A"
                 else:
-                    b_fill, b_line, b_txt = "DCFCE7", "22C55E", "14532D"
+                    b_fill, b_line, b_txt = "35C84A", "FFFFFF", "0F172A"
 
                 shapes_xml.append(
                     _pptx_shape_xml(
                         _next_sid(),
                         f"Stack Step {step_num}",
-                        x_in=vx + 0.02 * sc,
+                        x_in=vx + 0.01 * sc,
                         y_in=by,
-                        w_in=var_col_w - 0.04 * sc,
-                        h_in=max(0.12, bh - 0.01 * sc),
+                        w_in=var_col_w - 0.02 * sc,
+                        h_in=max(0.12, bh),
                         paragraphs=[
                             _pptx_para_xml(
                                 [
-                                    _pptx_run_xml(f"{step_num}. ", pt=8.8 * sc, color=b_txt, bold=True),
-                                    _pptx_run_xml(f"{e_desc} ", pt=8.5 * sc, color=b_txt),
-                                    _pptx_run_xml(f"({_clean_number(e_time)}s)", pt=8.5 * sc, color=b_txt, bold=True),
+                                    _pptx_run_xml(f"[{step_num}] ", pt=8.4 * sc, color=b_txt, bold=True),
+                                    _pptx_run_xml(f"{e_desc} ", pt=8.2 * sc, color=b_txt, bold=True),
+                                    _pptx_run_xml(f"({_clean_number(e_time)}s)", pt=8.2 * sc, color=b_txt, bold=True),
                                 ],
                                 align="l",
                             )
                         ],
                         fill_hex=b_fill,
                         line_hex=b_line,
-                        line_pt=0.6,
+                        line_pt=0.75,
                         v_anchor="ctr",
                         pad_in=(0.04, 0.01, 0.04, 0.01),
                     )
@@ -6211,12 +6214,14 @@ def _render_single_paag_pptx_slide(
             g_cols, g_rows = 1, 1
         elif grid_count == 2:
             g_cols, g_rows = 2, 1
-        elif grid_count in {3, 4}:
+        elif grid_count == 3:
+            g_cols, g_rows = 3, 1
+        elif grid_count == 4:
             g_cols, g_rows = 2, 2
         else:
             g_cols, g_rows = 3, 2
 
-        g_gap = 0.08 * sc
+        g_gap = 0.07 * sc
         card_w = (rw - g_gap * (g_cols - 1)) / g_cols
         card_h = (body_h - g_gap * (g_rows - 1)) / g_rows
         total_pitch_elements_count = len(all_pitch_elements)
@@ -6240,7 +6245,7 @@ def _render_single_paag_pptx_slide(
                     line_hex="CBD5E1",
                     line_pt=0.75,
                     geom="roundRect",
-                    round_adj=3000,
+                    round_adj=2500,
                 )
             )
 
@@ -6250,8 +6255,9 @@ def _render_single_paag_pptx_slide(
             for t in item.get("tagged_work_elements", []):
                 t_wid = str(t.get("work_element_id") or "").strip()
                 t_op = str(t.get("operation") or "").strip()
-                if t_wid in step_num_by_wid:
-                    sn = step_num_by_wid[t_wid]
+                t_desc_key = f"desc::{t_op.casefold()}" if t_op else ""
+                sn = step_num_by_wid.get(t_wid) or (step_num_by_wid.get(t_desc_key) if t_desc_key else None)
+                if sn is not None:
                     tagged_steps.append(sn)
                     if t_op and sn not in tagged_op_by_num:
                         tagged_op_by_num[sn] = t_op
@@ -6269,8 +6275,8 @@ def _render_single_paag_pptx_slide(
                     step_paras.append(
                         _pptx_para_xml(
                             [
-                                _pptx_run_xml(f"[{sn}] ", pt=8.0 * sc, color="38BDF8", bold=True),
-                                _pptx_run_xml(s_title, pt=8.0 * sc, color="FFFFFF", bold=True),
+                                _pptx_run_xml(f"[{sn}] ", pt=8.2 * sc, color="38BDF8", bold=True),
+                                _pptx_run_xml(s_title, pt=8.2 * sc, color="FFFFFF", bold=True),
                             ],
                             align="l",
                         )
@@ -6282,24 +6288,42 @@ def _render_single_paag_pptx_slide(
                             align="l",
                         )
                     )
-            elif total_pitch_elements_count > 0:
-                nums_str = ", ".join(str(sn) for sn in range(1, total_pitch_elements_count + 1))
-                step_paras.append(
-                    _pptx_para_xml(
-                        [_pptx_run_xml(f"All elements ({nums_str})", pt=8.0 * sc, color="FFFFFF", bold=True)],
-                        align="l",
-                    )
-                )
             else:
-                step_paras.append(
-                    _pptx_para_xml(
-                        [_pptx_run_xml("General Pitch Visual", pt=8.0 * sc, color="FFFFFF", bold=True)],
-                        align="l",
+                other_tagged = [
+                    t for t in item.get("tagged_work_elements", [])
+                    if isinstance(t, dict) and str(t.get("operation") or "").strip()
+                ]
+                if other_tagged:
+                    for t in other_tagged[:4]:
+                        seq_lbl = str(t.get("work_sequence") or "•").strip()
+                        op_lbl = str(t.get("operation") or "Step").strip()
+                        step_paras.append(
+                            _pptx_para_xml(
+                                [
+                                    _pptx_run_xml(f"[{seq_lbl}] ", pt=8.2 * sc, color="38BDF8", bold=True),
+                                    _pptx_run_xml(op_lbl, pt=8.2 * sc, color="FFFFFF", bold=True),
+                                ],
+                                align="l",
+                            )
+                        )
+                elif total_pitch_elements_count > 0:
+                    nums_str = ", ".join(str(sn) for sn in range(1, total_pitch_elements_count + 1))
+                    step_paras.append(
+                        _pptx_para_xml(
+                            [_pptx_run_xml(f"All elements ({nums_str})", pt=8.2 * sc, color="FFFFFF", bold=True)],
+                            align="l",
+                        )
                     )
-                )
+                else:
+                    step_paras.append(
+                        _pptx_para_xml(
+                            [_pptx_run_xml("General Pitch Visual", pt=8.2 * sc, color="FFFFFF", bold=True)],
+                            align="l",
+                        )
+                    )
 
             banner_lines = max(1, len(step_paras))
-            banner_h = min(card_h * 0.28, (0.24 + (banner_lines - 1) * 0.16) * sc)
+            banner_h = min(card_h * 0.28, (0.26 + (banner_lines - 1) * 0.17) * sc)
             shapes_xml.append(
                 _pptx_shape_xml(
                     _next_sid(),
@@ -6309,9 +6333,9 @@ def _render_single_paag_pptx_slide(
                     w_in=card_w,
                     h_in=banner_h,
                     paragraphs=step_paras,
-                    fill_hex="0F172A",
+                    fill_hex="1E293B",
                     v_anchor="ctr",
-                    pad_in=(0.08, 0.03, 0.08, 0.03),
+                    pad_in=(0.07, 0.03, 0.07, 0.03),
                 )
             )
 
@@ -6321,10 +6345,10 @@ def _render_single_paag_pptx_slide(
             )
             callout_h = 0.26 * sc if has_custom_caption else 0.0
 
-            media_box_x = cx + 0.04 * sc
-            media_box_y = cy + banner_h + 0.04 * sc
-            media_box_w = max(0.2, card_w - 0.08 * sc)
-            media_box_h = max(0.2, card_h - banner_h - callout_h - 0.08 * sc)
+            media_box_x = cx + 0.015 * sc
+            media_box_y = cy + banner_h + 0.02 * sc
+            media_box_w = max(0.2, card_w - 0.03 * sc)
+            media_box_h = max(0.2, card_h - banner_h - callout_h - 0.04 * sc)
 
             f_path = item.get("file_path") or ""
             emb_media = _embed_img(f_path)
@@ -6410,7 +6434,7 @@ def _render_single_paag_pptx_slide(
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
         'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
         "<p:cSld>"
-        "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"E2E8F0\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"
+        "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"FFFFFF\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>"
         "<p:spTree>"
         "<p:nvGrpSpPr>"
         '<p:cNvPr id="1" name=""/>'
@@ -6447,8 +6471,8 @@ def render_paag_pptx_deck(
     import zipfile
 
     is_tabloid = paper_size == "tabloid"
-    slide_w_emu = _pptx_in(17.0 if is_tabloid else 11.0)
-    slide_h_emu = _pptx_in(11.0 if is_tabloid else 8.5)
+    slide_w_emu = _pptx_in(17.0 if is_tabloid else 13.333)
+    slide_h_emu = _pptx_in(11.0 if is_tabloid else 7.5)
 
     media_by_hash: dict[str, tuple[str, bytes, int, int]] = {}
     path_cache: dict[str, tuple[str, int, int] | None] = {}

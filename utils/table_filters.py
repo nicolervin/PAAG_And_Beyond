@@ -18,17 +18,22 @@ def filter_table(
     *,
     key: str,
     dropdown_columns: Iterable[str] = (),
+    always_visible_dropdown_columns: Iterable[str] = (),
+    dropdown_options: dict[str, Iterable[object]] | None = None,
     search_columns: Iterable[str] | None = None,
     labels: dict[str, str] | None = None,
     reset_widget_keys: Iterable[str] = (),
     multi_value_columns: Iterable[str] = (),
     universal_values: dict[str, Iterable[str]] | None = None,
     keyword_container=None,
+    caption_container=None,
 ) -> pd.DataFrame:
     """Render consistent keyword/dropdown controls and return the visible rows."""
     if dataframe.empty:
         return dataframe.reset_index(drop=True)
     labels = labels or {}
+    dropdown_options = dropdown_options or {}
+    always_visible_set = {str(col) for col in (always_visible_dropdown_columns or ())}
     multi_value_columns = set(multi_value_columns)
     universal_values = universal_values or {}
     valid_dropdowns = [column for column in dropdown_columns if column in dataframe.columns]
@@ -57,12 +62,32 @@ def filter_table(
                     not in {str(marker).strip().casefold() for marker in universal_values.get(column, ())}
                 )
             )
+            values = sorted(values, key=lambda value: str(value).casefold())
+        elif column in dropdown_options:
+            explicit_vals = [
+                v for v in (dropdown_options.get(column) or ())
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            col_vals = [
+                v for v in dataframe[column].dropna().unique().tolist()
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            values = list(dict.fromkeys([*explicit_vals, *col_vals]))
         else:
-            values = dataframe[column].dropna().unique().tolist()
-        values = sorted(values, key=lambda value: str(value).casefold())
+            values = [
+                v for v in dataframe[column].dropna().unique().tolist()
+                if v is not None and (isinstance(v, bool) or str(v).strip() != "")
+            ]
+            values = sorted(values, key=lambda value: str(value).casefold())
         widget_key = f"{key}_{column}"
         saved_col_key = f"_saved_filter_col_{widget_key}"
-        if widget_key not in st.session_state and saved_col_key in st.session_state:
+        pending_col_key = f"_pending_filter_col_{widget_key}"
+        if pending_col_key in st.session_state:
+            st.session_state[widget_key] = list(
+                st.session_state.pop(pending_col_key) or []
+            )
+            st.session_state[saved_col_key] = list(st.session_state[widget_key])
+        elif widget_key not in st.session_state and saved_col_key in st.session_state:
             st.session_state[widget_key] = list(st.session_state.get(saved_col_key) or [])
         stored_selection = st.session_state.get(widget_key, [])
         current_selection = stored_selection
@@ -70,12 +95,21 @@ def filter_table(
             current_selection = []
         elif not isinstance(current_selection, (list, tuple, set)):
             current_selection = [current_selection]
+        if column not in dropdown_options:
+            for sel_val in current_selection:
+                if (
+                    sel_val is not None
+                    and (isinstance(sel_val, bool) or str(sel_val).strip() != "")
+                    and sel_val not in values
+                ):
+                    values.append(sel_val)
         normalized_selection = [
             value for value in current_selection if value in values
         ]
         if not isinstance(stored_selection, list) or stored_selection != normalized_selection:
             st.session_state[widget_key] = normalized_selection
-        selected[column] = controls.multiselect(
+        dropdown_host = keyword_host if str(column) in always_visible_set else controls
+        selected[column] = dropdown_host.multiselect(
             labels.get(column, column.replace("_", " ").capitalize()),
             options=values,
             placeholder="All",
@@ -119,7 +153,56 @@ def filter_table(
     )
     signature_key = f"{key}_visible_rows"
     prev_identity = st.session_state.get(signature_key)
-    if prev_identity != row_identity:
+    combined_filter_draft: dict[str, dict[str, Any]] = {}
+    if "id" in dataframe.columns and isinstance(prev_identity, tuple) and prev_identity:
+        for widget_key in reset_widget_keys:
+            logical_widget_key = logical_table_editor_key(widget_key)
+            if (
+                st.session_state.get(f"_reset_table_editor_{logical_widget_key}")
+                and not st.session_state.get(f"_pending_undo_last_edit_{logical_widget_key}")
+                and not st.session_state.get(f"_preserve_filter_draft_{logical_widget_key}")
+            ):
+                st.session_state.pop(f"_table_filter_id_draft_{logical_widget_key}", None)
+                continue
+            id_draft: dict[str, dict[str, Any]] = deepcopy(
+                st.session_state.get(f"_table_filter_id_draft_{logical_widget_key}") or {}
+            )
+            prior_widget_state = get_effective_table_editor_state(widget_key)
+            inst_key = _resolve_editor_instance_key(widget_key)
+            authoritative_visible = (
+                inst_key in st.session_state
+                or bool(st.session_state.get(f"_just_undid_last_edit_{logical_widget_key}"))
+            )
+            prior_edited = (
+                (prior_widget_state.get("edited_rows") or {})
+                if isinstance(prior_widget_state, dict)
+                else {}
+            )
+            for old_pos, raw_rid in enumerate(prev_identity):
+                rid = str(raw_rid).strip()
+                if not rid:
+                    continue
+                raw_changes = (
+                    prior_edited.get(old_pos)
+                    if old_pos in prior_edited
+                    else prior_edited.get(str(old_pos))
+                )
+                if isinstance(raw_changes, dict) and raw_changes:
+                    id_draft[rid] = deepcopy(dict(raw_changes))
+                elif authoritative_visible:
+                    id_draft.pop(rid, None)
+            if id_draft:
+                st.session_state[f"_table_filter_id_draft_{logical_widget_key}"] = id_draft
+                for rid_k, chg_v in id_draft.items():
+                    if isinstance(chg_v, dict) and chg_v:
+                        combined_filter_draft.setdefault(str(rid_k).strip(), {}).update(
+                            deepcopy(chg_v)
+                        )
+            else:
+                st.session_state.pop(f"_table_filter_id_draft_{logical_widget_key}", None)
+    if prev_identity is None:
+        st.session_state[signature_key] = row_identity
+    elif prev_identity != row_identity:
         st.session_state[signature_key] = row_identity
         same_visible_id_set = (
             "id" in visible.columns
@@ -133,23 +216,33 @@ def filter_table(
                 if "id" in visible.columns
                 else {}
             )
+            prev_id_set = (
+                {str(rid).strip() for rid in prev_identity if str(rid).strip()}
+                if isinstance(prev_identity, tuple)
+                else set()
+            )
             for widget_key in reset_widget_keys:
                 logical_widget_key = logical_table_editor_key(widget_key)
                 st.session_state.pop(f"_select_all_{logical_widget_key}", None)
                 prior_widget_state = get_effective_table_editor_state(widget_key)
                 st.session_state.pop(widget_key, None)
-                if isinstance(prior_widget_state, dict) and (
-                    prior_widget_state.get("added_rows")
-                    or prior_widget_state.get("edited_rows")
-                    or prior_widget_state.get("deleted_rows")
-                ):
-                    if (
-                        "id" in visible.columns
+                id_draft = (
+                    st.session_state.get(f"_table_filter_id_draft_{logical_widget_key}")
+                    or {}
+                )
+                remapped_edited: dict[int, dict[str, Any]] = {}
+                if "id" in visible.columns and new_pos_by_id:
+                    if isinstance(id_draft, dict) and id_draft:
+                        for rid, changes in id_draft.items():
+                            new_pos = new_pos_by_id.get(str(rid).strip())
+                            if new_pos is not None and isinstance(changes, dict) and changes:
+                                remapped_edited[new_pos] = deepcopy(changes)
+                    elif (
+                        isinstance(prior_widget_state, dict)
+                        and prior_widget_state.get("edited_rows")
                         and isinstance(prev_identity, tuple)
                         and prev_identity
-                        and new_pos_by_id
                     ):
-                        remapped_edited: dict[int, dict[str, Any]] = {}
                         for raw_pos, changes in (prior_widget_state.get("edited_rows") or {}).items():
                             try:
                                 old_pos = int(raw_pos)
@@ -160,28 +253,103 @@ def filter_table(
                                 new_pos = new_pos_by_id.get(rid)
                                 if new_pos is not None:
                                     remapped_edited[new_pos] = deepcopy(changes)
-                        remapped_deleted: list[int] = []
-                        for raw_pos in (prior_widget_state.get("deleted_rows") or []):
-                            try:
-                                old_pos = int(raw_pos)
-                            except (TypeError, ValueError):
-                                continue
-                            if 0 <= old_pos < len(prev_identity):
-                                rid = str(prev_identity[old_pos]).strip()
-                                new_pos = new_pos_by_id.get(rid)
-                                if new_pos is not None and new_pos not in remapped_deleted:
-                                    remapped_deleted.append(new_pos)
-                        remapped_added = deepcopy(prior_widget_state.get("added_rows") or [])
-                        if remapped_edited or remapped_deleted or remapped_added:
-                            st.session_state[f"_table_undo_seed_{logical_widget_key}"] = {
-                                "edited_rows": remapped_edited,
-                                "added_rows": remapped_added,
-                                "deleted_rows": remapped_deleted,
-                            }
-                            st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
-                    request_table_editor_reset(widget_key)
-    st.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
-    return visible.copy().reset_index(drop=True)
+                remapped_deleted: list[int] = []
+                if (
+                    isinstance(prior_widget_state, dict)
+                    and prior_widget_state.get("deleted_rows")
+                    and "id" in visible.columns
+                    and isinstance(prev_identity, tuple)
+                    and prev_identity
+                    and new_pos_by_id
+                ):
+                    for raw_pos in (prior_widget_state.get("deleted_rows") or []):
+                        try:
+                            old_pos = int(raw_pos)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= old_pos < len(prev_identity):
+                            rid = str(prev_identity[old_pos]).strip()
+                            new_pos = new_pos_by_id.get(rid)
+                            if new_pos is not None and new_pos not in remapped_deleted:
+                                remapped_deleted.append(new_pos)
+                remapped_added = (
+                    deepcopy(prior_widget_state.get("added_rows") or [])
+                    if isinstance(prior_widget_state, dict)
+                    else []
+                )
+                hidden_visible_draft: dict[int, dict[str, Any]] = {}
+                if isinstance(id_draft, dict) and id_draft and new_pos_by_id:
+                    for rid, changes in id_draft.items():
+                        rid_s = str(rid).strip()
+                        if rid_s not in prev_id_set and rid_s in new_pos_by_id and isinstance(changes, dict) and changes:
+                            hidden_visible_draft[new_pos_by_id[rid_s]] = deepcopy(changes)
+                old_history = st.session_state.get(f"_table_undo_history_{logical_widget_key}")
+                new_history: list[dict[str, Any]] = [_empty_editor_state()]
+                if hidden_visible_draft:
+                    new_history.append(
+                        {
+                            "edited_rows": deepcopy(hidden_visible_draft),
+                            "added_rows": [],
+                            "deleted_rows": [],
+                        }
+                    )
+                if isinstance(old_history, list) and isinstance(prev_identity, tuple) and prev_identity:
+                    for hist_item in old_history:
+                        norm_hist = _normalize_editor_state(hist_item)
+                        if not _editor_state_has_changes(norm_hist):
+                            continue
+                        mapped_ed = deepcopy(hidden_visible_draft)
+                        for old_pos, ch in (norm_hist.get("edited_rows") or {}).items():
+                            if 0 <= int(old_pos) < len(prev_identity) and isinstance(ch, dict) and ch:
+                                rid_s = str(prev_identity[int(old_pos)]).strip()
+                                np = new_pos_by_id.get(rid_s)
+                                if np is not None:
+                                    mapped_ed[np] = deepcopy(ch)
+                        mapped_del: list[int] = []
+                        for old_pos in norm_hist.get("deleted_rows") or []:
+                            if 0 <= int(old_pos) < len(prev_identity):
+                                rid_s = str(prev_identity[int(old_pos)]).strip()
+                                np = new_pos_by_id.get(rid_s)
+                                if np is not None and np not in mapped_del:
+                                    mapped_del.append(np)
+                        mapped_state = {
+                            "edited_rows": mapped_ed,
+                            "added_rows": deepcopy(norm_hist.get("added_rows") or []),
+                            "deleted_rows": mapped_del,
+                        }
+                        if _editor_state_has_changes(mapped_state) and mapped_state != new_history[-1]:
+                            new_history.append(mapped_state)
+                if remapped_edited or remapped_deleted or remapped_added:
+                    next_seed = {
+                        "edited_rows": remapped_edited,
+                        "added_rows": remapped_added,
+                        "deleted_rows": remapped_deleted,
+                    }
+                    if new_history[-1] != next_seed:
+                        new_history.append(deepcopy(next_seed))
+                    st.session_state[f"_table_undo_history_{logical_widget_key}"] = new_history
+                    st.session_state.pop(f"_table_redo_history_{logical_widget_key}", None)
+                    st.session_state[f"_table_undo_seed_{logical_widget_key}"] = next_seed
+                    st.session_state[f"_table_subtab_draft_{logical_widget_key}"] = deepcopy(next_seed)
+                    st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
+                else:
+                    st.session_state[f"_table_undo_history_{logical_widget_key}"] = [_empty_editor_state()]
+                    st.session_state.pop(f"_table_redo_history_{logical_widget_key}", None)
+                    st.session_state.pop(f"_table_undo_seed_{logical_widget_key}", None)
+                    st.session_state.pop(f"_table_subtab_draft_{logical_widget_key}", None)
+                    if id_draft:
+                        st.session_state[f"_pending_undo_last_edit_{logical_widget_key}"] = True
+                st.session_state[f"_preserve_filter_draft_{logical_widget_key}"] = True
+                request_table_editor_reset(widget_key)
+    caption_host = caption_container if caption_container is not None else st
+    caption_host.caption(f"Showing {len(visible):,} of {len(dataframe):,} rows")
+    visible_out = visible.copy().reset_index(drop=True)
+    visible_out.attrs["_filter_editor_keys"] = [
+        logical_table_editor_key(k) for k in reset_widget_keys
+    ]
+    if combined_filter_draft:
+        visible_out.attrs["_filter_id_draft"] = deepcopy(combined_filter_draft)
+    return visible_out
 
 
 def split_filter_values(value) -> list[str]:
@@ -217,6 +385,34 @@ def merge_filtered_edits(
         return edited_dataframe.copy()
     visible_ids = set(filtered_dataframe[id_column].dropna().astype(str))
     hidden = full_dataframe[~full_dataframe[id_column].fillna("").astype(str).isin(visible_ids)].copy()
+    if not hidden.empty:
+        combined_draft: dict[str, dict[str, Any]] = {}
+        attr_draft = filtered_dataframe.attrs.get("_filter_id_draft")
+        if isinstance(attr_draft, dict):
+            for rid, chg in attr_draft.items():
+                if isinstance(chg, dict):
+                    combined_draft.setdefault(str(rid).strip(), {}).update(deepcopy(chg))
+        for lk in filtered_dataframe.attrs.get("_filter_editor_keys") or []:
+            ss_draft = st.session_state.get(f"_table_filter_id_draft_{lk}")
+            if isinstance(ss_draft, dict):
+                for rid, chg in ss_draft.items():
+                    if isinstance(chg, dict):
+                        combined_draft.setdefault(str(rid).strip(), {}).update(deepcopy(chg))
+        if combined_draft:
+            for h_idx in hidden.index:
+                raw_hid = hidden.at[h_idx, id_column]
+                hid_str = "" if raw_hid is None or pd.isna(raw_hid) else str(raw_hid).strip()
+                if not hid_str and "id" in hidden.columns:
+                    raw_id_col = hidden.at[h_idx, "id"]
+                    hid_str = "" if raw_id_col is None or pd.isna(raw_id_col) else str(raw_id_col).strip()
+                row_patch = combined_draft.get(hid_str)
+                if isinstance(row_patch, dict):
+                    for col_name, col_val in row_patch.items():
+                        if col_name in hidden.columns and col_name not in (id_column, "id", "selected"):
+                            try:
+                                hidden.at[h_idx, col_name] = col_val
+                            except Exception:
+                                pass
     return pd.concat([hidden, edited_dataframe], ignore_index=True, sort=False)
 
 
@@ -371,6 +567,21 @@ def _resolve_editor_instance_key(key: str) -> str:
         for existing_key in list(st.session_state.keys()):
             if str(existing_key).startswith(f"{key_str}_"):
                 return str(existing_key)
+        logical_part, inst_rest = key_str.split(_EDITOR_INSTANCE_MARKER, 1)
+        suffix_part = ""
+        if "_" in inst_rest:
+            _, suf = inst_rest.split("_", 1)
+            suffix_part = f"_{suf}"
+        gen_key = f"_table_editor_generation_{logical_part}"
+        if gen_key in st.session_state:
+            gen = int(st.session_state.get(gen_key, 0) or 0)
+            rotated = f"{logical_part}{_EDITOR_INSTANCE_MARKER}{gen}{suffix_part}"
+            if rotated in st.session_state:
+                return rotated
+            for existing_key in list(st.session_state.keys()):
+                if str(existing_key).startswith(f"{rotated}_"):
+                    return str(existing_key)
+            return rotated
         return key_str
     if key_str in st.session_state:
         return key_str
@@ -752,6 +963,37 @@ def last_table_undo_redo_message(key: str, default: str = "") -> str:
     return default
 
 
+def _sync_filter_id_draft_from_display_df(
+    logical_key: str,
+    display_df: pd.DataFrame | None,
+    edited_rows: dict[Any, Any] | None,
+) -> None:
+    if not isinstance(display_df, pd.DataFrame) or "id" not in display_df.columns:
+        return
+    id_draft: dict[str, dict[str, Any]] = deepcopy(
+        st.session_state.get(f"_table_filter_id_draft_{logical_key}") or {}
+    )
+    edited_map = edited_rows if isinstance(edited_rows, dict) else {}
+    for pos_i in range(len(display_df)):
+        rid_val = display_df.iloc[pos_i].get("id")
+        rid_str = "" if rid_val is None or pd.isna(rid_val) else str(rid_val).strip()
+        if not rid_str:
+            continue
+        raw_changes = (
+            edited_map.get(pos_i)
+            if pos_i in edited_map
+            else edited_map.get(str(pos_i))
+        )
+        if isinstance(raw_changes, dict) and raw_changes:
+            id_draft[rid_str] = deepcopy(dict(raw_changes))
+        else:
+            id_draft.pop(rid_str, None)
+    if id_draft:
+        st.session_state[f"_table_filter_id_draft_{logical_key}"] = id_draft
+    else:
+        st.session_state.pop(f"_table_filter_id_draft_{logical_key}", None)
+
+
 def undo_last_table_edit(key: str) -> bool:
     """Step back one edit in the table's unsaved edit history and queue a remount."""
     logical_key = logical_table_editor_key(key)
@@ -777,6 +1019,11 @@ def undo_last_table_edit(key: str) -> bool:
         )
     )
     st.session_state[f"_table_undo_history_{logical_key}"] = history
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        target_state.get("edited_rows"),
+    )
     if _editor_state_has_changes(target_state):
         st.session_state[f"_table_undo_seed_{logical_key}"] = deepcopy(target_state)
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(target_state)
@@ -841,6 +1088,11 @@ def redo_last_table_edit(key: str) -> bool:
     )
     history.append(deepcopy(target_state))
     st.session_state[f"_table_undo_history_{logical_key}"] = history
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        target_state.get("edited_rows"),
+    )
     if _editor_state_has_changes(target_state):
         st.session_state[f"_table_undo_seed_{logical_key}"] = deepcopy(target_state)
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(target_state)
@@ -968,7 +1220,19 @@ def _wrap_data_editor(data, *args, **kwargs):
     if not key or not isinstance(data, pd.DataFrame):
         return _ORIG_DATA_EDITOR(data, *args, **kwargs)
 
-    logical_key = logical_table_editor_key(str(key))
+    key_str = str(key)
+    logical_key = logical_table_editor_key(key_str)
+    if st.session_state.get(f"_reset_table_editor_{logical_key}"):
+        suffix_part = ""
+        if _EDITOR_INSTANCE_MARKER in key_str:
+            _, inst_rest = key_str.split(_EDITOR_INSTANCE_MARKER, 1)
+            if "_" in inst_rest:
+                _, suf = inst_rest.split("_", 1)
+                suffix_part = f"_{suf}"
+        rotated_base = apply_pending_table_editor_reset(logical_key)
+        key = f"{rotated_base}{suffix_part}"
+        kwargs["key"] = key
+
     id_draft_patches = st.session_state.pop("_pending_id_draft_patches", None)
     id_draft_live_cells = st.session_state.pop("_pending_id_draft_live_cells", None)
     live_df = data.copy()
@@ -1211,6 +1475,11 @@ def _wrap_data_editor(data, *args, **kwargs):
         st.session_state[f"_table_subtab_draft_{logical_key}"] = deepcopy(effective_after)
     else:
         st.session_state.pop(f"_table_subtab_draft_{logical_key}", None)
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        display_df,
+        effective_after.get("edited_rows"),
+    )
     st.session_state.pop(f"_just_undid_last_edit_{logical_key}", None)
     return result_df
 
@@ -1221,12 +1490,20 @@ st.data_editor = _wrap_data_editor
 def has_unsaved_table_changes(key: str) -> bool:
     """Return whether a data editor currently contains pending cell or row changes."""
     logical_key = logical_table_editor_key(key)
-    if st.session_state.get(f"_reset_table_editor_{logical_key}") and not st.session_state.get(
-        f"_pending_undo_last_edit_{logical_key}"
+    if (
+        st.session_state.get(f"_reset_table_editor_{logical_key}")
+        and not st.session_state.get(f"_pending_undo_last_edit_{logical_key}")
+        and not st.session_state.get(f"_preserve_filter_draft_{logical_key}")
     ):
         return False
     state = get_effective_table_editor_state(key)
-    return bool(state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"))
+    if state.get("edited_rows") or state.get("added_rows") or state.get("deleted_rows"):
+        return True
+    filter_draft = st.session_state.get(f"_table_filter_id_draft_{logical_key}")
+    return bool(
+        isinstance(filter_draft, dict)
+        and any(isinstance(changes, dict) and bool(changes) for changes in filter_draft.values())
+    )
 
 
 def logical_table_editor_key(key: str) -> str:
@@ -1258,6 +1535,11 @@ def reset_table_editor_selection(key: str, *, column: str = "selected") -> None:
         filtered_row = {col: val for col, val in row.items() if col != column}
         if filtered_row:
             cleaned_added.append(deepcopy(filtered_row))
+    _sync_filter_id_draft_from_display_df(
+        logical_key,
+        st.session_state.get(f"_table_display_df_{logical_key}"),
+        cleaned_edited,
+    )
     has_other_edits = bool(cleaned_edited or cleaned_added)
     if has_other_edits:
         next_seed = {
@@ -1273,6 +1555,7 @@ def reset_table_editor_selection(key: str, *, column: str = "selected") -> None:
         st.session_state.pop(f"_table_subtab_draft_{logical_key}", None)
         st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", None)
     st.session_state[f"_preserve_select_all_{logical_key}"] = True
+    st.session_state[f"_preserve_filter_draft_{logical_key}"] = True
     request_table_editor_reset(logical_key)
 
 
@@ -1290,6 +1573,9 @@ def apply_pending_table_editor_reset(key: str) -> str:
     if st.session_state.pop(f"_reset_table_editor_{logical_key}", False):
         preserve_select_all = bool(
             st.session_state.pop(f"_preserve_select_all_{logical_key}", False)
+        )
+        preserve_filter_draft = bool(
+            st.session_state.pop(f"_preserve_filter_draft_{logical_key}", False)
         )
         is_undo_reset = bool(
             st.session_state.pop(f"_pending_undo_last_edit_{logical_key}", False)
@@ -1326,9 +1612,498 @@ def apply_pending_table_editor_reset(key: str) -> str:
             st.session_state.pop(f"_table_live_df_{logical_key}", None)
             st.session_state.pop(f"_table_display_df_{logical_key}", None)
             st.session_state.pop(f"_table_id_draft_{logical_key}", None)
+            if not preserve_filter_draft:
+                st.session_state.pop(f"_table_filter_id_draft_{logical_key}", None)
             st.session_state.pop(f"_pending_save_conflict_{logical_key}", None)
             st.session_state.pop(f"_confirm_save_conflict_overwrite_{logical_key}", None)
             st.session_state.pop(f"_confirm_save_conflict_discard_{logical_key}", None)
         generation += 1
         st.session_state[generation_key] = generation
     return f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
+
+
+_TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-layout-keeper="2"></div>
+<script>
+(function() {
+  var SESSION_PREFIX = "paag_table_layout_v2_";
+  window.__paagTableLayouts = window.__paagTableLayouts || {};
+
+  function loadSavedLayout(logicalKey) {
+    if (!logicalKey) return null;
+    if (window.__paagTableLayouts[logicalKey]) {
+      return window.__paagTableLayouts[logicalKey];
+    }
+    try {
+      var raw = window.sessionStorage.getItem(SESSION_PREFIX + logicalKey);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          window.__paagTableLayouts[logicalKey] = parsed;
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function saveLayout(logicalKey, layout) {
+    if (!logicalKey || !layout) return;
+    window.__paagTableLayouts[logicalKey] = layout;
+    try {
+      window.sessionStorage.setItem(SESSION_PREFIX + logicalKey, JSON.stringify(layout));
+    } catch (e) {}
+  }
+
+  function getActiveFiber(fiber) {
+    if (!fiber || !fiber.alternate) return fiber;
+    var p = fiber;
+    var steps = 0;
+    while (p.return && steps < 200) {
+      p = p.return;
+      steps++;
+    }
+    if (p && p.stateNode && p.stateNode.current) {
+      return p.stateNode.current === p ? fiber : fiber.alternate;
+    }
+    return fiber;
+  }
+
+  function getHookState(h) {
+    if (!h) return undefined;
+    if (h.queue && "lastRenderedState" in h.queue && h.queue.lastRenderedState !== undefined) {
+      return h.queue.lastRenderedState;
+    }
+    return h.memoizedState;
+  }
+
+  function findDataFrameFiber(el) {
+    if (!el) return null;
+    var keys = Object.keys(el);
+    var fKey = null;
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf("__reactFiber$") === 0) {
+        fKey = keys[i];
+        break;
+      }
+    }
+    if (!fKey) return null;
+    var cur = getActiveFiber(el[fKey]);
+    var steps = 0;
+    while (cur && steps < 25) {
+      var activeCur = getActiveFiber(cur);
+      var mp = activeCur.memoizedProps;
+      var ms = activeCur.memoizedState;
+      if (
+        mp &&
+        mp.element &&
+        typeof mp.element.id === "string" &&
+        ms &&
+        typeof ms === "object" &&
+        "memoizedState" in ms &&
+        "next" in ms
+      ) {
+        return activeCur;
+      }
+      cur = activeCur.return;
+      steps++;
+    }
+    return null;
+  }
+
+  function extractLogicalKey(rawId) {
+    if (!rawId || typeof rawId !== "string") return "";
+    var stripped = rawId.replace(/^\\$\\$ID-[^-]+-/, "");
+    if (!stripped || stripped === "None") return "";
+    return stripped.split("__editor_instance_")[0] || "";
+  }
+
+  function inspectDataFrameHooks(fiber) {
+    var hooks = [];
+    var h = fiber ? fiber.memoizedState : null;
+    var guard = 0;
+    while (h && guard < 150) {
+      hooks.push(h);
+      h = h.next;
+      guard++;
+    }
+
+    var configIdx = -1;
+    for (var i = 1; i < hooks.length; i++) {
+      var cur = hooks[i];
+      var prev = hooks[i - 1];
+      var isState = Boolean(cur.queue && typeof cur.queue.dispatch === "function");
+      var curVal = getHookState(cur);
+      if (
+        isState &&
+        curVal instanceof Map &&
+        prev &&
+        !prev.queue &&
+        Array.isArray(prev.memoizedState) &&
+        prev.memoizedState[0] instanceof Map
+      ) {
+        configIdx = i;
+        break;
+      }
+    }
+    if (configIdx < 0) return null;
+
+    var columnOrderHook = null;
+    for (var j = configIdx - 1; j >= 0; j--) {
+      var hj = hooks[j];
+      var hjVal = getHookState(hj);
+      if (hj.queue && typeof hj.queue.dispatch === "function" && Array.isArray(hjVal)) {
+        columnOrderHook = hj;
+        break;
+      }
+    }
+    if (!columnOrderHook) return null;
+
+    var configMapHook = hooks[configIdx];
+    var baseConfigMap = hooks[configIdx - 1].memoizedState[0];
+    var allColumns = null;
+    var sortHook = null;
+    var widthsHook = null;
+
+    for (var k = configIdx + 1; k < hooks.length; k++) {
+      var hk = hooks[k];
+      var hkIsState = Boolean(hk.queue && typeof hk.queue.dispatch === "function");
+      var hkVal = getHookState(hk);
+      if (
+        !allColumns &&
+        !hkIsState &&
+        Array.isArray(hk.memoizedState) &&
+        Array.isArray(hk.memoizedState[0]) &&
+        hk.memoizedState[0].length > 0 &&
+        hk.memoizedState[0][0] &&
+        typeof hk.memoizedState[0][0].id === "string" &&
+        "name" in hk.memoizedState[0][0]
+      ) {
+        allColumns = hk.memoizedState[0];
+      }
+      if (
+        !sortHook &&
+        hkIsState &&
+        k + 1 < hooks.length &&
+        !hooks[k + 1].queue &&
+        Array.isArray(hooks[k + 1].memoizedState) &&
+        hooks[k + 1].memoizedState[0] instanceof Map &&
+        hooks[k + 1].memoizedState[0].size > 0
+      ) {
+        var firstEntry = hooks[k + 1].memoizedState[0].entries().next().value;
+        if (
+          firstEntry &&
+          typeof firstEntry[0] === "string" &&
+          (firstEntry[0].indexOf("_column-") === 0 || firstEntry[0].indexOf("_index-") === 0)
+        ) {
+          sortHook = hk;
+          if (!allColumns) {
+            allColumns = Array.from(hooks[k + 1].memoizedState[0].values());
+          }
+        }
+      }
+      if (!widthsHook && hkIsState && hkVal instanceof Map) {
+        widthsHook = hk;
+      }
+    }
+
+    var idToName = new Map();
+    var nameToId = new Map();
+    var currentColumnNames = [];
+    if (Array.isArray(allColumns)) {
+      for (var cIdx = 0; cIdx < allColumns.length; cIdx++) {
+        var colObj = allColumns[cIdx];
+        if (colObj && typeof colObj.id === "string") {
+          var cName = typeof colObj.name === "string" && colObj.name ? colObj.name : colObj.id;
+          idToName.set(colObj.id, cName);
+          if (!nameToId.has(cName)) {
+            nameToId.set(cName, colObj.id);
+          }
+          if (cName !== "_index-0" && cName.indexOf("_index-") !== 0) {
+            currentColumnNames.push(cName);
+          }
+        }
+      }
+    }
+
+    return {
+      columnOrderHook: columnOrderHook,
+      baseConfigMap: baseConfigMap,
+      configMapHook: configMapHook,
+      sortHook: sortHook,
+      widthsHook: widthsHook,
+      idToName: idToName,
+      nameToId: nameToId,
+      currentColumnNames: currentColumnNames
+    };
+  }
+
+  function applySavedLayoutToElement(el, saved) {
+    if (!el || !saved) return;
+    var fiber = findDataFrameFiber(el);
+    if (!fiber) return;
+    var info = inspectDataFrameHooks(fiber);
+    if (!info) return;
+
+    if (Array.isArray(saved.columnOrderNames) && info.columnOrderHook) {
+      var nextOrder = [];
+      var seenNames = new Set();
+      for (var i = 0; i < saved.columnOrderNames.length; i++) {
+        var cName = saved.columnOrderNames[i];
+        if (cName && cName !== "_index-0" && cName.indexOf("_index-") !== 0 && info.nameToId.has(cName)) {
+          nextOrder.push(info.nameToId.get(cName));
+          seenNames.add(cName);
+        }
+      }
+      var knownSet = Array.isArray(saved.knownColumnNames) ? new Set(saved.knownColumnNames) : null;
+      var serverOrder = (fiber.memoizedProps && fiber.memoizedProps.element && fiber.memoizedProps.element.columnOrder) || [];
+      if (knownSet && Array.isArray(serverOrder)) {
+        var insertIdx = nextOrder.length;
+        for (var k = 0; k < nextOrder.length; k++) {
+          var mappedName = info.idToName.get(nextOrder[k]) || nextOrder[k];
+          if (typeof mappedName === "string" && mappedName.indexOf("__complexity_tree_spacer_") === 0) {
+            insertIdx = k;
+            break;
+          }
+        }
+        for (var j = 0; j < serverOrder.length; j++) {
+          var sCol = serverOrder[j];
+          var sName = info.idToName.get(sCol) || sCol;
+          if (!knownSet.has(sName) && !seenNames.has(sName) && info.nameToId.has(sName)) {
+            nextOrder.splice(insertIdx, 0, info.nameToId.get(sName));
+            insertIdx++;
+            seenNames.add(sName);
+          }
+        }
+      }
+      var curOrder = getHookState(info.columnOrderHook) || [];
+      var curOrderNames = [];
+      for (var co = 0; co < curOrder.length; co++) {
+        var cm = info.idToName.get(curOrder[co]) || curOrder[co];
+        if (cm && cm !== "_index-0" && cm.indexOf("_index-") !== 0) {
+          curOrderNames.push(cm);
+        }
+      }
+      var nextOrderNames = nextOrder.map(function(x) { return info.idToName.get(x) || x; });
+      if (nextOrder.length > 0) {
+        if (fiber.memoizedProps && fiber.memoizedProps.element) {
+          try {
+            fiber.memoizedProps.element.columnOrder = nextOrder.slice();
+          } catch (e) {}
+        }
+        if (fiber.alternate && fiber.alternate.memoizedProps && fiber.alternate.memoizedProps.element) {
+          try {
+            fiber.alternate.memoizedProps.element.columnOrder = nextOrder.slice();
+          } catch (e) {}
+        }
+        if (curOrderNames.join("|") !== nextOrderNames.join("|")) {
+          info.columnOrderHook.queue.dispatch(nextOrder);
+        }
+      }
+    }
+
+    if (saved.configOverrides && typeof saved.configOverrides === "object" && info.configMapHook) {
+      var curConfigMap = getHookState(info.configMapHook);
+      var nextConfigMap = new Map(curConfigMap instanceof Map ? curConfigMap : []);
+      var configChanged = false;
+      var overrideKeys = Object.keys(saved.configOverrides);
+      for (var ci = 0; ci < overrideKeys.length; ci++) {
+        var colName = overrideKeys[ci];
+        var ov = saved.configOverrides[colName];
+        var targetId = info.nameToId.get(colName);
+        if (targetId && ov && typeof ov === "object") {
+          var existing = nextConfigMap.get(targetId) || {};
+          var merged = Object.assign({}, existing, ov);
+          if (
+            existing.hidden !== merged.hidden ||
+            existing.pinned !== merged.pinned ||
+            JSON.stringify(existing.type_config || null) !== JSON.stringify(merged.type_config || null)
+          ) {
+            nextConfigMap.set(targetId, merged);
+            configChanged = true;
+          }
+        }
+      }
+      if (configChanged) {
+        info.configMapHook.queue.dispatch(nextConfigMap);
+      }
+    }
+
+    if (saved.columnWidths && typeof saved.columnWidths === "object" && info.widthsHook) {
+      var curWidthsMap = getHookState(info.widthsHook);
+      var nextWidthsMap = new Map(curWidthsMap instanceof Map ? curWidthsMap : []);
+      var widthsChanged = false;
+      var widthKeys = Object.keys(saved.columnWidths);
+      for (var wi = 0; wi < widthKeys.length; wi++) {
+        var wName = widthKeys[wi];
+        var wVal = saved.columnWidths[wName];
+        var wId = info.nameToId.get(wName);
+        if (wId && typeof wVal === "number" && wVal > 0 && nextWidthsMap.get(wId) !== wVal) {
+          nextWidthsMap.set(wId, wVal);
+          widthsChanged = true;
+        }
+      }
+      if (widthsChanged) {
+        info.widthsHook.queue.dispatch(nextWidthsMap);
+      }
+    }
+
+    if (info.sortHook && saved.sortState && typeof saved.sortState === "object") {
+      var sortColName = saved.sortState.columnName;
+      var sortDir = saved.sortState.direction || "asc";
+      if (sortColName && info.nameToId.has(sortColName)) {
+        var targetSortId = info.nameToId.get(sortColName);
+        var curSort = getHookState(info.sortHook);
+        if (!curSort || curSort.columnId !== targetSortId || curSort.direction !== sortDir) {
+          info.sortHook.queue.dispatch({ columnId: targetSortId, direction: sortDir });
+        }
+      }
+    }
+
+    var scroller = el.querySelector(".dvn-scroller");
+    if (scroller) {
+      if (typeof saved.scrollLeft === "number" && saved.scrollLeft > 0) {
+        scroller.scrollLeft = saved.scrollLeft;
+      }
+      if (typeof saved.scrollTop === "number" && saved.scrollTop > 0) {
+        scroller.scrollTop = saved.scrollTop;
+      }
+    }
+  }
+
+  function captureLayoutFromElement(el, logicalKey, info) {
+    var orderRaw = getHookState(info.columnOrderHook) || [];
+    var orderNames = [];
+    for (var oi = 0; oi < orderRaw.length; oi++) {
+      var mapped = info.idToName.get(orderRaw[oi]) || orderRaw[oi];
+      if (mapped && mapped !== "_index-0" && mapped.indexOf("_index-") !== 0) {
+        orderNames.push(mapped);
+      }
+    }
+    var configOverrides = {};
+    var curConfigMap = getHookState(info.configMapHook);
+    if (curConfigMap instanceof Map) {
+      curConfigMap.forEach(function(v, k) {
+        if (v && typeof v === "object" && info.idToName.has(k)) {
+          var cName = info.idToName.get(k);
+          var ov = {};
+          if (typeof v.hidden === "boolean") ov.hidden = v.hidden;
+          if (typeof v.pinned === "boolean") ov.pinned = v.pinned;
+          if (v.type_config !== undefined) ov.type_config = v.type_config;
+          if (Object.keys(ov).length > 0) {
+            configOverrides[cName] = ov;
+          }
+        }
+      });
+    }
+    var columnWidths = {};
+    var curWidthsMap = info.widthsHook ? getHookState(info.widthsHook) : null;
+    if (curWidthsMap instanceof Map) {
+      curWidthsMap.forEach(function(w, k) {
+        if (typeof w === "number" && w > 0) {
+          columnWidths[info.idToName.get(k) || k] = w;
+        }
+      });
+    }
+    var sortState = null;
+    var curSort = info.sortHook ? getHookState(info.sortHook) : null;
+    if (curSort && typeof curSort.columnId === "string") {
+      sortState = {
+        columnName: info.idToName.get(curSort.columnId) || curSort.columnId,
+        direction: curSort.direction || "asc"
+      };
+    }
+    var prev = loadSavedLayout(logicalKey) || {};
+    var scroller = el.querySelector(".dvn-scroller");
+    var scrollLeft = scroller ? scroller.scrollLeft : (prev.scrollLeft || 0);
+    var scrollTop = scroller ? scroller.scrollTop : (prev.scrollTop || 0);
+
+    saveLayout(logicalKey, {
+      columnOrderNames: orderNames,
+      knownColumnNames: info.currentColumnNames,
+      configOverrides: configOverrides,
+      columnWidths: columnWidths,
+      sortState: sortState,
+      scrollLeft: scrollLeft,
+      scrollTop: scrollTop
+    });
+  }
+
+  function syncAllDataFrames() {
+    var frames = document.querySelectorAll('div.stDataFrame[data-testid="stDataFrame"]');
+    for (var i = 0; i < frames.length; i++) {
+      var el = frames[i];
+      var fiber = findDataFrameFiber(el);
+      if (!fiber) continue;
+      var rawId = fiber.memoizedProps && fiber.memoizedProps.element ? fiber.memoizedProps.element.id : "";
+      var logicalKey = extractLogicalKey(rawId);
+      if (!logicalKey) continue;
+
+      if (el.dataset.paagRestoredRawId !== rawId) {
+        el.dataset.paagRestoredRawId = rawId;
+        el.dataset.paagRestoreTs = String(Date.now());
+        var saved = loadSavedLayout(logicalKey);
+        if (saved) {
+          applySavedLayoutToElement(el, saved);
+          (function(targetEl, targetSaved) {
+            requestAnimationFrame(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            });
+            setTimeout(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            }, 50);
+            setTimeout(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            }, 140);
+          })(el, saved);
+        }
+      } else {
+        var elapsed = Date.now() - Number(el.dataset.paagRestoreTs || 0);
+        if (elapsed >= 180) {
+          var info = inspectDataFrameHooks(fiber);
+          if (info) {
+            captureLayoutFromElement(el, logicalKey, info);
+          }
+        }
+      }
+    }
+  }
+
+  window.__paagSyncAllDataFrames = syncAllDataFrames;
+
+  if (!window.__paagTableLayoutObserverInstalled) {
+    window.__paagTableLayoutObserverInstalled = true;
+    var observer = new MutationObserver(function() {
+      if (window.__paagSyncAllDataFrames) {
+        window.__paagSyncAllDataFrames();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("pointerdown", function() {
+      if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+    }, true);
+    document.addEventListener("pointerup", function() {
+      setTimeout(function() {
+        if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+      }, 30);
+    }, true);
+    document.addEventListener("click", function() {
+      setTimeout(function() {
+        if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+      }, 30);
+    }, true);
+    setInterval(function() {
+      if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+    }, 250);
+  }
+
+  syncAllDataFrames();
+})();
+</script>"""
+
+
+def mount_table_layout_preservation_script() -> None:
+    """Mount the client-side st.data_editor column layout and scroll preservation script."""
+    html_fn = getattr(st, "html", None)
+    if callable(html_fn):
+        html_fn(_TABLE_LAYOUT_PRESERVATION_HTML, unsafe_allow_javascript=True)
+

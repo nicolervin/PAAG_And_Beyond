@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-_IMAGE_ANNOTATOR_REV_20261103 = 6
+_IMAGE_ANNOTATOR_REV_20261103 = 8
 
 
 _HTML = """
@@ -353,8 +353,6 @@ _CSS = """
   min-height: 420px;
   background: #1e293b;
   display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: auto;
   user-select: none;
 }
@@ -790,6 +788,8 @@ export default function(component) {
   let imgLoaded = false;
   let scale = 1.0;
   let zoomMultiplier = 1.0;
+  let savedPanX = 0.5;
+  let savedPanY = 0.5;
   let canvasDispW = 800;
   let canvasDispH = 500;
   const imageShapeCache = new Map();
@@ -1079,10 +1079,78 @@ export default function(component) {
   rotRightBtn.onclick = () => rotateImage90(90);
 
   // Zoom controls
-  function setZoom(newMultiplier) {
-    zoomMultiplier = Math.max(0.5, Math.min(3.0, Math.round(newMultiplier * 100) / 100));
+  function hasZoomTransform() {
+    return Math.abs((Number(zoomMultiplier) || 1.0) - 1.0) > 0.001;
+  }
+
+  function getNormalizedViewportPan() {
+    const vpW = viewport.clientWidth || 800;
+    const vpH = viewport.clientHeight || 540;
+    let panX = (typeof savedPanX === "number" && isFinite(savedPanX)) ? savedPanX : 0.5;
+    let panY = (typeof savedPanY === "number" && isFinite(savedPanY)) ? savedPanY : 0.5;
+    if (canvasDispW > vpW && canvasDispW > 0) {
+      panX = (viewport.scrollLeft + vpW / 2) / canvasDispW;
+    }
+    if (canvasDispH > vpH && canvasDispH > 0) {
+      panY = (viewport.scrollTop + vpH / 2) / canvasDispH;
+    }
+    return {
+      panX: Math.max(0, Math.min(1, panX)),
+      panY: Math.max(0, Math.min(1, panY)),
+    };
+  }
+
+  function syncViewportScrollToPan(panX, panY) {
+    const vpW = viewport.clientWidth || 800;
+    const vpH = viewport.clientHeight || 540;
+    if (canvasDispW > vpW) {
+      const targetLeft = Math.round(panX * canvasDispW - vpW / 2);
+      viewport.scrollLeft = Math.max(0, Math.min(canvasDispW - vpW, targetLeft));
+    } else {
+      viewport.scrollLeft = 0;
+    }
+    if (canvasDispH > vpH) {
+      const targetTop = Math.round(panY * canvasDispH - vpH / 2);
+      viewport.scrollTop = Math.max(0, Math.min(canvasDispH - vpH, targetTop));
+    } else {
+      viewport.scrollTop = 0;
+    }
+  }
+
+  viewport.addEventListener("scroll", () => {
+    if (!imgLoaded) return;
+    const vpW = viewport.clientWidth || 800;
+    const vpH = viewport.clientHeight || 540;
+    if (canvasDispW > vpW && canvasDispW > 0) {
+      savedPanX = Math.max(0, Math.min(1, (viewport.scrollLeft + vpW / 2) / canvasDispW));
+    }
+    if (canvasDispH > vpH && canvasDispH > 0) {
+      savedPanY = Math.max(0, Math.min(1, (viewport.scrollTop + vpH / 2) / canvasDispH));
+    }
+  }, { passive: true });
+
+  function setZoom(newMultiplier, recordUndo = true) {
+    const clamped = Math.max(0.5, Math.min(3.0, Math.round(newMultiplier * 100) / 100));
+    if (Math.abs(clamped - zoomMultiplier) < 0.001) {
+      zoomFitBtn.textContent = `${Math.round(zoomMultiplier * 100)}% Fit`;
+      return;
+    }
+    const prevPan = getNormalizedViewportPan();
+    if (recordUndo && imgLoaded) {
+      pushUndo();
+    }
+    zoomMultiplier = clamped;
+    if (!hasZoomTransform()) {
+      savedPanX = 0.5;
+      savedPanY = 0.5;
+    } else {
+      savedPanX = prevPan.panX;
+      savedPanY = prevPan.panY;
+    }
     zoomFitBtn.textContent = `${Math.round(zoomMultiplier * 100)}% Fit`;
     resizeCanvas();
+    syncViewportScrollToPan(savedPanX, savedPanY);
+    statusEl.textContent = `Zoom set to ${Math.round(zoomMultiplier * 100)}% · Click '💾 Apply & Save Markup' to apply`;
     render();
   }
 
@@ -1217,9 +1285,13 @@ export default function(component) {
   }
 
   function snapshotState() {
+    const pan = getNormalizedViewportPan();
     return JSON.stringify({
       shapes: shapes,
       transformOps: transformOps,
+      zoomMultiplier: zoomMultiplier,
+      panX: pan.panX,
+      panY: pan.panY,
     });
   }
 
@@ -1229,20 +1301,34 @@ export default function(component) {
       if (Array.isArray(parsed)) {
         shapes = parsed;
         transformOps = [];
+        zoomMultiplier = 1.0;
+        savedPanX = 0.5;
+        savedPanY = 0.5;
       } else if (parsed && typeof parsed === "object") {
         shapes = Array.isArray(parsed.shapes) ? parsed.shapes : [];
         transformOps = Array.isArray(parsed.transformOps) ? parsed.transformOps : [];
+        const zVal = Number(parsed.zoomMultiplier);
+        zoomMultiplier = (isFinite(zVal) && zVal >= 0.5 && zVal <= 3.0) ? Math.round(zVal * 100) / 100 : 1.0;
+        const pxVal = Number(parsed.panX);
+        const pyVal = Number(parsed.panY);
+        savedPanX = (isFinite(pxVal) && pxVal >= 0 && pxVal <= 1) ? pxVal : 0.5;
+        savedPanY = (isFinite(pyVal) && pyVal >= 0 && pyVal <= 1) ? pyVal : 0.5;
       }
     } catch (e) {
       shapes = [];
       transformOps = [];
+      zoomMultiplier = 1.0;
+      savedPanX = 0.5;
+      savedPanY = 0.5;
     }
+    zoomFitBtn.textContent = `${Math.round(zoomMultiplier * 100)}% Fit`;
     warmShapeImages();
     selectedShapeId = null;
     cropRect = null;
     syncCropActionButtons();
     rebuildWorkingImage();
     resizeCanvas();
+    syncViewportScrollToPan(savedPanX, savedPanY);
     render();
   }
 
@@ -1502,11 +1588,12 @@ export default function(component) {
     if (radioDelSelected.checked && !radioDelSelected.disabled) {
       const sel = shapes.find(s => s.id === selectedShapeId);
       downstreamText.textContent =
-        `Removes the selected ${formatShapeLabel(sel)} from this canvas while keeping all other annotations and crop/rotation intact. ` +
+        `Removes the selected ${formatShapeLabel(sel)} from this canvas while keeping all other annotations and crop/rotation/zoom intact. ` +
         `You can still Undo before saving, and the saved visual aid is only updated when you click "💾 Apply & Save Markup".`;
     } else {
       const countNote = `${shapes.length} annotation${shapes.length === 1 ? "" : "s"}`;
-      const transformNote = transformOps.length > 0 ? " and resets crop/rotation back to the original base image" : "";
+      const hasAnyTransform = transformOps.length > 0 || hasZoomTransform();
+      const transformNote = hasAnyTransform ? " and resets crop/rotation/zoom back to the original base image" : "";
       downstreamText.textContent =
         `Deletes all ${countNote} on this canvas${transformNote}. ` +
         `You can still Undo before saving, and the saved visual aid is only updated when you click "💾 Apply & Save Markup".`;
@@ -1514,8 +1601,8 @@ export default function(component) {
   }
 
   function openDeleteConfirmModal() {
-    if (shapes.length === 0 && transformOps.length === 0 && !cropRect) {
-      statusEl.textContent = "Nothing to delete — canvas has no annotations or crop/rotation applied.";
+    if (shapes.length === 0 && transformOps.length === 0 && !hasZoomTransform() && !cropRect) {
+      statusEl.textContent = "Nothing to delete — canvas has no annotations or crop/rotation/zoom applied.";
       return;
     }
     const sel = selectedShapeId ? shapes.find(s => s.id === selectedShapeId) : null;
@@ -1532,9 +1619,9 @@ export default function(component) {
       optDescSelected.textContent = "Use 👆 Select and click a shape on the canvas first to delete a single shape.";
       radioDelAll.checked = true;
     }
-    const hasTransform = transformOps.length > 0;
+    const hasTransform = transformOps.length > 0 || hasZoomTransform();
     optDescAll.textContent = hasTransform
-      ? `Deletes all ${shapes.length} annotation${shapes.length === 1 ? "" : "s"} and resets crop/rotation back to the original image.`
+      ? `Deletes all ${shapes.length} annotation${shapes.length === 1 ? "" : "s"} and resets crop/rotation/zoom back to the original image.`
       : `Deletes all ${shapes.length} annotation${shapes.length === 1 ? "" : "s"} from this canvas.`;
     syncDeleteModalDownstream();
     deleteModal.style.display = "flex";
@@ -1564,11 +1651,16 @@ export default function(component) {
       pushUndo();
       shapes = [];
       transformOps = [];
+      zoomMultiplier = 1.0;
+      savedPanX = 0.5;
+      savedPanY = 0.5;
+      zoomFitBtn.textContent = "100% Fit";
       selectedShapeId = null;
       cropRect = null;
       syncCropActionButtons();
       rebuildWorkingImage();
       resizeCanvas();
+      syncViewportScrollToPan(0.5, 0.5);
       closeDeleteConfirmModal();
       statusEl.textContent = "Deleted entire canvas contents and restored original image.";
       render();
@@ -1638,16 +1730,49 @@ export default function(component) {
     const exportScale = Math.min(1.0, MAX_EXPORT_DIM / Math.max(1, workW, workH));
     const exportW = Math.max(1, Math.round(workW * exportScale));
     const exportH = Math.max(1, Math.round(workH * exportScale));
-    const offscreen = document.createElement("canvas");
-    offscreen.width = exportW;
-    offscreen.height = exportH;
-    const offCtx = offscreen.getContext("2d");
-    offCtx.imageSmoothingEnabled = true;
-    offCtx.imageSmoothingQuality = "high";
-    offCtx.drawImage(workingCanvas, 0, 0, exportW, exportH);
+    const baseCanvas = document.createElement("canvas");
+    baseCanvas.width = exportW;
+    baseCanvas.height = exportH;
+    const baseCtx = baseCanvas.getContext("2d");
+    baseCtx.imageSmoothingEnabled = true;
+    baseCtx.imageSmoothingQuality = "high";
+    baseCtx.drawImage(workingCanvas, 0, 0, exportW, exportH);
 
-    // Draw all shapes at exportScale so proportions match the working canvas
-    shapes.forEach(shape => drawShape(offCtx, shape, exportScale, false));
+    const pan = getNormalizedViewportPan();
+    savedPanX = pan.panX;
+    savedPanY = pan.panY;
+
+    const zRect = (hasZoomTransform() && zoomMultiplier > 1.0)
+      ? computeZoomCropRect(exportW, exportH, zoomMultiplier, pan.panX, pan.panY, shapes, baseCtx, exportScale)
+      : null;
+    const exportBounds = zRect
+      ? { left: zRect.sx, top: zRect.sy, right: zRect.sx + zRect.cropW, bottom: zRect.sy + zRect.cropH }
+      : { left: 0, top: 0, right: exportW, bottom: exportH };
+
+    // Draw all shapes at exportScale so proportions match the working canvas, clamped to visible bounds
+    shapes.forEach(shape => drawShape(baseCtx, shape, exportScale, false, exportBounds));
+
+    let offscreen = baseCanvas;
+    if (hasZoomTransform()) {
+      const zoomedCanvas = document.createElement("canvas");
+      zoomedCanvas.width = exportW;
+      zoomedCanvas.height = exportH;
+      const zCtx = zoomedCanvas.getContext("2d");
+      zCtx.imageSmoothingEnabled = true;
+      zCtx.imageSmoothingQuality = "high";
+      if (zoomMultiplier > 1.0 && zRect) {
+        zCtx.drawImage(baseCanvas, zRect.sx, zRect.sy, zRect.cropW, zRect.cropH, 0, 0, exportW, exportH);
+      } else {
+        zCtx.fillStyle = "#ffffff";
+        zCtx.fillRect(0, 0, exportW, exportH);
+        const drawW = Math.max(1, Math.round(exportW * zoomMultiplier));
+        const drawH = Math.max(1, Math.round(exportH * zoomMultiplier));
+        const dx = Math.round((exportW - drawW) / 2);
+        const dy = Math.round((exportH - drawH) / 2);
+        zCtx.drawImage(baseCanvas, 0, 0, exportW, exportH, dx, dy, drawW, drawH);
+      }
+      offscreen = zoomedCanvas;
+    }
 
     const srcUrl = String((data && data.image_data_url) || "");
     const preferJpeg = srcUrl.startsWith("data:image/jpeg") || srcUrl.startsWith("data:image/jpg");
@@ -1667,20 +1792,38 @@ export default function(component) {
         dataUrl = jpgCanvas.toDataURL("image/jpeg", 0.92);
       }
     }
-    const serializedList = transformOps.length > 0
-      ? [{ id: "__transform__", type: "__transform__", ops: transformOps }, ...shapes]
+    const hasTransformOrZoom = transformOps.length > 0 || hasZoomTransform();
+    const transformEntry = {
+      id: "__transform__",
+      type: "__transform__",
+      ops: transformOps,
+    };
+    if (hasZoomTransform()) {
+      transformEntry.zoom = Math.round(zoomMultiplier * 100) / 100;
+      transformEntry.panX = Math.round(pan.panX * 10000) / 10000;
+      transformEntry.panY = Math.round(pan.panY * 10000) / 10000;
+      transformEntry.zoomCropRev = 2;
+    }
+    const serializedList = hasTransformOrZoom
+      ? [transformEntry, ...shapes]
       : shapes;
     setTriggerValue("save", {
       annotations_json: serializedList.length > 0 ? JSON.stringify(serializedList) : "",
       data_url: dataUrl,
       count: shapes.length,
     });
-    const transformNote = transformOps.length > 0 ? " + crop/rotation" : "";
+    const extraNotes = [];
+    if (transformOps.length > 0) extraNotes.push("crop/rotation");
+    if (hasZoomTransform()) extraNotes.push(`zoom (${Math.round(zoomMultiplier * 100)}%)`);
+    const transformNote = extraNotes.length > 0 ? ` + ${extraNotes.join(" & ")}` : "";
     statusEl.textContent = `Applied ${shapes.length} annotation${shapes.length === 1 ? '' : 's'}${transformNote}! Saving...`;
   };
 
   function updateStatus() {
-    const transformBadge = transformOps.length > 0 ? " · Cropped/Rotated" : "";
+    const badges = [];
+    if (transformOps.length > 0) badges.push("Cropped/Rotated");
+    if (hasZoomTransform()) badges.push(`Zoom ${Math.round(zoomMultiplier * 100)}%`);
+    const transformBadge = badges.length > 0 ? ` · ${badges.join(" · ")}` : "";
     countEl.textContent = `${shapes.length} annotation${shapes.length === 1 ? '' : 's'}${transformBadge}`;
   }
 
@@ -1691,13 +1834,26 @@ export default function(component) {
       imgLoaded = true;
       shapes = [];
       transformOps = [];
+      zoomMultiplier = 1.0;
+      savedPanX = 0.5;
+      savedPanY = 0.5;
       if (data.annotations_json) {
         try {
           const parsed = JSON.parse(data.annotations_json) || [];
           if (Array.isArray(parsed)) {
             parsed.forEach(item => {
-              if (item && item.type === "__transform__" && Array.isArray(item.ops)) {
-                transformOps = item.ops;
+              if (item && item.type === "__transform__") {
+                if (Array.isArray(item.ops)) {
+                  transformOps = item.ops;
+                }
+                const zVal = Number(item.zoom);
+                if (isFinite(zVal) && zVal >= 0.5 && zVal <= 3.0) {
+                  zoomMultiplier = Math.round(zVal * 100) / 100;
+                }
+                const pxVal = Number(item.panX);
+                const pyVal = Number(item.panY);
+                if (isFinite(pxVal) && pxVal >= 0 && pxVal <= 1) savedPanX = pxVal;
+                if (isFinite(pyVal) && pyVal >= 0 && pyVal <= 1) savedPanY = pyVal;
               } else if (item && item.type) {
                 shapes.push(item);
               }
@@ -1706,8 +1862,12 @@ export default function(component) {
         } catch(e) {
           shapes = [];
           transformOps = [];
+          zoomMultiplier = 1.0;
+          savedPanX = 0.5;
+          savedPanY = 0.5;
         }
       }
+      zoomFitBtn.textContent = `${Math.round(zoomMultiplier * 100)}% Fit`;
       if (data.initial_badge_number) {
         nextBadgeInput.value = data.initial_badge_number;
       }
@@ -1738,6 +1898,7 @@ export default function(component) {
       warmShapeImages();
       rebuildWorkingImage();
       resizeCanvas();
+      syncViewportScrollToPan(savedPanX, savedPanY);
       render();
     };
     img.src = data.image_data_url;
@@ -2109,10 +2270,12 @@ export default function(component) {
         const d = Math.hypot(nx - s.x, ny - s.y);
         if (d <= Math.max(20 * normFactor, sw * 4.5)) return s;
       } else if (s.type === "text") {
+        const tx = isFinite(s._drawX) ? s._drawX : s.x;
+        const ty = isFinite(s._drawY) ? s._drawY : s.y;
         const tw = s.boxW || (120 * normFactor);
         const th = s.boxH || (30 * normFactor);
         const tol = Math.max(10 * normFactor, Math.round(10 / Math.max(0.05, scale)));
-        if (nx >= s.x - tol && nx <= s.x + tw + tol && ny >= s.y - tol && ny <= s.y + th + tol) return s;
+        if (nx >= tx - tol && nx <= tx + tw + tol && ny >= ty - tol && ny <= ty + th + tol) return s;
       } else if (s.type === "pen") {
         for (let j = 0; j < s.points.length - 1; j++) {
           const d = distToSegment(nx, ny, s.points[j].x, s.points[j].y, s.points[j+1].x, s.points[j+1].y);
@@ -2276,11 +2439,143 @@ export default function(component) {
     updateStatus();
   }
 
-  function drawShape(targetCtx, s, sc, isSelected) {
+  function getShapeBounds(targetCtx, s, sc) {
+    if (!s || !s.type) return null;
+    const normFactor = getVisualNormFactor();
+    const visScale = sc * normFactor;
+    const sw = Number(s.strokeWidth) || 4;
+    if (s.type === "arrow") {
+      const pad = Math.max(14 * visScale, sw * 4 * visScale);
+      return {
+        minX: Math.min(s.x1, s.x2) * sc - pad,
+        minY: Math.min(s.y1, s.y2) * sc - pad,
+        maxX: Math.max(s.x1, s.x2) * sc + pad,
+        maxY: Math.max(s.y1, s.y2) * sc + pad,
+      };
+    }
+    if (s.type === "rect" || s.type === "circle" || s.type === "image") {
+      const rx = Math.min(s.x, s.x + s.w) * sc;
+      const ry = Math.min(s.y, s.y + s.h) * sc;
+      const rw = Math.abs(s.w) * sc;
+      const rh = Math.abs(s.h) * sc;
+      const pad = 4 * visScale;
+      return {
+        minX: rx - pad,
+        minY: ry - pad,
+        maxX: rx + rw + pad,
+        maxY: ry + rh + pad,
+      };
+    }
+    if (s.type === "badge") {
+      const r = Math.max(13 * visScale, sw * 3.6 * visScale) + 3 * visScale;
+      return {
+        minX: s.x * sc - r,
+        minY: s.y * sc - r,
+        maxX: s.x * sc + r,
+        maxY: s.y * sc + r,
+      };
+    }
+    if (s.type === "text") {
+      const tx = s.x * sc;
+      const ty = s.y * sc;
+      const baseFontPx = Number(s.fontSize) || 18;
+      const fontSize = Math.max(10 * visScale, baseFontPx * visScale);
+      targetCtx.save();
+      targetCtx.font = `700 ${Math.round(fontSize * 10) / 10}px sans-serif`;
+      const txt = s.text || "";
+      const metrics = targetCtx.measureText(txt);
+      targetCtx.restore();
+      const padX = Math.max(6, Math.round(baseFontPx * 0.45)) * visScale;
+      const padY = Math.max(4, Math.round(baseFontPx * 0.28)) * visScale;
+      const boxW = metrics.width + padX * 2;
+      const boxH = fontSize + padY * 2;
+      const pad = Math.max(8, 10 * visScale);
+      return {
+        minX: tx - pad,
+        minY: ty - pad,
+        maxX: tx + boxW + pad,
+        maxY: ty + boxH + pad,
+      };
+    }
+    if (s.type === "pen" && Array.isArray(s.points) && s.points.length > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      s.points.forEach(p => {
+        const px = p.x * sc, py = p.y * sc;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+      });
+      const pad = Math.max(4, sw * visScale);
+      return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
+    }
+    return null;
+  }
+
+  function computeZoomCropRect(exportW, exportH, zoomVal, panX, panY, shapesList, targetCtx, sc) {
+    const cropW = Math.max(1, exportW / zoomVal);
+    const cropH = Math.max(1, exportH / zoomVal);
+    const centerX = panX * exportW;
+    const centerY = panY * exportH;
+    let sx = Math.max(0, Math.min(exportW - cropW, centerX - cropW / 2));
+    let sy = Math.max(0, Math.min(exportH - cropH, centerY - cropH / 2));
+
+    if (Array.isArray(shapesList) && shapesList.length > 0) {
+      let uMinX = Infinity, uMinY = Infinity, uMaxX = -Infinity, uMaxY = -Infinity;
+      let tMinX = Infinity, tMinY = Infinity, tMaxX = -Infinity, tMaxY = -Infinity;
+      shapesList.forEach(s => {
+        const b = getShapeBounds(targetCtx, s, sc);
+        if (!b) return;
+        const bx1 = Math.max(0, Math.min(exportW, b.minX));
+        const by1 = Math.max(0, Math.min(exportH, b.minY));
+        const bx2 = Math.max(0, Math.min(exportW, b.maxX));
+        const by2 = Math.max(0, Math.min(exportH, b.maxY));
+        if (bx1 < uMinX) uMinX = bx1;
+        if (by1 < uMinY) uMinY = by1;
+        if (bx2 > uMaxX) uMaxX = bx2;
+        if (by2 > uMaxY) uMaxY = by2;
+        if (s.type === "text" || s.type === "badge") {
+          if (bx1 < tMinX) tMinX = bx1;
+          if (by1 < tMinY) tMinY = by1;
+          if (bx2 > tMaxX) tMaxX = bx2;
+          if (by2 > tMaxY) tMaxY = by2;
+        }
+      });
+      if (isFinite(uMinX) && isFinite(uMaxX) && uMaxX > uMinX) {
+        if ((uMaxX - uMinX) <= cropW) {
+          if (sx > uMinX) sx = Math.max(0, uMinX);
+          if (sx + cropW < uMaxX) sx = Math.min(exportW - cropW, uMaxX - cropW);
+        } else if (isFinite(tMinX) && isFinite(tMaxX) && (tMaxX - tMinX) <= cropW) {
+          if (sx > tMinX) sx = Math.max(0, tMinX);
+          if (sx + cropW < tMaxX) sx = Math.min(exportW - cropW, tMaxX - cropW);
+        } else {
+          sx = Math.max(0, Math.min(exportW - cropW, (uMinX + uMaxX) / 2 - cropW / 2));
+        }
+      }
+      if (isFinite(uMinY) && isFinite(uMaxY) && uMaxY > uMinY) {
+        if ((uMaxY - uMinY) <= cropH) {
+          if (sy > uMinY) sy = Math.max(0, uMinY);
+          if (sy + cropH < uMaxY) sy = Math.min(exportH - cropH, uMaxY - cropH);
+        } else if (isFinite(tMinY) && isFinite(tMaxY) && (tMaxY - tMinY) <= cropH) {
+          if (sy > tMinY) sy = Math.max(0, tMinY);
+          if (sy + cropH < tMaxY) sy = Math.min(exportH - cropH, tMaxY - cropH);
+        } else {
+          sy = Math.max(0, Math.min(exportH - cropH, (uMinY + uMaxY) / 2 - cropH / 2));
+        }
+      }
+    }
+    return { sx, sy, cropW, cropH };
+  }
+
+  function drawShape(targetCtx, s, sc, isSelected, boundsRect) {
     targetCtx.save();
     const normFactor = getVisualNormFactor();
     const visScale = sc * normFactor;
     const sw = Number(s.strokeWidth) || 4;
+    const bLeft = boundsRect && isFinite(boundsRect.left) ? boundsRect.left : 0;
+    const bTop = boundsRect && isFinite(boundsRect.top) ? boundsRect.top : 0;
+    const bRight = boundsRect && isFinite(boundsRect.right) ? boundsRect.right : (getWorkingWidth() * sc);
+    const bBottom = boundsRect && isFinite(boundsRect.bottom) ? boundsRect.bottom : (getWorkingHeight() * sc);
     targetCtx.strokeStyle = s.color;
     targetCtx.fillStyle = s.color;
     targetCtx.lineWidth = Math.max(1.5, sw * visScale);
@@ -2343,18 +2638,33 @@ export default function(component) {
       targetCtx.fillText(String(s.badgeNum || 1), bx, by + 1);
 
     } else if (s.type === "text") {
-      const tx = s.x * sc, ty = s.y * sc;
       const baseFontPx = Number(s.fontSize) || 18;
-      const fontSize = Math.max(10 * visScale, baseFontPx * visScale);
-      targetCtx.font = `700 ${Math.round(fontSize * 10) / 10}px sans-serif`;
+      let fontSize = Math.max(10 * visScale, baseFontPx * visScale);
       const txt = s.text || "";
-      const metrics = targetCtx.measureText(txt);
-      const padX = Math.max(6, Math.round(baseFontPx * 0.45)) * visScale;
-      const padY = Math.max(4, Math.round(baseFontPx * 0.28)) * visScale;
-      const boxW = metrics.width + padX * 2;
+      let padX = Math.max(6, Math.round(baseFontPx * 0.45)) * visScale;
+      let padY = Math.max(4, Math.round(baseFontPx * 0.28)) * visScale;
+      const edgeMargin = Math.max(3, Math.round(4 * visScale));
+      const availW = Math.max(36, (bRight - bLeft) - edgeMargin * 2);
+
+      targetCtx.font = `700 ${Math.round(fontSize * 10) / 10}px sans-serif`;
+      let metrics = targetCtx.measureText(txt);
+      let boxW = metrics.width + padX * 2;
+      if (boxW > availW && boxW > 1) {
+        const shrinkRatio = Math.max(0.45, availW / boxW);
+        fontSize = Math.max(8 * visScale, fontSize * shrinkRatio);
+        padX = Math.max(4 * visScale, padX * shrinkRatio);
+        padY = Math.max(3 * visScale, padY * shrinkRatio);
+        targetCtx.font = `700 ${Math.round(fontSize * 10) / 10}px sans-serif`;
+        metrics = targetCtx.measureText(txt);
+        boxW = metrics.width + padX * 2;
+      }
       const boxH = fontSize + padY * 2;
+      const tx = Math.max(bLeft + edgeMargin, Math.min(Math.max(bLeft + edgeMargin, bRight - boxW - edgeMargin), s.x * sc));
+      const ty = Math.max(bTop + edgeMargin, Math.min(Math.max(bTop + edgeMargin, bBottom - boxH - edgeMargin), s.y * sc));
       s.boxW = boxW / sc;
       s.boxH = boxH / sc;
+      s._drawX = tx / sc;
+      s._drawY = ty / sc;
 
       // Callout box with subtle shadow
       targetCtx.shadowColor = "rgba(0,0,0,0.5)";
@@ -2478,7 +2788,9 @@ export default function(component) {
           targetCtx.strokeRect(hx - hSize / 2, hy - hSize / 2, hSize, hSize);
         });
       } else if (s.type === "text") {
-        targetCtx.strokeRect(s.x * sc - 4, s.y * sc - 4, (s.boxW || 100) * sc + 8, (s.boxH || 30) * sc + 8);
+        const tx = isFinite(s._drawX) ? s._drawX : s.x;
+        const ty = isFinite(s._drawY) ? s._drawY : s.y;
+        targetCtx.strokeRect(tx * sc - 4, ty * sc - 4, (s.boxW || 100) * sc + 8, (s.boxH || 30) * sc + 8);
       }
     }
     targetCtx.restore();
@@ -2495,7 +2807,7 @@ export default function(component) {
 """
 
 _IMAGE_ANNOTATOR = st.components.v2.component(
-    "paag_image_annotator_v13",
+    "paag_image_annotator_v15",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -2618,11 +2930,153 @@ def _compute_working_canvas_image(base_img, transform_ops: list[dict]):
     return work
 
 
+def _get_annotator_shape_bounds_pil(
+    draw,
+    shape: dict[str, Any],
+    sc: float,
+    vis_scale: float,
+) -> tuple[float, float, float, float] | None:
+    s_type = str(shape.get("type") or "").strip()
+    if not s_type or s_type == "__transform__":
+        return None
+    sw = float(shape.get("strokeWidth") or 4.0)
+    if s_type == "arrow":
+        x1 = float(shape.get("x1") or 0.0) * sc
+        y1 = float(shape.get("y1") or 0.0) * sc
+        x2 = float(shape.get("x2") or 0.0) * sc
+        y2 = float(shape.get("y2") or 0.0) * sc
+        pad = max(14.0 * vis_scale, sw * 4.0 * vis_scale)
+        return (min(x1, x2) - pad, min(y1, y2) - pad, max(x1, x2) + pad, max(y1, y2) + pad)
+    if s_type in ("rect", "circle", "image"):
+        x_val = float(shape.get("x") or 0.0)
+        y_val = float(shape.get("y") or 0.0)
+        w_val = float(shape.get("w") or 0.0)
+        h_val = float(shape.get("h") or 0.0)
+        rx = min(x_val, x_val + w_val) * sc
+        ry = min(y_val, y_val + h_val) * sc
+        rw = abs(w_val) * sc
+        rh = abs(h_val) * sc
+        pad = 4.0 * vis_scale
+        return (rx - pad, ry - pad, rx + rw + pad, ry + rh + pad)
+    if s_type == "badge":
+        bx = float(shape.get("x") or 0.0) * sc
+        by = float(shape.get("y") or 0.0) * sc
+        r = max(13.0 * vis_scale, sw * 3.6 * vis_scale) + 3.0 * vis_scale
+        return (bx - r, by - r, bx + r, by + r)
+    if s_type == "text":
+        tx = float(shape.get("x") or 0.0) * sc
+        ty = float(shape.get("y") or 0.0) * sc
+        base_font_px = float(shape.get("fontSize") or 18.0)
+        font_size = max(10.0 * vis_scale, base_font_px * vis_scale)
+        font = _load_annotator_font(int(round(font_size)), bold=True)
+        txt = str(shape.get("text") or "")
+        pad_x = max(6.0, round(base_font_px * 0.45)) * vis_scale
+        pad_y = max(4.0, round(base_font_px * 0.28)) * vis_scale
+        try:
+            bbox = draw.textbbox((0, 0), txt, font=font)
+            text_w = float(bbox[2] - bbox[0])
+        except Exception:
+            text_w = float(len(txt)) * font_size * 0.58
+        box_w = text_w + pad_x * 2.0
+        box_h = font_size + pad_y * 2.0
+        pad = max(8.0, 10.0 * vis_scale)
+        return (tx - pad, ty - pad, tx + box_w + pad, ty + box_h + pad)
+    if s_type == "pen":
+        pts = shape.get("points") or []
+        coords = [
+            (float(p.get("x") or 0.0) * sc, float(p.get("y") or 0.0) * sc)
+            for p in pts
+            if isinstance(p, dict)
+        ]
+        if coords:
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            pad = max(4.0, sw * vis_scale)
+            return (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+    return None
+
+
+def _compute_zoom_crop_rect_pil(
+    export_w: int,
+    export_h: int,
+    zoom_multiplier: float,
+    pan_x: float,
+    pan_y: float,
+    shapes: list[dict[str, Any]],
+    sc: float,
+    vis_scale: float,
+) -> tuple[float, float, float, float]:
+    from PIL import Image, ImageDraw
+
+    crop_w = max(1.0, export_w / float(zoom_multiplier))
+    crop_h = max(1.0, export_h / float(zoom_multiplier))
+    px = max(0.0, min(1.0, float(pan_x if pan_x is not None else 0.5)))
+    py = max(0.0, min(1.0, float(pan_y if pan_y is not None else 0.5)))
+    sx = max(0.0, min(export_w - crop_w, px * export_w - crop_w / 2.0))
+    sy = max(0.0, min(export_h - crop_h, py * export_h - crop_h / 2.0))
+
+    if shapes:
+        scratch = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(scratch, "RGBA")
+        u_min_x, u_min_y, u_max_x, u_max_y = float("inf"), float("inf"), float("-inf"), float("-inf")
+        t_min_x, t_min_y, t_max_x, t_max_y = float("inf"), float("inf"), float("-inf"), float("-inf")
+        for s in shapes:
+            if not isinstance(s, dict):
+                continue
+            b = _get_annotator_shape_bounds_pil(draw, s, sc, vis_scale)
+            if not b:
+                continue
+            bx1 = max(0.0, min(float(export_w), b[0]))
+            by1 = max(0.0, min(float(export_h), b[1]))
+            bx2 = max(0.0, min(float(export_w), b[2]))
+            by2 = max(0.0, min(float(export_h), b[3]))
+            u_min_x = min(u_min_x, bx1)
+            u_min_y = min(u_min_y, by1)
+            u_max_x = max(u_max_x, bx2)
+            u_max_y = max(u_max_y, by2)
+            if s.get("type") in ("text", "badge"):
+                t_min_x = min(t_min_x, bx1)
+                t_min_y = min(t_min_y, by1)
+                t_max_x = max(t_max_x, bx2)
+                t_max_y = max(t_max_y, by2)
+
+        if u_min_x < u_max_x:
+            if (u_max_x - u_min_x) <= crop_w:
+                if sx > u_min_x:
+                    sx = max(0.0, u_min_x)
+                if sx + crop_w < u_max_x:
+                    sx = min(export_w - crop_w, u_max_x - crop_w)
+            elif t_min_x < t_max_x and (t_max_x - t_min_x) <= crop_w:
+                if sx > t_min_x:
+                    sx = max(0.0, t_min_x)
+                if sx + crop_w < t_max_x:
+                    sx = min(export_w - crop_w, t_max_x - crop_w)
+            else:
+                sx = max(0.0, min(export_w - crop_w, (u_min_x + u_max_x) / 2.0 - crop_w / 2.0))
+
+        if u_min_y < u_max_y:
+            if (u_max_y - u_min_y) <= crop_h:
+                if sy > u_min_y:
+                    sy = max(0.0, u_min_y)
+                if sy + crop_h < u_max_y:
+                    sy = min(export_h - crop_h, u_max_y - crop_h)
+            elif t_min_y < t_max_y and (t_max_y - t_min_y) <= crop_h:
+                if sy > t_min_y:
+                    sy = max(0.0, t_min_y)
+                if sy + crop_h < t_max_y:
+                    sy = min(export_h - crop_h, t_max_y - crop_h)
+            else:
+                sy = max(0.0, min(export_h - crop_h, (u_min_y + u_max_y) / 2.0 - crop_h / 2.0))
+
+    return (sx, sy, sx + crop_w, sy + crop_h)
+
+
 def _draw_annotator_shape_pil(
     canvas,
     shape: dict[str, Any],
     sc: float,
     vis_scale: float,
+    bounds_rect: tuple[float, float, float, float] | None = None,
 ) -> None:
     import math
     from pathlib import Path
@@ -2634,6 +3088,11 @@ def _draw_annotator_shape_pil(
     sw = float(shape.get("strokeWidth") or 4.0)
     rgb = _parse_hex_color(str(shape.get("color") or "#ef4444"))
     line_w = max(2, int(round(max(1.5, sw * vis_scale))))
+    b_left, b_top, b_right, b_bottom = (
+        bounds_rect
+        if bounds_rect is not None
+        else (0.0, 0.0, float(canvas.width), float(canvas.height))
+    )
     draw = ImageDraw.Draw(canvas, "RGBA")
 
     if s_type == "arrow":
@@ -2700,21 +3159,42 @@ def _draw_annotator_shape_pil(
         )
 
     elif s_type == "text":
-        tx = float(shape.get("x") or 0.0) * sc
-        ty = float(shape.get("y") or 0.0) * sc
         base_font_px = float(shape.get("fontSize") or 18.0)
         font_size = max(10.0 * vis_scale, base_font_px * vis_scale)
-        font = _load_annotator_font(int(round(font_size)), bold=True)
         txt = str(shape.get("text") or "")
         pad_x = max(6.0, round(base_font_px * 0.45)) * vis_scale
         pad_y = max(4.0, round(base_font_px * 0.28)) * vis_scale
+        edge_margin = max(3.0, round(4.0 * vis_scale))
+        avail_w = max(36.0, (b_right - b_left) - edge_margin * 2.0)
+
+        font = _load_annotator_font(int(round(font_size)), bold=True)
         try:
             bbox = draw.textbbox((0, 0), txt, font=font)
             text_w = float(bbox[2] - bbox[0])
         except Exception:
             text_w = float(len(txt)) * font_size * 0.58
         box_w = text_w + pad_x * 2.0
+        if box_w > avail_w and box_w > 1.0:
+            shrink_ratio = max(0.45, avail_w / box_w)
+            font_size = max(8.0 * vis_scale, font_size * shrink_ratio)
+            pad_x = max(4.0 * vis_scale, pad_x * shrink_ratio)
+            pad_y = max(3.0 * vis_scale, pad_y * shrink_ratio)
+            font = _load_annotator_font(int(round(font_size)), bold=True)
+            try:
+                bbox = draw.textbbox((0, 0), txt, font=font)
+                text_w = float(bbox[2] - bbox[0])
+            except Exception:
+                text_w = float(len(txt)) * font_size * 0.58
+            box_w = text_w + pad_x * 2.0
         box_h = font_size + pad_y * 2.0
+        tx = max(
+            b_left + edge_margin,
+            min(max(b_left + edge_margin, b_right - box_w - edge_margin), float(shape.get("x") or 0.0) * sc),
+        )
+        ty = max(
+            b_top + edge_margin,
+            min(max(b_top + edge_margin, b_bottom - box_h - edge_margin), float(shape.get("y") or 0.0) * sc),
+        )
         border_w = max(2, int(round(2.0 * vis_scale)))
         draw.rectangle(
             [tx, ty, tx + box_w, ty + box_h],
@@ -2825,6 +3305,57 @@ def _draw_annotator_shape_pil(
         )
 
 
+def _apply_zoom_to_composite_pil(
+    comp_rgba,
+    zoom_multiplier: float,
+    pan_x: float = 0.5,
+    pan_y: float = 0.5,
+    crop_box: tuple[float, float, float, float] | None = None,
+):
+    from PIL import Image
+
+    try:
+        z_val = float(zoom_multiplier or 1.0)
+    except Exception:
+        z_val = 1.0
+    if not (0.5 <= z_val <= 3.0) or abs(z_val - 1.0) <= 0.001:
+        return comp_rgba
+
+    export_w, export_h = max(1, comp_rgba.width), max(1, comp_rgba.height)
+    px = max(0.0, min(1.0, float(pan_x if pan_x is not None else 0.5)))
+    py = max(0.0, min(1.0, float(pan_y if pan_y is not None else 0.5)))
+
+    if z_val > 1.0:
+        if crop_box is not None:
+            sx, sy, sx2, sy2 = crop_box
+            left = max(0, int(round(sx)))
+            top = max(0, int(round(sy)))
+            right = min(export_w, max(left + 1, int(round(sx2))))
+            bottom = min(export_h, max(top + 1, int(round(sy2))))
+        else:
+            crop_w = max(1.0, export_w / z_val)
+            crop_h = max(1.0, export_h / z_val)
+            center_x = px * export_w
+            center_y = py * export_h
+            sx = max(0.0, min(export_w - crop_w, center_x - crop_w / 2.0))
+            sy = max(0.0, min(export_h - crop_h, center_y - crop_h / 2.0))
+            left = max(0, int(round(sx)))
+            top = max(0, int(round(sy)))
+            right = min(export_w, max(left + 1, int(round(sx + crop_w))))
+            bottom = min(export_h, max(top + 1, int(round(sy + crop_h))))
+        cropped = comp_rgba.crop((left, top, right, bottom))
+        return cropped.resize((export_w, export_h), Image.Resampling.LANCZOS)
+
+    out = Image.new("RGBA", (export_w, export_h), (255, 255, 255, 255))
+    draw_w = max(1, int(round(export_w * z_val)))
+    draw_h = max(1, int(round(export_h * z_val)))
+    dx = max(0, int(round((export_w - draw_w) / 2.0)))
+    dy = max(0, int(round((export_h - draw_h) / 2.0)))
+    scaled = comp_rgba.resize((draw_w, draw_h), Image.Resampling.LANCZOS)
+    out.alpha_composite(scaled, (dx, dy))
+    return out
+
+
 def patch_visual_media_composite_image_shapes(
     original_file_path: str | Any,
     composite_file_path: str | Any,
@@ -2852,12 +3383,29 @@ def patch_visual_media_composite_image_shapes(
         raw_list = []
 
     transform_ops: list[dict] = []
+    zoom_multiplier = 1.0
+    pan_x = 0.5
+    pan_y = 0.5
     shapes: list[dict] = []
     for item in raw_list:
         if not isinstance(item, dict):
             continue
-        if item.get("type") == "__transform__" and isinstance(item.get("ops"), list):
-            transform_ops = item["ops"]
+        if item.get("type") == "__transform__":
+            if isinstance(item.get("ops"), list):
+                transform_ops = item["ops"]
+            try:
+                z_raw = float(item.get("zoom") or 1.0)
+                if 0.5 <= z_raw <= 3.0:
+                    zoom_multiplier = z_raw
+            except Exception:
+                pass
+            try:
+                if item.get("panX") is not None:
+                    pan_x = max(0.0, min(1.0, float(item.get("panX"))))
+                if item.get("panY") is not None:
+                    pan_y = max(0.0, min(1.0, float(item.get("panY"))))
+            except Exception:
+                pass
         elif item.get("type"):
             s_copy = dict(item)
             sid = str(s_copy.get("id") or "")
@@ -2875,9 +3423,11 @@ def patch_visual_media_composite_image_shapes(
 
     base_fit_scale = max(0.02, min(784.0 / work_w, 524.0 / work_h, 4.0))
     norm_factor = 1.0 / base_fit_scale
+    has_zoom = abs(zoom_multiplier - 1.0) > 0.001
 
     can_patch = (
-        updated_shape_ids is not None
+        not has_zoom
+        and updated_shape_ids is not None
         and len(updated_shape_ids) > 0
         and comp_path.exists()
         and comp_path.is_file()
@@ -2925,8 +3475,30 @@ def patch_visual_media_composite_image_shapes(
         export_h = max(1, int(round(work_h * export_scale)))
         vis_scale = export_scale * norm_factor
         comp_rgba = work_img.resize((export_w, export_h), Image.Resampling.LANCZOS).convert("RGBA")
+        zoom_bounds = (
+            _compute_zoom_crop_rect_pil(
+                export_w,
+                export_h,
+                zoom_multiplier,
+                pan_x,
+                pan_y,
+                shapes,
+                export_scale,
+                vis_scale,
+            )
+            if (has_zoom and zoom_multiplier > 1.0)
+            else (0.0, 0.0, float(export_w), float(export_h))
+        )
         for s in shapes:
-            _draw_annotator_shape_pil(comp_rgba, s, export_scale, vis_scale)
+            _draw_annotator_shape_pil(comp_rgba, s, export_scale, vis_scale, bounds_rect=zoom_bounds)
+        if has_zoom:
+            comp_rgba = _apply_zoom_to_composite_pil(
+                comp_rgba,
+                zoom_multiplier,
+                pan_x,
+                pan_y,
+                crop_box=zoom_bounds if zoom_multiplier > 1.0 else None,
+            )
         _save_composite_pil_image(comp_rgba, comp_path)
         return True
     except Exception:

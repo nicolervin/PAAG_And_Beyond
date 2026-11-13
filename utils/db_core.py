@@ -2070,7 +2070,7 @@ def _sync_part_sourced_visual_media(
         if prow and prow["project_id"]:
             norm_proj_id = str(prow["project_id"]).strip()
     if norm_proj_id and not norm_part_id:
-        _c_entry = _sync_cache.get((str(DB_PATH), norm_proj_id))
+        _c_entry = _sync_cache.get((str(DB_PATH), norm_proj_id, "v2"))
         if _c_entry and (_time.monotonic() - _c_entry[0]) < 2.5:
             _m_st = conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM process_visual_media WHERE project_id=?",
@@ -2088,7 +2088,7 @@ def _sync_part_sourced_visual_media(
             ):
                 return 0
     else:
-        _sync_cache.pop((str(DB_PATH), norm_proj_id), None)
+        _sync_cache.pop((str(DB_PATH), norm_proj_id, "v2"), None)
 
     if norm_proj_id:
         media_rows = conn.execute(
@@ -2157,7 +2157,7 @@ def _sync_part_sourced_visual_media(
 
     def _upgrade_part_label_layout(rec: dict, table_name: str) -> None:
         anns_s = str(rec.get("annotations_json") or "").strip()
-        if '"image"' not in anns_s:
+        if '"image"' not in anns_s and '"__transform__"' not in anns_s:
             return
         try:
             r_list = json.loads(anns_s)
@@ -2166,13 +2166,24 @@ def _sync_part_sourced_visual_media(
         if not isinstance(r_list, list):
             return
         upd_ids: set[str] = set()
+        needs_full_recomp = False
         for idx_s, sh in enumerate(r_list):
-            if isinstance(sh, dict) and sh.get("type") == "image" and str(sh.get("label") or "").strip() and sh.get("labelLayoutRev") != 2:
+            if not isinstance(sh, dict):
+                continue
+            if sh.get("type") == "__transform__":
+                try:
+                    z_v = float(sh.get("zoom") or 1.0)
+                except Exception:
+                    z_v = 1.0
+                if abs(z_v - 1.0) > 0.001 and sh.get("zoomCropRev") != 2:
+                    sh["zoomCropRev"] = 2
+                    needs_full_recomp = True
+            elif sh.get("type") == "image" and str(sh.get("label") or "").strip() and sh.get("labelLayoutRev") != 2:
                 sid_l = str(sh.get("id") or "") or f"shape_{idx_s}"
                 sh["id"] = sid_l
                 sh["labelLayoutRev"] = 2
                 upd_ids.add(sid_l)
-        if not upd_ids:
+        if not upd_ids and not needs_full_recomp:
             return
         img_str = str(rec.get("image_path") or "").strip()
         orig_str = str(rec.get("original_image_path") or img_str).strip()
@@ -2184,7 +2195,12 @@ def _sync_part_sourced_visual_media(
             return
         new_anns = json.dumps(r_list)
         from utils.image_annotator import patch_visual_media_composite_image_shapes
-        patch_visual_media_composite_image_shapes(orig_p, img_p, new_anns, updated_shape_ids=upd_ids)
+        patch_visual_media_composite_image_shapes(
+            orig_p,
+            img_p,
+            new_anns,
+            updated_shape_ids=None if needs_full_recomp else upd_ids,
+        )
         rec["annotations_json"] = new_anns
         conn.execute(f"UPDATE {table_name} SET annotations_json=? WHERE id=?", (new_anns, str(rec.get("id") or "")))
 
@@ -2198,7 +2214,7 @@ def _sync_part_sourced_visual_media(
                 "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM parts WHERE project_id=?",
                 (norm_proj_id,),
             ).fetchone()
-            _sync_cache[(str(DB_PATH), norm_proj_id)] = (
+            _sync_cache[(str(DB_PATH), norm_proj_id, "v2")] = (
                 _time.monotonic(),
                 (
                     int(_m_st2[0] or 0),
@@ -2387,7 +2403,7 @@ def _sync_part_sourced_visual_media(
                                 )
                                 updated_count += 1
 
-        if '"image"' in m_anns_str:
+        if '"image"' in m_anns_str or '"__transform__"' in m_anns_str:
             try:
                 raw_list = json.loads(m_anns_str)
             except Exception:
@@ -2396,8 +2412,21 @@ def _sync_part_sourced_visual_media(
                 updated_shape_ids: set[str] = set()
                 resolved_paths_by_shape_id: dict[str, str] = {}
                 meta_changed = False
+                needs_full_recomp = False
                 for s_idx, s in enumerate(raw_list):
-                    if not isinstance(s, dict) or s.get("type") != "image":
+                    if not isinstance(s, dict):
+                        continue
+                    if s.get("type") == "__transform__":
+                        try:
+                            z_v = float(s.get("zoom") or 1.0)
+                        except Exception:
+                            z_v = 1.0
+                        if abs(z_v - 1.0) > 0.001 and s.get("zoomCropRev") != 2:
+                            s["zoomCropRev"] = 2
+                            needs_full_recomp = True
+                            meta_changed = True
+                        continue
+                    if s.get("type") != "image":
                         continue
                     if str(s.get("label") or "").strip() and s.get("labelLayoutRev") != 2:
                         sid_lbl = str(s.get("id") or "") or f"shape_{s_idx}"
@@ -2452,9 +2481,9 @@ def _sync_part_sourced_visual_media(
                             updated_shape_ids.add(sid)
                         meta_changed = True
 
-                if updated_shape_ids or meta_changed:
+                if updated_shape_ids or needs_full_recomp or meta_changed:
                     new_anns_str = json.dumps(raw_list)
-                    if updated_shape_ids:
+                    if updated_shape_ids or needs_full_recomp:
                         from utils.image_annotator import (
                             patch_visual_media_composite_image_shapes,
                         )
@@ -2471,7 +2500,7 @@ def _sync_part_sourced_visual_media(
                             m_orig_p,
                             m_file_p,
                             new_anns_str,
-                            updated_shape_ids=updated_shape_ids,
+                            updated_shape_ids=None if needs_full_recomp else updated_shape_ids,
                             resolved_paths_by_shape_id=resolved_paths_by_shape_id,
                         )
                     conn.execute(

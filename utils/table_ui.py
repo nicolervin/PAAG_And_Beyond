@@ -687,17 +687,28 @@ def table_has_unsaved_changes(
 ) -> bool:
     """Detect persisted data edits while ignoring action-only table columns."""
     logical_key = logical_table_editor_key(editor_key)
-    if st.session_state.get(f"_reset_table_editor_{logical_key}") and not st.session_state.get(
-        f"_pending_undo_last_edit_{logical_key}"
+    if (
+        st.session_state.get(f"_reset_table_editor_{logical_key}")
+        and not st.session_state.get(f"_pending_undo_last_edit_{logical_key}")
+        and not st.session_state.get(f"_preserve_filter_draft_{logical_key}")
     ):
         return False
     state = get_effective_table_editor_state(editor_key)
     if state.get("added_rows") or (state.get("deleted_rows") and not native_row_selection):
         return True
     ignored = set(ignored_columns)
-    return any(
+    if any(
         any(column not in ignored for column in changes)
         for changes in (state.get("edited_rows") or {}).values()
+    ):
+        return True
+    filter_draft = st.session_state.get(f"_table_filter_id_draft_{logical_key}")
+    return bool(
+        isinstance(filter_draft, dict)
+        and any(
+            isinstance(changes, dict) and any(column not in ignored for column in changes)
+            for changes in filter_draft.values()
+        )
     )
 
 
@@ -1117,7 +1128,7 @@ def clear_unsaved_tracking_state() -> None:
     st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
     for k in list(st.session_state.keys()):
-        if str(k).startswith("_table_subtab_draft_"):
+        if str(k).startswith("_table_subtab_draft_") or str(k).startswith("_table_filter_id_draft_"):
             st.session_state.pop(k, None)
 
 
@@ -2051,7 +2062,7 @@ def _complete_pending_unsaved_nav(
     st.session_state.pop(_UNSAVED_NAV_AFTER_ACTION_KEY, None)
     st.session_state.pop(_UNSAVED_NAV_TRIGGERED_KEY, None)
     for k in list(st.session_state.keys()):
-        if str(k).startswith("_table_subtab_draft_"):
+        if str(k).startswith("_table_subtab_draft_") or str(k).startswith("_table_filter_id_draft_"):
             st.session_state.pop(k, None)
     if not isinstance(pending, dict):
         return
