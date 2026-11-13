@@ -23,6 +23,7 @@ _HTML = """
       <button id="save-fishbone-btn" type="button" title="Save and refresh fishbone changes" class="btn-tool" style="background:#16a34a; color:white; border-color:#16a34a; font-weight:700;">💾 Save &amp; Refresh</button>
       <button id="print-fishbone-btn" type="button" title="Print the fishbone diagram with readable part numbers" class="btn-tool">🖨️ Print</button>
       <button id="add-section-btn" type="button" title="Add new section block" class="btn-tool" style="background:#2563eb; color:white; border-color:#2563eb; font-weight:700;">➕ Add Section</button>
+      <button id="add-sticky-note-btn" type="button" title="Add a digital sticky note to the fishbone canvas" class="btn-tool" style="background:#eab308; color:#1e293b; border-color:#ca8a04; font-weight:700;">📝 Add Sticky Note</button>
       <button id="toggle-palette" type="button" title="Toggle parts palette" class="btn-tool">📦 Parts palette</button>
       <button id="auto-arrange" type="button" title="Auto-arrange sections" class="btn-tool">⚡ Auto-arrange</button>
       <button id="clear-fishbone-btn" type="button" title="Clear parts and/or delete sections from Fishbone" class="btn-tool" style="background:#dc2626; color:white; border-color:#dc2626; font-weight:700;">🗑️ Clear</button>
@@ -66,6 +67,7 @@ _HTML = """
         </defs>
         <g id="fishbone-world"></g>
       </svg>
+      <div id="sticky-notes-layer" class="sticky-notes-layer"></div>
       <div id="fishbone-tooltip" class="fishbone-tooltip" hidden>
         <div class="tooltip-header">
           <div class="tooltip-media">
@@ -137,14 +139,50 @@ _HTML = """
                 <option value="Support Operations">Support Operations / Fabrication</option>
               </select>
             </label>
-            <label class="modal-label" id="add-section-parent-label">
-              <span id="add-section-parent-title">Feeds into (Downstream assembly / line)</span>
-              <select id="add-section-parent" class="modal-select"></select>
-            </label>
+            <div class="modal-label" id="add-section-parent-label">
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                <span id="add-section-parent-title">Feeds into (Downstream assembly / line)</span>
+                <span id="add-section-parent-badge" class="part-uses-badge" style="font-size:.72rem;">None (Root / final assembly)</span>
+              </div>
+              <div id="add-section-parent" class="part-uses-list" style="max-height:150px;"></div>
+            </div>
           </div>
           <div class="modal-buttons">
             <button id="btn-add-section-confirm" type="button" class="btn-modal btn-primary">Create Section</button>
             <button id="btn-add-section-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <!-- Edit Section Modal -->
+      <div id="edit-section-modal" class="canvas-modal" hidden>
+        <div class="modal-card">
+          <h4>Edit Assembly Section</h4>
+          <p id="edit-section-subtitle">Update this section's name, type of production, parent section(s), or delete it.</p>
+          <div class="modal-form">
+            <label class="modal-label">
+              Section name
+              <input type="text" id="edit-section-name" placeholder="e.g. Door Subassembly, Freezer Op 1" style="box-sizing:border-box; width:100%; padding:8px 10px; border:1px solid var(--st-border-color); border-radius:6px; background:var(--st-background-color); color:var(--st-text-color); font-size:.88rem; font-family:inherit;" />
+              <div id="edit-section-error" style="display:none; color:#dc2626; font-size:.8rem; font-weight:600; margin-top:4px;"></div>
+            </label>
+            <label class="modal-label">
+              Type of production
+              <select id="edit-section-type" class="modal-select">
+                <option value="Assembly">Assembly</option>
+                <option value="Support Operations">Support Operations / Fabrication</option>
+              </select>
+            </label>
+            <div class="modal-label" id="edit-section-parent-label">
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                <span id="edit-section-parent-title">Feeds into (Parent / downstream sections)</span>
+                <span id="edit-section-parent-badge" class="part-uses-badge" style="font-size:.72rem;">None</span>
+              </div>
+              <div id="edit-section-parent" class="part-uses-list" style="max-height:150px;"></div>
+            </div>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-edit-section-confirm" type="button" class="btn-modal btn-primary">Save Changes</button>
+            <button id="btn-edit-section-delete" type="button" class="btn-modal" style="background:#fee2e2; color:#b91c1c; border-color:#fca5a5;">Delete Section…</button>
+            <button id="btn-edit-section-cancel" type="button" class="btn-modal btn-cancel">Cancel</button>
           </div>
         </div>
       </div>
@@ -211,7 +249,7 @@ _HTML = """
           </div>
         </div>
       </div>
-      <div class="fishbone-hint">Drag blocks to arrange · Drag part onto another part to stack as model variants (click N× badge to edit variant ties) · Drag circle handle or edge snap nodes to connect · Click arrow or × to edit/delete</div>
+      <div class="fishbone-hint">Drag blocks to arrange · Drag part onto another part to stack as model variants (click N× badge to edit variant ties) · Click 📝 Add Sticky Note to add resizable/rotatable notes · Drag circle handle or edge snap nodes to connect · Click arrow or ✎ to edit/delete</div>
     </div>
   </div>
 </div>
@@ -257,7 +295,7 @@ _CSS = """
 .palette-thumb { width: 38px; height: 38px; border-radius: 4px; object-fit: contain; background: var(--st-secondary-background-color); flex-shrink: 0; }
 .palette-no-thumb { width: 38px; height: 38px; border-radius: 4px; background: var(--st-secondary-background-color); display: grid; place-items: center; font-size: .65rem; color: var(--st-secondary-text-color); flex-shrink: 0; }
 .palette-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; }
-.palette-pn { font-weight: 700; font-size: .82rem; color: var(--st-primary-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-pn { font-weight: 700; font-size: .82rem; color: var(--st-primary-color); white-space: normal; overflow-wrap: anywhere; word-break: break-all; line-height: 1.15; }
 .palette-desc { font-size: .74rem; color: var(--st-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.1; }
 .palette-meta { font-size: .7rem; color: var(--st-secondary-text-color); display: flex; gap: 6px; align-items: center; }
 .palette-badge { padding: 1px 5px; border-radius: 4px; font-size: .65rem; font-weight: 700; background: #6366f1; color: white; }
@@ -299,13 +337,15 @@ _CSS = """
 .conn-delete-btn { cursor: pointer; opacity: 0.92; transition: opacity .12s ease; }
 .conn-delete-btn:hover { opacity: 1; }
 
-/* Section delete button styling - keep stationary without scale transform to prevent jitter */
-.section-remove-btn { cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
+/* Section edit button styling - keep stationary without scale transform to prevent jitter */
+.section-remove-btn, .section-edit-btn { cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .12s ease; }
 .section-node:hover .section-remove-btn,
-.section-node.selected .section-remove-btn { opacity: 0.88; pointer-events: auto; }
-.section-remove-btn:hover { opacity: 1 !important; }
-.section-remove-btn circle.sec-del-circle { transition: fill .12s ease; }
-.section-remove-btn:hover circle.sec-del-circle { fill: #dc2626; }
+.section-node.selected .section-remove-btn,
+.section-node:hover .section-edit-btn,
+.section-node.selected .section-edit-btn { opacity: 0.92; pointer-events: auto; }
+.section-remove-btn:hover, .section-edit-btn:hover { opacity: 1 !important; }
+.section-remove-btn circle.sec-del-circle, .section-edit-btn circle.sec-edit-circle { transition: fill .12s ease; }
+.section-remove-btn:hover circle.sec-del-circle, .section-edit-btn:hover circle.sec-edit-circle { fill: #2563eb; }
 
 /* Part card styling */
 .part-card { cursor: grab; user-select: none; }
@@ -422,6 +462,264 @@ _CSS = """
 
 .fishbone-shell:fullscreen { width: 100vw; height: 100vh; min-height: 0; border: 0; border-radius: 0; }
 .fishbone-shell:fullscreen .fishbone-viewport { min-height: 0; }
+
+/* Digital Sticky Notes Layer */
+.sticky-notes-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+  z-index: 12;
+}
+.sticky-note-card {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.22), 0 2px 5px rgba(15, 23, 42, 0.14);
+  user-select: none;
+  transition: box-shadow 0.15s ease;
+  min-width: 110px;
+  min-height: 90px;
+  --note-bg: #fef08a;
+  --note-header: #fde047;
+  --note-border: #eab308;
+  --note-text: #1e293b;
+  background: var(--note-bg);
+  border: 1.5px solid var(--note-border);
+  color: var(--note-text);
+}
+.sticky-note-card:hover,
+.sticky-note-card:focus-within {
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.3), 0 3px 8px rgba(15, 23, 42, 0.18);
+  z-index: 18;
+}
+.sticky-note-card.color-yellow { --note-bg: #fef08a; --note-header: #fde047; --note-border: #eab308; --note-text: #1e293b; }
+.sticky-note-card.color-pink   { --note-bg: #fbcfe8; --note-header: #f9a8d4; --note-border: #ec4899; --note-text: #1e293b; }
+.sticky-note-card.color-blue   { --note-bg: #bae6fd; --note-header: #7dd3fc; --note-border: #0284c7; --note-text: #0f172a; }
+.sticky-note-card.color-green  { --note-bg: #bbf7d0; --note-header: #86efac; --note-border: #16a34a; --note-text: #0f172a; }
+.sticky-note-card.color-orange { --note-bg: #fed7aa; --note-header: #fdba74; --note-border: #ea580c; --note-text: #1e293b; }
+.sticky-note-card.color-purple { --note-bg: #e9d5ff; --note-header: #d8b4fe; --note-border: #9333ea; --note-text: #1e293b; }
+
+/* Diamond orientation: true rotated diamond silhouette that scales independently in X and Y */
+.sticky-note-card.orientation-diamond {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.sticky-note-card.orientation-diamond:hover,
+.sticky-note-card.orientation-diamond:focus-within {
+  box-shadow: none;
+}
+.sticky-diamond-svg {
+  display: none;
+}
+.sticky-note-card.orientation-diamond .sticky-diamond-svg {
+  display: block;
+  position: absolute;
+  left: -20%;
+  top: -20%;
+  width: 140%;
+  height: 140%;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+  filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.24));
+}
+.sticky-note-card.orientation-diamond .sticky-diamond-poly {
+  fill: var(--note-bg);
+  stroke: var(--note-border);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  pointer-events: auto;
+}
+.sticky-note-card.orientation-diamond .sticky-note-header {
+  background: rgba(255, 255, 255, 0.36);
+  border-bottom: 1px dashed var(--note-border);
+  border-radius: 4px;
+}
+
+.sticky-note-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--note-header);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 5px 5px 0 0;
+  cursor: grab;
+  flex-shrink: 0;
+}
+.sticky-note-header:active {
+  cursor: grabbing;
+}
+.sticky-note-grip {
+  font-size: 0.72rem;
+  font-weight: 800;
+  opacity: 0.65;
+  letter-spacing: -1px;
+  padding-right: 2px;
+  cursor: grab;
+}
+.sticky-color-swatches {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.sticky-color-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.35);
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.1s ease, border-color 0.1s ease;
+}
+.sticky-color-dot:hover {
+  transform: scale(1.22);
+}
+.sticky-color-dot.active {
+  border: 2px solid #0f172a;
+  transform: scale(1.15);
+}
+.sticky-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+.sticky-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 1px solid rgba(15, 23, 42, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  color: #0f172a;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.sticky-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: #0f172a;
+}
+.sticky-icon-btn.delete-btn:hover {
+  background: #ef4444;
+  color: white;
+  border-color: #dc2626;
+}
+.sticky-note-textarea {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--note-text);
+  font-family: inherit;
+  font-size: 0.83rem;
+  font-weight: 500;
+  line-height: 1.35;
+  padding: 6px 8px 2px 8px;
+  user-select: text;
+  cursor: text;
+}
+.sticky-note-textarea::placeholder {
+  color: rgba(15, 23, 42, 0.45);
+  font-style: italic;
+}
+.sticky-note-footer {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 2px 14px 4px 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: rgba(15, 23, 42, 0.72);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+.sticky-note-size-pill {
+  font-size: 0.63rem;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  background: rgba(255, 255, 255, 0.65);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.sticky-note-card.resizing .sticky-note-size-pill,
+.sticky-note-card:hover .sticky-note-size-pill {
+  opacity: 0.85;
+}
+.sticky-note-author {
+  margin-left: auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* 2-Direction Resize Handles (Width, Height, and 2D Corner) */
+.sticky-resize-e {
+  position: absolute;
+  top: 24px;
+  right: -4px;
+  width: 8px;
+  bottom: 12px;
+  cursor: ew-resize;
+  z-index: 4;
+}
+.sticky-resize-s {
+  position: absolute;
+  left: 8px;
+  right: 12px;
+  bottom: -4px;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 4;
+}
+.sticky-resize-se {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  z-index: 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 1px;
+}
+.sticky-resize-se::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgba(15, 23, 42, 0.45);
+  border-bottom: 2px solid rgba(15, 23, 42, 0.45);
+}
 """
 
 _JS = """
@@ -761,6 +1059,7 @@ export default function renderFishbone(component) {
   const viewport = parentElement.querySelector(".fishbone-viewport")
   const svg = parentElement.querySelector("#fishbone-svg")
   const world = parentElement.querySelector("#fishbone-world")
+  const stickyNotesLayer = parentElement.querySelector("#sticky-notes-layer")
   const tooltip = parentElement.querySelector("#fishbone-tooltip")
   const tooltipImage = parentElement.querySelector("#tooltip-image")
   const tooltipNoImage = parentElement.querySelector("#tooltip-no-image")
@@ -805,6 +1104,7 @@ export default function renderFishbone(component) {
   if (assemblyModeGroupOnly) assemblyModeGroupOnly.onchange = updateAssemblyModalMode
 
   const addSectionBtn = parentElement.querySelector("#add-section-btn")
+  const addStickyNoteBtn = parentElement.querySelector("#add-sticky-note-btn")
   const addSectionModal = parentElement.querySelector("#add-section-modal")
   const addSectionName = parentElement.querySelector("#add-section-name")
   const addSectionType = parentElement.querySelector("#add-section-type")
@@ -812,6 +1112,18 @@ export default function renderFishbone(component) {
   const addSectionParent = parentElement.querySelector("#add-section-parent")
   const btnAddSectionConfirm = parentElement.querySelector("#btn-add-section-confirm")
   const btnAddSectionCancel = parentElement.querySelector("#btn-add-section-cancel")
+
+  const editSectionModal = parentElement.querySelector("#edit-section-modal")
+  const editSectionSubtitle = parentElement.querySelector("#edit-section-subtitle")
+  const editSectionName = parentElement.querySelector("#edit-section-name")
+  const editSectionError = parentElement.querySelector("#edit-section-error")
+  const editSectionType = parentElement.querySelector("#edit-section-type")
+  const editSectionParentLabel = parentElement.querySelector("#edit-section-parent-label")
+  const editSectionParentTitle = parentElement.querySelector("#edit-section-parent-title")
+  const editSectionParent = parentElement.querySelector("#edit-section-parent")
+  const btnEditSectionConfirm = parentElement.querySelector("#btn-edit-section-confirm")
+  const btnEditSectionDelete = parentElement.querySelector("#btn-edit-section-delete")
+  const btnEditSectionCancel = parentElement.querySelector("#btn-edit-section-cancel")
 
   const connModal = parentElement.querySelector("#conn-edit-modal")
   const connDesc = parentElement.querySelector("#conn-edit-desc")
@@ -918,8 +1230,10 @@ export default function renderFishbone(component) {
   const parts = data.parts || []
   const paletteItems = data.palette_items || []
   const allSections = data.all_sections || sections
+  const stickyNotes = (data.sticky_notes || []).map(sn => ({ ...sn }))
+  const currentEditor = String(data.current_editor || "").trim() || "Collaborator"
 
-  const dataSignature = `${sections.map(s => `${s.id}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${paletteItems.length}`
+  const dataSignature = `${sections.map(s => `${s.id}:${s.name}:${s.type}:${s.parent_id || ''}:${s.grid_x}:${s.grid_y}`).join("|")}::${connections.map(c => `${c.id}:${c.from_section_id}:${c.to_section_id}:${c.from_node || ''}:${c.to_node || ''}`).join("|")}::${parts.map(p => `${p.id}:${p.section_id}:${p.quantity}:${p.use_description || ''}`).join("|")}::${stickyNotes.map(sn => `${sn.id}:${sn.canvas_x}:${sn.canvas_y}:${sn.width}:${sn.height}:${sn.color}:${sn.orientation}:${sn.text || ''}:${sn.author_name || ''}`).join("|")}::${paletteItems.length}`
 
   // Track which sections each part_id is placed in (and individual cards/uses per section)
   const partSectionsMap = new Map()
@@ -967,7 +1281,8 @@ export default function renderFishbone(component) {
   if (state.signature !== dataSignature) {
     state.signature = dataSignature
   }
-  summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts`
+  const stickySummarySuffix = stickyNotes.length > 0 ? ` · ${stickyNotes.length} sticky note${stickyNotes.length === 1 ? "" : "s"}` : ""
+  summary.textContent = `${sections.length} sections · ${connections.length} connections · ${parts.length} placed parts${stickySummarySuffix}`
 
   // Palette toggle
   togglePaletteBtn.onclick = () => {
@@ -1081,33 +1396,76 @@ export default function renderFishbone(component) {
         }
       }
     }
+    let addSelectedParentIds = []
+    const addSectionParentBadge = parentElement.querySelector("#add-section-parent-badge")
+
+    function updateAddSectionParentBadge() {
+      const isSupport = addSectionType ? addSectionType.value === "Support Operations" : false
+      if (!addSectionParentBadge) return
+      if (addSelectedParentIds.length === 0) {
+        addSectionParentBadge.textContent = isSupport ? "None (Standalone fabrication)" : "None (Root / final assembly)"
+      } else if (addSelectedParentIds.length === 1) {
+        const sName = sectionNameById.get(addSelectedParentIds[0]) || "1 section"
+        addSectionParentBadge.textContent = `Feeds into: ${sName}`
+      } else {
+        const pName = sectionNameById.get(addSelectedParentIds[0]) || "Primary"
+        addSectionParentBadge.textContent = `${addSelectedParentIds.length} sections (Primary: ${pName})`
+      }
+    }
+
     function updateAddSectionParentVisibility() {
       const isSupport = addSectionType ? addSectionType.value === "Support Operations" : false
       const parentTitle = parentElement.querySelector("#add-section-parent-title")
       if (parentTitle) {
-        parentTitle.textContent = isSupport ? "Feeds into (Downstream assembly / line)" : "Feeds into (Parent assembly)"
+        parentTitle.textContent = isSupport ? "Feeds into (Downstream section(s))" : "Feeds into (Parent / downstream section(s))"
       }
       if (addSectionParentLabel) {
         addSectionParentLabel.style.display = "flex"
       }
       if (addSectionParent) {
         addSectionParent.replaceChildren()
-        const noneOpt = document.createElement("option")
-        noneOpt.value = ""
-        noneOpt.textContent = isSupport ? "(None - Standalone fabrication)" : "(None - Root / final assembly)"
-        addSectionParent.appendChild(noneOpt)
-        allSections.forEach(s => {
-          if (s.inactive) return
-          const opt = document.createElement("option")
-          opt.value = s.id
-          opt.textContent = `${s.name}`
-          addSectionParent.appendChild(opt)
-        })
+        const activeList = allSections.filter(s => !s.inactive)
+        if (activeList.length === 0) {
+          const emptyMsg = document.createElement("div")
+          emptyMsg.style.cssText = "padding:6px 8px; font-size:.8rem; color:var(--st-secondary-text-color); font-style:italic;"
+          emptyMsg.textContent = "No existing sections yet — this will be a root section."
+          addSectionParent.appendChild(emptyMsg)
+        } else {
+          activeList.forEach(s => {
+            const sid = String(s.id)
+            const isChecked = addSelectedParentIds.includes(sid)
+            const row = document.createElement("label")
+            row.className = `part-uses-row${isChecked ? " selected" : ""}`
+            row.style.cursor = "pointer"
+            const cb = document.createElement("input")
+            cb.type = "checkbox"
+            cb.value = sid
+            cb.checked = isChecked
+            cb.onchange = () => {
+              if (cb.checked) {
+                if (!addSelectedParentIds.includes(sid)) addSelectedParentIds.push(sid)
+                row.classList.add("selected")
+              } else {
+                addSelectedParentIds = addSelectedParentIds.filter(id => id !== sid)
+                row.classList.remove("selected")
+              }
+              updateAddSectionParentBadge()
+            }
+            const nameSpan = document.createElement("span")
+            nameSpan.className = "part-uses-sec-name"
+            nameSpan.textContent = s.name
+            row.appendChild(cb)
+            row.appendChild(nameSpan)
+            addSectionParent.appendChild(row)
+          })
+        }
       }
+      updateAddSectionParentBadge()
     }
 
     addSectionBtn.onclick = () => {
       if (addSectionName) addSectionName.value = ""
+      addSelectedParentIds = []
       validateAddSectionName(false)
       if (addSectionType) addSectionType.value = "Assembly"
       updateAddSectionParentVisibility()
@@ -1138,7 +1496,8 @@ export default function renderFishbone(component) {
         }
         const categoryVal = addSectionType ? addSectionType.value : "Assembly"
         const chosenType = categoryVal === "Support Operations" ? "Support Operations" : "Assembly"
-        let parentId = addSectionParent && addSectionParent.value ? addSectionParent.value : null
+        const parentIds = [...addSelectedParentIds]
+        const parentId = parentIds.length > 0 ? parentIds[0] : null
         addSectionModal.hidden = true
 
         let nextX = 160
@@ -1168,10 +1527,285 @@ export default function renderFishbone(component) {
           name: name,
           section_type: chosenType,
           parent_id: parentId,
+          parent_ids: parentIds,
           grid_x: nextX,
           grid_y: nextY,
         })
       }
+    }
+  }
+
+  // Edit Section Modal Handling
+  let editingSectionTarget = null
+  let editSelectedParentIds = []
+  const editSectionParentBadge = parentElement.querySelector("#edit-section-parent-badge")
+
+  function findDuplicateSectionByName(rawName, excludeId) {
+    const normalized = String(rawName || "").trim().toLowerCase()
+    if (!normalized) return null
+    const pool = Array.isArray(allSections) && allSections.length > 0 ? allSections : sections
+    return pool.find(
+      s => String(s.id) !== String(excludeId) && String(s.name || "").trim().toLowerCase() === normalized
+    ) || null
+  }
+
+  function getUpstreamSectionIds(targetId) {
+    const blocked = new Set([String(targetId)])
+    const pool = Array.isArray(allSections) && allSections.length > 0 ? allSections : sections
+    let added = true
+    while (added) {
+      added = false
+      pool.forEach(s => {
+        const sid = String(s.id)
+        const pid = s.parent_id ? String(s.parent_id) : ""
+        if (pid && blocked.has(pid) && !blocked.has(sid)) {
+          blocked.add(sid)
+          added = true
+        }
+      })
+      connections.forEach(c => {
+        if (c.connection_type === "subassembly") {
+          const fromId = String(c.from_section_id)
+          const toId = String(c.to_section_id)
+          if (blocked.has(toId) && !blocked.has(fromId)) {
+            blocked.add(fromId)
+            added = true
+          }
+        }
+      })
+    }
+    return blocked
+  }
+
+  function validateEditSectionName(showEmptyError = false) {
+    if (!editingSectionTarget) return false
+    const name = (editSectionName ? editSectionName.value : "").trim()
+    const duplicate = name ? findDuplicateSectionByName(name, editingSectionTarget.id) : null
+    if (duplicate) {
+      if (editSectionError) {
+        editSectionError.textContent = `A section named "${duplicate.name}" already exists. Section names must be unique.`
+        editSectionError.style.display = "block"
+      }
+      if (editSectionName) {
+        editSectionName.style.borderColor = "#dc2626"
+      }
+      if (btnEditSectionConfirm) {
+        btnEditSectionConfirm.disabled = true
+        btnEditSectionConfirm.style.opacity = "0.55"
+        btnEditSectionConfirm.style.cursor = "not-allowed"
+      }
+      return false
+    }
+    if (!name && showEmptyError) {
+      if (editSectionError) {
+        editSectionError.textContent = "Please enter a unique section name."
+        editSectionError.style.display = "block"
+      }
+      if (editSectionName) {
+        editSectionName.style.borderColor = "#dc2626"
+      }
+      return false
+    }
+    if (editSectionError) {
+      editSectionError.textContent = ""
+      editSectionError.style.display = "none"
+    }
+    if (editSectionName) {
+      editSectionName.style.borderColor = "var(--st-border-color)"
+    }
+    if (btnEditSectionConfirm) {
+      btnEditSectionConfirm.disabled = false
+      btnEditSectionConfirm.style.opacity = ""
+      btnEditSectionConfirm.style.cursor = ""
+    }
+    return Boolean(name)
+  }
+
+  function updateEditSectionParentBadge() {
+    const isSupport = editSectionType ? editSectionType.value === "Support Operations" : false
+    if (!editSectionParentBadge) return
+    if (editSelectedParentIds.length === 0) {
+      editSectionParentBadge.textContent = isSupport ? "None (Standalone fabrication)" : "None (Root / final assembly)"
+    } else if (editSelectedParentIds.length === 1) {
+      const sName = sectionNameById.get(editSelectedParentIds[0]) || "1 section"
+      editSectionParentBadge.textContent = `Feeds into: ${sName}`
+    } else {
+      const pName = sectionNameById.get(editSelectedParentIds[0]) || "Primary"
+      editSectionParentBadge.textContent = `${editSelectedParentIds.length} sections (Primary: ${pName})`
+    }
+  }
+
+  function populateEditSectionParentOptions(selectedIds) {
+    if (!editingSectionTarget || !editSectionParent) return
+    editSelectedParentIds = Array.isArray(selectedIds) ? [...selectedIds] : (selectedIds ? [String(selectedIds)] : [])
+    const isSupport = editSectionType ? editSectionType.value === "Support Operations" : false
+    if (editSectionParentTitle) {
+      editSectionParentTitle.textContent = isSupport
+        ? "Feeds into (Downstream section(s))"
+        : "Feeds into (Parent / downstream section(s))"
+    }
+    if (editSectionParentLabel) {
+      editSectionParentLabel.style.display = "flex"
+    }
+    const blockedIds = getUpstreamSectionIds(editingSectionTarget.id)
+    editSectionParent.replaceChildren()
+
+    const candidateSections = allSections.filter(s => {
+      const sid = String(s.id)
+      if (s.inactive && !editSelectedParentIds.includes(sid)) return false
+      if (blockedIds.has(sid)) return false
+      return true
+    })
+
+    if (candidateSections.length === 0) {
+      const emptyMsg = document.createElement("div")
+      emptyMsg.style.cssText = "padding:6px 8px; font-size:.8rem; color:var(--st-secondary-text-color); font-style:italic;"
+      emptyMsg.textContent = "No eligible downstream sections available."
+      editSectionParent.appendChild(emptyMsg)
+    } else {
+      candidateSections.forEach(s => {
+        const sid = String(s.id)
+        const isChecked = editSelectedParentIds.includes(sid)
+        const row = document.createElement("label")
+        row.className = `part-uses-row${isChecked ? " selected" : ""}`
+        row.style.cursor = "pointer"
+        const cb = document.createElement("input")
+        cb.type = "checkbox"
+        cb.value = sid
+        cb.checked = isChecked
+        cb.onchange = () => {
+          if (cb.checked) {
+            if (!editSelectedParentIds.includes(sid)) editSelectedParentIds.push(sid)
+            row.classList.add("selected")
+          } else {
+            editSelectedParentIds = editSelectedParentIds.filter(id => id !== sid)
+            row.classList.remove("selected")
+          }
+          updateEditSectionParentBadge()
+        }
+        const nameSpan = document.createElement("span")
+        nameSpan.className = "part-uses-sec-name"
+        nameSpan.textContent = s.name
+        row.appendChild(cb)
+        row.appendChild(nameSpan)
+        editSectionParent.appendChild(row)
+      })
+    }
+    updateEditSectionParentBadge()
+  }
+
+  function openEditSectionModal(section) {
+    if (!editSectionModal || !section) return
+    editingSectionTarget = section
+    if (editSectionSubtitle) {
+      editSectionSubtitle.textContent = `Editing "${section.name}" — update its name, type of production, parent section(s), or delete it.`
+    }
+    if (editSectionName) {
+      editSectionName.value = section.name || ""
+    }
+    const currentType = section.type === "Support Operations" ? "Support Operations" : "Assembly"
+    if (editSectionType) {
+      editSectionType.value = currentType
+    }
+    const initialParentIds = []
+    if (section.parent_id) {
+      initialParentIds.push(String(section.parent_id))
+    }
+    connections.forEach(c => {
+      if (String(c.from_section_id) === String(section.id) && c.connection_type !== "series") {
+        const tid = String(c.to_section_id)
+        if (tid && !initialParentIds.includes(tid)) {
+          initialParentIds.push(tid)
+        }
+      }
+    })
+    if (initialParentIds.length === 0) {
+      connections.forEach(c => {
+        if (String(c.from_section_id) === String(section.id)) {
+          const tid = String(c.to_section_id)
+          if (tid && !initialParentIds.includes(tid)) {
+            initialParentIds.push(tid)
+          }
+        }
+      })
+    }
+
+    populateEditSectionParentOptions(initialParentIds)
+    validateEditSectionName(false)
+    editSectionModal.hidden = false
+    setTimeout(() => {
+      if (editSectionName) {
+        editSectionName.focus()
+        editSectionName.select()
+      }
+    }, 50)
+  }
+
+  if (editSectionName) {
+    editSectionName.oninput = () => {
+      validateEditSectionName(false)
+    }
+    editSectionName.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault()
+        if (btnEditSectionConfirm) btnEditSectionConfirm.click()
+      } else if (e.key === "Escape") {
+        e.preventDefault()
+        if (editSectionModal) editSectionModal.hidden = true
+      }
+    }
+  }
+
+  if (editSectionType) {
+    editSectionType.onchange = () => {
+      populateEditSectionParentOptions(editSelectedParentIds)
+    }
+  }
+
+  if (btnEditSectionCancel) {
+    btnEditSectionCancel.onclick = () => {
+      if (editSectionModal) editSectionModal.hidden = true
+    }
+  }
+
+  if (btnEditSectionDelete) {
+    btnEditSectionDelete.onclick = () => {
+      if (!editingSectionTarget) return
+      const targetSec = editingSectionTarget
+      if (editSectionModal) editSectionModal.hidden = true
+      if (typeof isFishboneFullScreen === "function" && isFishboneFullScreen() && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {})
+      }
+      component.setTriggerValue("delete_section_request", {
+        section_id: targetSec.id,
+        section_name: targetSec.name,
+      })
+    }
+  }
+
+  if (btnEditSectionConfirm) {
+    btnEditSectionConfirm.onclick = () => {
+      if (!editingSectionTarget) return
+      if (!validateEditSectionName(true)) {
+        if (editSectionName) editSectionName.focus()
+        return
+      }
+      const name = (editSectionName ? editSectionName.value : "").trim()
+      if (!name) return
+      const categoryVal = editSectionType ? editSectionType.value : "Assembly"
+      const chosenType = categoryVal === "Support Operations" ? "Support Operations" : "Assembly"
+      const parentIds = [...editSelectedParentIds]
+      const parentId = parentIds.length > 0 ? parentIds[0] : null
+      const targetSec = editingSectionTarget
+      if (editSectionModal) editSectionModal.hidden = true
+
+      component.setTriggerValue("edit_section", {
+        section_id: targetSec.id,
+        name: name,
+        section_type: chosenType,
+        parent_id: parentId,
+        parent_ids: parentIds,
+      })
     }
   }
 
@@ -2283,7 +2917,7 @@ export default function renderFishbone(component) {
 
     const secParts = partsBySection.get(sec.id) || []
     sec.partClusters = clusterSectionParts(secParts, sec.id)
-    const cardW = 68
+    const cardW = 78
     const gap = 12
     let rowW = 28
     sec.partClusters.forEach(cl => {
@@ -2796,20 +3430,19 @@ export default function renderFishbone(component) {
       fill: "rgba(255, 255, 255, 0.85)", "font-size": 10
     })
     if (isSupport) {
-      let targetName = ""
+      const targetNames = []
       if (section.parent_id) {
         const pSec = sectionById.get(section.parent_id)
-        if (pSec) targetName = pSec.name
+        if (pSec && !targetNames.includes(pSec.name)) targetNames.push(pSec.name)
       }
-      if (!targetName) {
-        const outConn = connections.find(c => c.from_section_id === section.id)
-        if (outConn) {
-          const tSec = sectionById.get(outConn.to_section_id)
-          if (tSec) targetName = tSec.name
+      connections.forEach(c => {
+        if (String(c.from_section_id) === String(section.id)) {
+          const tSec = sectionById.get(c.to_section_id)
+          if (tSec && !targetNames.includes(tSec.name)) targetNames.push(tSec.name)
         }
-      }
-      if (targetName) {
-        count.textContent = `🏭 Built here ➔ Feeds ${targetName} · ${secParts.length} parts`
+      })
+      if (targetNames.length > 0) {
+        count.textContent = `🏭 Built here ➔ Feeds ${targetNames.join(", ")} · ${secParts.length} parts`
       } else {
         count.textContent = `🏭 Fabrication / Support Ops · ${secParts.length} parts`
       }
@@ -2922,33 +3555,47 @@ export default function renderFishbone(component) {
     }
     group.appendChild(port)
 
-    // Section Delete Button (red × on hover or click)
-    const secDelBtn = svgElement("g", {
-      class: "section-remove-btn",
+    // Section Edit Button (pencil icon on hover or click)
+    const secEditBtn = svgElement("g", {
+      class: "section-remove-btn section-edit-btn",
       transform: `translate(${secWidth / 2 - 16} ${-secHeight / 2 + 16})`,
-      title: `Delete section "${section.name}"`
+      title: `Edit section "${section.name}"`
     })
+    const secEditTitle = svgElement("title")
+    secEditTitle.textContent = `Edit section "${section.name}"`
+    secEditBtn.appendChild(secEditTitle)
     // Transparent expanded hit area for smooth steady interaction
-    secDelBtn.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 14, fill: "transparent" }))
-    // Visible red circle badge
-    secDelBtn.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 9, fill: "#ef4444", class: "sec-del-circle" }))
-    const secDelTxt = svgElement("text", {
-      x: 0, y: 3.5, "text-anchor": "middle", fill: "white", "font-size": 12, "font-weight": 700,
+    secEditBtn.appendChild(svgElement("circle", { cx: 0, cy: 0, r: 14, fill: "transparent" }))
+    // Visible circle badge
+    secEditBtn.appendChild(svgElement("circle", {
+      cx: 0,
+      cy: 0,
+      r: 9.5,
+      fill: isSupport ? "#475569" : "#3b82f6",
+      stroke: "#ffffff",
+      "stroke-width": 1.2,
+      class: "sec-del-circle sec-edit-circle"
+    }))
+    // Crisp SVG pencil icon centered at (0, 0)
+    const pencilIcon = svgElement("path", {
+      d: "M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z M15 5l4 4",
+      transform: "translate(-6 -6) scale(0.5)",
+      fill: "none",
+      stroke: "#ffffff",
+      "stroke-width": 2.2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
       "pointer-events": "none"
     })
-    secDelTxt.textContent = "×"
-    secDelBtn.appendChild(secDelTxt)
-    secDelBtn.onmousedown = (e) => {
+    secEditBtn.appendChild(pencilIcon)
+    secEditBtn.onmousedown = (e) => {
       e.stopPropagation()
     }
-    secDelBtn.onclick = (e) => {
+    secEditBtn.onclick = (e) => {
       e.stopPropagation()
-      component.setTriggerValue("delete_section_request", {
-        section_id: section.id,
-        section_name: section.name
-      })
+      openEditSectionModal(section)
     }
-    group.appendChild(secDelBtn)
+    group.appendChild(secEditBtn)
 
     // Parts Tray inside the block
     if (secParts.length === 0) {
@@ -2959,7 +3606,7 @@ export default function renderFishbone(component) {
       placeholder.textContent = "Drop parts here from palette"
       group.appendChild(placeholder)
     } else {
-      const cardW = 68
+      const cardW = 78
       const cardH = 78
       const gap = 12
       let curX = -secWidth / 2 + 14
@@ -3044,7 +3691,13 @@ export default function renderFishbone(component) {
           "data-full-pn": pnStr,
           "data-card-w": cardW
         })
-        pnText.textContent = pnStr.length > 10 ? `${pnStr.slice(0, 9)}…` : pnStr
+        const displayPn = pnStr.length > 15 ? `…${pnStr.slice(-13)}` : pnStr
+        pnText.textContent = displayPn
+        if (displayPn.length > 10) {
+          pnText.setAttribute("font-size", displayPn.length > 13 ? "7.4" : (displayPn.length > 11 ? "8.0" : "8.5"))
+          pnText.setAttribute("textLength", String(cardW - 6))
+          pnText.setAttribute("lengthAdjust", "spacingAndGlyphs")
+        }
         card.appendChild(pnText)
 
         // Variant badge (click to edit model variant ties) and suffix counter for cascaded clusters
@@ -4329,8 +4982,341 @@ export default function renderFishbone(component) {
   // Viewport Pan and Zoom
   function updateTransform() {
     world.setAttribute("transform", `translate(${state.x} ${state.y}) scale(${state.scale})`)
+    if (stickyNotesLayer) {
+      stickyNotesLayer.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`
+    }
     saveFishboneView(storageKey, state)
   }
+
+  const STICKY_COLORS = [
+    { id: "yellow", hex: "#fde047", label: "Yellow" },
+    { id: "pink", hex: "#f9a8d4", label: "Pink" },
+    { id: "blue", hex: "#7dd3fc", label: "Blue" },
+    { id: "green", hex: "#86efac", label: "Green" },
+    { id: "orange", hex: "#fdba74", label: "Orange" },
+    { id: "purple", hex: "#d8b4fe", label: "Purple" },
+  ]
+
+  function renderStickyNotes() {
+    if (!stickyNotesLayer) return
+    stickyNotesLayer.replaceChildren()
+
+    stickyNotes.forEach((note) => {
+      const noteId = String(note.id || "")
+      if (!noteId) return
+      const color = STICKY_COLORS.some(c => c.id === note.color) ? note.color : "yellow"
+      const orient = note.orientation === "diamond" ? "diamond" : "square"
+      const cx = Number.isFinite(Number(note.canvas_x)) ? Number(note.canvas_x) : 140
+      const cy = Number.isFinite(Number(note.canvas_y)) ? Number(note.canvas_y) : 140
+      const w = clamp(Number(note.width) || 200, 110, 900)
+      const h = clamp(Number(note.height) || 160, 90, 900)
+      const author = String(note.author_name || currentEditor || "Collaborator").trim() || "Collaborator"
+
+      const card = document.createElement("div")
+      card.className = `sticky-note-card color-${color} orientation-${orient}`
+      card.dataset.stickyId = noteId
+      card.style.left = `${cx}px`
+      card.style.top = `${cy}px`
+      card.style.width = `${w}px`
+      card.style.height = `${h}px`
+
+      // Diamond SVG background so diamond notes rotate 45deg visually and scale in 2 directions (width & height)
+      const diamondSvg = svgElement("svg", {
+        class: "sticky-diamond-svg",
+        viewBox: "0 0 100 100",
+        preserveAspectRatio: "none",
+      })
+      const diamondPoly = svgElement("polygon", {
+        class: "sticky-diamond-poly",
+        points: "50,0 100,50 50,100 0,50",
+      })
+      diamondSvg.appendChild(diamondPoly)
+      card.appendChild(diamondSvg)
+
+      const header = document.createElement("div")
+      header.className = "sticky-note-header"
+      header.title = "Drag to move sticky note"
+
+      const grip = document.createElement("span")
+      grip.className = "sticky-note-grip"
+      grip.textContent = "⋮⋮"
+      header.appendChild(grip)
+
+      const swatches = document.createElement("div")
+      swatches.className = "sticky-color-swatches"
+      STICKY_COLORS.forEach((c) => {
+        const dot = document.createElement("button")
+        dot.type = "button"
+        dot.className = `sticky-color-dot${c.id === color ? " active" : ""}`
+        dot.style.background = c.hex
+        dot.title = `Color: ${c.label}`
+        dot.onmousedown = (e) => e.stopPropagation()
+        dot.onclick = (e) => {
+          e.stopPropagation()
+          if (note.color === c.id) return
+          note.color = c.id
+          component.setTriggerValue("upsert_sticky_note", {
+            ...note,
+            color: c.id,
+            text: textarea.value,
+            author_name: note.author_name || author,
+          })
+        }
+        swatches.appendChild(dot)
+      })
+      header.appendChild(swatches)
+
+      const actions = document.createElement("div")
+      actions.className = "sticky-header-actions"
+
+      const orientBtn = document.createElement("button")
+      orientBtn.type = "button"
+      orientBtn.className = "sticky-icon-btn"
+      orientBtn.textContent = orient === "diamond" ? "⬜" : "❖"
+      orientBtn.title = orient === "diamond"
+        ? "Switch to normal rectangle/square orientation"
+        : "Rotate into a diamond shape"
+      orientBtn.onmousedown = (e) => e.stopPropagation()
+      orientBtn.onclick = (e) => {
+        e.stopPropagation()
+        const nextOrient = orient === "diamond" ? "square" : "diamond"
+        note.orientation = nextOrient
+        component.setTriggerValue("upsert_sticky_note", {
+          ...note,
+          orientation: nextOrient,
+          text: textarea.value,
+          author_name: note.author_name || author,
+        })
+      }
+      actions.appendChild(orientBtn)
+
+      const delBtn = document.createElement("button")
+      delBtn.type = "button"
+      delBtn.className = "sticky-icon-btn delete-btn"
+      delBtn.textContent = "×"
+      delBtn.title = "Delete sticky note"
+      delBtn.onmousedown = (e) => e.stopPropagation()
+      delBtn.onclick = (e) => {
+        e.stopPropagation()
+        component.setTriggerValue("delete_sticky_note", { id: noteId })
+      }
+      actions.appendChild(delBtn)
+
+      header.appendChild(actions)
+      card.appendChild(header)
+
+      const textarea = document.createElement("textarea")
+      textarea.className = "sticky-note-textarea"
+      textarea.placeholder = "Write sticky note..."
+      textarea.value = String(note.text || "")
+      let lastCommittedText = textarea.value
+      let debounceTimer = null
+
+      const commitTextChange = () => {
+        if (debounceTimer) {
+          clearTimeout(debounceTimer)
+          debounceTimer = null
+        }
+        if (textarea.value === lastCommittedText) return
+        lastCommittedText = textarea.value
+        note.text = textarea.value
+        note.author_name = currentEditor || author
+        authorSpan.textContent = `✍️ ${note.author_name}`
+        component.setTriggerValue("upsert_sticky_note", {
+          ...note,
+          text: note.text,
+          author_name: note.author_name,
+        })
+      }
+
+      textarea.onmousedown = (e) => e.stopPropagation()
+      textarea.onwheel = (e) => e.stopPropagation()
+      textarea.onkeydown = (e) => {
+        e.stopPropagation()
+        if (e.key === "Escape") {
+          textarea.blur()
+        }
+      }
+      textarea.oninput = () => {
+        note.text = textarea.value
+        note.author_name = currentEditor || author
+        authorSpan.textContent = `✍️ ${note.author_name}`
+        if (debounceTimer) clearTimeout(debounceTimer)
+        debounceTimer = setTimeout(commitTextChange, 900)
+      }
+      textarea.onblur = () => {
+        commitTextChange()
+      }
+      card.appendChild(textarea)
+
+      const footer = document.createElement("div")
+      footer.className = "sticky-note-footer"
+
+      const sizePill = document.createElement("span")
+      sizePill.className = "sticky-note-size-pill"
+      sizePill.textContent = `${Math.round(w)}×${Math.round(h)}`
+      footer.appendChild(sizePill)
+
+      const authorSpan = document.createElement("span")
+      authorSpan.className = "sticky-note-author"
+      authorSpan.textContent = `✍️ ${author}`
+      authorSpan.title = `Edited by ${author}`
+      footer.appendChild(authorSpan)
+
+      card.appendChild(footer)
+
+      // Dragging the sticky note around the Fishbone screen
+      const startDragNote = (downEvt) => {
+        if (downEvt.button !== 0) return
+        downEvt.stopPropagation()
+        downEvt.preventDefault()
+        state.hasUserInteracted = true
+        const startClientX = downEvt.clientX
+        const startClientY = downEvt.clientY
+        const origX = Number(note.canvas_x) || cx
+        const origY = Number(note.canvas_y) || cy
+        let curX = origX
+        let curY = origY
+        let moved = false
+
+        const onMove = (moveEvt) => {
+          const dx = (moveEvt.clientX - startClientX) / (state.scale || 1)
+          const dy = (moveEvt.clientY - startClientY) / (state.scale || 1)
+          if (Math.abs(dx) > 1.5 || Math.abs(dy) > 1.5) moved = true
+          curX = Math.round(origX + dx)
+          curY = Math.round(origY + dy)
+          card.style.left = `${curX}px`
+          card.style.top = `${curY}px`
+        }
+        const onUp = () => {
+          window.removeEventListener("mousemove", onMove)
+          window.removeEventListener("mouseup", onUp)
+          if (moved) {
+            note.canvas_x = curX
+            note.canvas_y = curY
+            component.setTriggerValue("upsert_sticky_note", {
+              ...note,
+              canvas_x: curX,
+              canvas_y: curY,
+              text: textarea.value,
+              author_name: note.author_name || author,
+            })
+          }
+        }
+        window.addEventListener("mousemove", onMove)
+        window.addEventListener("mouseup", onUp)
+      }
+      header.onmousedown = startDragNote
+      diamondPoly.onmousedown = startDragNote
+
+      // 2-Direction Resize Handles: East (width), South (height), South-East (both width & height)
+      const attachResizeHandle = (handleEl, scaleX, scaleY) => {
+        handleEl.onmousedown = (downEvt) => {
+          if (downEvt.button !== 0) return
+          downEvt.stopPropagation()
+          downEvt.preventDefault()
+          state.hasUserInteracted = true
+          card.classList.add("resizing")
+          const startClientX = downEvt.clientX
+          const startClientY = downEvt.clientY
+          const origW = Number(note.width) || w
+          const origH = Number(note.height) || h
+          let curW = origW
+          let curH = origH
+          let resized = false
+
+          const onMove = (moveEvt) => {
+            const dx = (moveEvt.clientX - startClientX) / (state.scale || 1)
+            const dy = (moveEvt.clientY - startClientY) / (state.scale || 1)
+            if (scaleX) {
+              curW = Math.round(clamp(origW + dx, 110, 900))
+              card.style.width = `${curW}px`
+            }
+            if (scaleY) {
+              curH = Math.round(clamp(origH + dy, 90, 900))
+              card.style.height = `${curH}px`
+            }
+            if (curW !== origW || curH !== origH) resized = true
+            sizePill.textContent = `${curW}×${curH}`
+          }
+          const onUp = () => {
+            window.removeEventListener("mousemove", onMove)
+            window.removeEventListener("mouseup", onUp)
+            card.classList.remove("resizing")
+            if (resized) {
+              note.width = curW
+              note.height = curH
+              component.setTriggerValue("upsert_sticky_note", {
+                ...note,
+                width: curW,
+                height: curH,
+                text: textarea.value,
+                author_name: note.author_name || author,
+              })
+            }
+          }
+          window.addEventListener("mousemove", onMove)
+          window.addEventListener("mouseup", onUp)
+        }
+      }
+
+      const resizeE = document.createElement("div")
+      resizeE.className = "sticky-resize-e"
+      resizeE.title = "Drag to scale width horizontally"
+      attachResizeHandle(resizeE, true, false)
+      card.appendChild(resizeE)
+
+      const resizeS = document.createElement("div")
+      resizeS.className = "sticky-resize-s"
+      resizeS.title = "Drag to scale height vertically"
+      attachResizeHandle(resizeS, false, true)
+      card.appendChild(resizeS)
+
+      const resizeSE = document.createElement("div")
+      resizeSE.className = "sticky-resize-se"
+      resizeSE.title = "Drag corner to scale sticky note width and height"
+      attachResizeHandle(resizeSE, true, true)
+      card.appendChild(resizeSE)
+
+      stickyNotesLayer.appendChild(card)
+
+      if (state.focusStickyNoteId && state.focusStickyNoteId === noteId) {
+        state.focusStickyNoteId = null
+        requestAnimationFrame(() => {
+          textarea.focus()
+        })
+      }
+    })
+  }
+
+  if (addStickyNoteBtn) {
+    addStickyNoteBtn.onclick = () => {
+      const vRect = viewport.getBoundingClientRect()
+      const viewCenterW = vRect.width > 80 ? vRect.width / 2 : 360
+      const viewCenterH = vRect.height > 80 ? vRect.height / 2 : 240
+      const defaultW = 200
+      const defaultH = 160
+      const stagger = (stickyNotes.length % 6) * 24
+      const worldX = Math.round(((viewCenterW - state.x) / (state.scale || 1)) - defaultW / 2 + stagger)
+      const worldY = Math.round(((viewCenterH - state.y) / (state.scale || 1)) - defaultH / 2 + stagger)
+      const newId = `sn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      state.focusStickyNoteId = newId
+      component.setTriggerValue("upsert_sticky_note", {
+        id: newId,
+        section_id: null,
+        text: "",
+        author_name: currentEditor,
+        color: "yellow",
+        orientation: "square",
+        canvas_x: worldX,
+        canvas_y: worldY,
+        width: defaultW,
+        height: defaultH,
+      })
+    }
+  }
+
+  renderStickyNotes()
 
   function renderWorld() {
     renderFishbone(component)
@@ -4344,7 +5330,7 @@ export default function renderFishbone(component) {
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
 
-    if (sections.length === 0) {
+    if (sections.length === 0 && stickyNotes.length === 0) {
       minX = 140
       maxX = 540
       minY = 110
@@ -4367,6 +5353,16 @@ export default function renderFishbone(component) {
           minY = Math.min(minY, start.sy, end.sy)
           maxY = Math.max(maxY, start.sy, end.sy)
         }
+      })
+      stickyNotes.forEach(sn => {
+        const nx = Number(sn.canvas_x) || 0
+        const ny = Number(sn.canvas_y) || 0
+        const nw = Number(sn.width) || 200
+        const nh = Number(sn.height) || 160
+        minX = Math.min(minX, nx)
+        maxX = Math.max(maxX, nx + nw)
+        minY = Math.min(minY, ny)
+        maxY = Math.max(maxY, ny + nh)
       })
     }
 
@@ -4453,7 +5449,7 @@ export default function renderFishbone(component) {
     let cardMinX = Infinity, cardMaxX = -Infinity
     matchedClusters.forEach(({ sec, cl }) => {
       const cx0 = sec.sx + (Number(cl.cardX) || 0)
-      const cx1 = cx0 + (Number(cl.cardW) || 68)
+      const cx1 = cx0 + (Number(cl.cardW) || 78)
       cardMinX = Math.min(cardMinX, cx0)
       cardMaxX = Math.max(cardMaxX, cx1)
     })
@@ -4611,7 +5607,7 @@ export default function renderFishbone(component) {
     const MAX_COLS_PER_ROW = 7
     const MAX_ROWS_PER_PAGE = 3
     const MAX_CLUSTERS_PER_PAGE = MAX_COLS_PER_ROW * MAX_ROWS_PER_PAGE
-    const CARD_W = 68
+    const CARD_W = 78
     const CARD_H = 78
     const COL_GAP = 12
     const ROW_GAP = 16
@@ -5029,7 +6025,8 @@ export default function renderFishbone(component) {
                 clClone.querySelectorAll(".part-number-text").forEach(pnEl => {
                   const fullPn = pnEl.getAttribute("data-full-pn") || pnEl.textContent || ""
                   const cardW = Number(pnEl.getAttribute("data-card-w")) || CARD_W
-                  pnEl.textContent = fullPn
+                  const printPn = fullPn.length > 16 ? `…${fullPn.slice(-14)}` : fullPn
+                  pnEl.textContent = printPn
                   if (fullPn.length > 10) {
                     pnEl.setAttribute("font-size", fullPn.length > 13 ? "7.8" : "8.4")
                     pnEl.setAttribute("textLength", String(cardW - 5))
@@ -5119,10 +6116,10 @@ export default function renderFishbone(component) {
 }
 """
 
-_FISHBONE_VISUAL_HOT_RELOAD_REV = 9
+_FISHBONE_VISUAL_HOT_RELOAD_REV = 13
 
 _FISHBONE_COMPONENT = st.components.v2.component(
-    "paag_interactive_fishbone_builder_v44",
+    "paag_interactive_fishbone_builder_v48",
     html=_HTML,
     css=_CSS,
     js=_JS,
@@ -5167,9 +6164,12 @@ def interactive_fishbone(
     parts: list[dict],
     palette_items: list[dict] | None = None,
     all_sections: list[dict] | None = None,
+    sticky_notes: list[dict] | None = None,
+    current_editor: str = "",
     *,
     key: str,
     on_create_section: Callable[[], None] | None = None,
+    on_edit_section: Callable[[], None] | None = None,
     on_move_node: Callable[[], None] | None = None,
     on_auto_arrange: Callable[[], None] | None = None,
     on_create_connection: Callable[[], None] | None = None,
@@ -5184,6 +6184,8 @@ def interactive_fishbone(
     on_move_part_assignment: Callable[[], None] | None = None,
     on_replicate_part_uses: Callable[[], None] | None = None,
     on_unstack_part_variant: Callable[[], None] | None = None,
+    on_upsert_sticky_note: Callable[[], None] | None = None,
+    on_delete_sticky_note: Callable[[], None] | None = None,
     on_undo_last_edit: Callable[[], None] | None = None,
     on_redo_last_edit: Callable[[], None] | None = None,
     on_discard_all_edits: Callable[[], None] | None = None,
@@ -5204,6 +6206,8 @@ def interactive_fishbone(
             "parts": parts,
             "palette_items": palette_items or [],
             "all_sections": all_sections or sections,
+            "sticky_notes": sticky_notes or [],
+            "current_editor": str(current_editor or "").strip(),
             "unsaved_count": int(unsaved_count or 0),
             "can_undo_last": bool(can_undo_last),
             "can_redo_last": bool(can_redo_last),
@@ -5212,6 +6216,7 @@ def interactive_fishbone(
         "width": "stretch",
         "height": "content",
         "on_create_section_change": on_create_section or _noop,
+        "on_edit_section_change": on_edit_section or _noop,
         "on_move_node_change": on_move_node or _noop,
         "on_auto_arrange_change": on_auto_arrange or _noop,
         "on_create_connection_change": on_create_connection or _noop,
@@ -5226,6 +6231,8 @@ def interactive_fishbone(
         "on_move_part_assignment_change": on_move_part_assignment or _noop,
         "on_replicate_part_uses_change": on_replicate_part_uses or _noop,
         "on_unstack_part_variant_change": on_unstack_part_variant or _noop,
+        "on_upsert_sticky_note_change": on_upsert_sticky_note or _noop,
+        "on_delete_sticky_note_change": on_delete_sticky_note or _noop,
         "on_undo_last_edit_change": on_undo_last_edit or _noop,
         "on_redo_last_edit_change": on_redo_last_edit or _noop,
         "on_discard_all_edits_change": on_discard_all_edits or _noop,

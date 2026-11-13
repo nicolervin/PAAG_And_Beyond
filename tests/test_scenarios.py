@@ -240,5 +240,127 @@ class NavigationTableViewTests(unittest.TestCase):
                 store.DB_PATH = orig_db_path
 
 
+class ScenarioActiveAndCopyProjectTests(unittest.TestCase):
+    def test_scenario_active_toggle_and_copy_project_copies_only_active_scenarios(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig_db_path = store.DB_PATH
+            try:
+                store.DB_PATH = Path(tmp_dir) / "active_copy_test.db"
+                store.init_db()
+                source_project_id = store.create_project(
+                    "Prod Washer",
+                    "Washer Gen 1",
+                    "Nicole",
+                    55.0,
+                    product_line="Line A",
+                    takt_time_unit="seconds",
+                    building_location="AP1",
+                )
+                initial_scenarios = store.planning_scenarios(source_project_id, include_archived=True)
+                self.assertEqual(len(initial_scenarios), 1)
+                scen_1_id = str(initial_scenarios[0]["id"])
+
+                # Clone two more scenarios (scen_2 from scen_1, scen_3 from scen_2)
+                scen_2_id = store.clone_planning_scenario(
+                    source_project_id,
+                    scen_1_id,
+                    "Trial Scenario 2",
+                    "2",
+                    50.0,
+                    "Inactive trial",
+                    "Nicole",
+                )
+                scen_3_id = store.clone_planning_scenario(
+                    source_project_id,
+                    scen_2_id,
+                    "Active Scenario 3",
+                    "3",
+                    48.0,
+                    "Child of inactive trial",
+                    "Nicole",
+                )
+
+                # Turn off scen_2 via active=False in save_planning_scenario_rows
+                rows_to_save = [
+                    {
+                        "id": scen_1_id,
+                        "name": initial_scenarios[0]["name"],
+                        "revision_label": initial_scenarios[0]["revision_label"],
+                        "active": True,
+                        "takt_time_s": 55.0,
+                        "takt_time_unit": "seconds",
+                        "change_summary": "",
+                    },
+                    {
+                        "id": scen_2_id,
+                        "name": "Trial Scenario 2",
+                        "revision_label": "2",
+                        "active": False,
+                        "takt_time_s": 50.0,
+                        "takt_time_unit": "seconds",
+                        "change_summary": "Inactive trial",
+                    },
+                    {
+                        "id": scen_3_id,
+                        "name": "Active Scenario 3",
+                        "revision_label": "3",
+                        "active": True,
+                        "takt_time_s": 48.0,
+                        "takt_time_unit": "seconds",
+                        "change_summary": "Child of inactive trial",
+                    },
+                ]
+                store.save_planning_scenario_rows(
+                    source_project_id, scen_1_id, rows_to_save, "Nicole"
+                )
+
+                active_scens = store.planning_scenarios(source_project_id, include_archived=False)
+                all_scens = store.planning_scenarios(source_project_id, include_archived=True)
+                self.assertEqual({str(r["id"]) for r in active_scens}, {scen_1_id, scen_3_id})
+                self.assertEqual(len(all_scens), 3)
+
+                # Verify that turning off all scenarios is blocked
+                with self.assertRaisesRegex(ValueError, "At least one planning scenario must remain Active"):
+                    store.save_planning_scenario_rows(
+                        source_project_id,
+                        scen_1_id,
+                        [{**r, "active": False} for r in rows_to_save],
+                        "Nicole",
+                    )
+
+                # Copy project to new NPI project (active scenarios only)
+                copy_res = store.copy_project(
+                    source_project_id,
+                    name="NPI Washer Gen 2",
+                    program="Washer Gen 2",
+                    revision="B",
+                    takt_time_s=45.0,
+                    product_line="Line B",
+                    takt_time_unit="seconds",
+                    building_location="AP2",
+                    active_scenarios_only=True,
+                    editor_name="Nicole",
+                )
+                new_project_id = str(copy_res["project_id"])
+                self.assertEqual(copy_res["active_scenario_count"], 2)
+
+                new_proj = store.get_project(new_project_id)
+                self.assertIsNotNone(new_proj)
+                self.assertEqual(new_proj["name"], "NPI Washer Gen 2")
+                self.assertEqual(new_proj["program"], "Washer Gen 2")
+                self.assertEqual(new_proj["building_location"], "AP2")
+
+                copied_all_scens = store.planning_scenarios(new_project_id, include_archived=True)
+                self.assertEqual(len(copied_all_scens), 2)
+                copied_names = {str(r["name"]) for r in copied_all_scens}
+                self.assertIn("Active Scenario 3", copied_names)
+                self.assertNotIn("Trial Scenario 2", copied_names)
+            finally:
+                store.DB_PATH = orig_db_path
+
+
 if __name__ == "__main__":
     unittest.main()

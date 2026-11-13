@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import streamlit as st
+
 
 @dataclass(frozen=True)
 class TimeUnit:
@@ -17,6 +19,7 @@ class TimeUnit:
 TIME_UNITS = {
     "seconds": TimeUnit("seconds", "Seconds", "s", 1.0, 1, 0.1),
     "minutes": TimeUnit("minutes", "Minutes", "min", 60.0, 3, 0.001),
+    "centiminutes": TimeUnit("centiminutes", "Centiminutes", "cmin", 0.6, 1, 0.1),
     "hours": TimeUnit("hours", "Hours", "hr", 3600.0, 4, 0.0001),
 }
 
@@ -24,7 +27,7 @@ TIME_UNITS = {
 def normalize_time_unit(value: object) -> str:
     unit = str(value or "seconds").strip().casefold()
     if unit not in TIME_UNITS:
-        raise ValueError("Choose Seconds, Minutes, or Hours for the time unit.")
+        raise ValueError("Choose Seconds, Minutes, Centiminutes, or Hours for the time unit.")
     return unit
 
 
@@ -55,6 +58,13 @@ def display_to_seconds(value: object, unit: object) -> float:
 
 
 def format_seconds(value: object, unit: object) -> str:
-    config = time_unit(unit)
+    effective_unit = unit
+    try:
+        override = str(st.session_state.get("pref_time_unit_override", "scenario") or "scenario").strip().casefold()
+        if override in TIME_UNITS:
+            effective_unit = override
+    except Exception:
+        pass
+    config = time_unit(effective_unit)
     converted = seconds_to_display(value, config.key)
     return f"{converted:.{config.decimals}f} {config.suffix}"

@@ -8,7 +8,31 @@ from utils.cache_store import cached_store_read
 
 globals().update({name: value for name, value in vars(_db_core).items() if not name.startswith('__')})
 
-_FISHBONE_STORE_HOT_RELOAD_REV = 3
+_FISHBONE_STORE_HOT_RELOAD_REV = 6
+
+@cached_store_read
+def fishbone_sticky_notes(project_id: str) -> pd.DataFrame:
+    rows = query(
+        "SELECT * FROM fishbone_sticky_notes WHERE project_id = ? ORDER BY created_at, id",
+        (project_id,),
+    )
+    if not rows:
+        return pd.DataFrame({
+            "id": pd.Series(dtype="string"),
+            "project_id": pd.Series(dtype="string"),
+            "section_id": pd.Series(dtype="string"),
+            "text": pd.Series(dtype="string"),
+            "author_name": pd.Series(dtype="string"),
+            "color": pd.Series(dtype="string"),
+            "orientation": pd.Series(dtype="string"),
+            "canvas_x": pd.Series(dtype="float64"),
+            "canvas_y": pd.Series(dtype="float64"),
+            "width": pd.Series(dtype="float64"),
+            "height": pd.Series(dtype="float64"),
+            "created_at": pd.Series(dtype="string"),
+            "updated_at": pd.Series(dtype="string"),
+        })
+    return pd.DataFrame(rows)
 
 @cached_store_read
 def assembly_sections(project_id: str) -> pd.DataFrame:
@@ -940,6 +964,189 @@ def add_assembly_section(
         raise ValueError(f"A section named {name} already exists in this project.") from exc
     return section_id
 
+def update_assembly_section(
+    project_id: str,
+    section_id: str,
+    name: str,
+    section_type: str,
+    parent_id: str | None = None,
+    parent_ids: list[str] | None = None,
+) -> dict[str, object]:
+    """Update a single Fishbone section's name, type of production, primary parent, and downstream connections."""
+    clean_id = str(section_id or "").strip()
+    if not clean_id:
+        raise ValueError("Section ID is required.")
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Section name is required.")
+    clean_type = str(section_type or "").strip()
+    if clean_type not in {"Assembly", "Support Operations", "Main spine", "Subassembly"}:
+        raise ValueError("Choose Assembly or Support Operations.")
+    norm_parent = (
+        None
+        if parent_id is None or pd.isna(parent_id) or not str(parent_id).strip()
+        else str(parent_id).strip()
+    )
+    if parent_ids is not None:
+        clean_parent_ids = [
+            str(pid).strip()
+            for pid in dict.fromkeys(parent_ids)
+            if pid is not None and not pd.isna(pid) and str(pid).strip()
+        ]
+        if norm_parent and norm_parent not in clean_parent_ids:
+            clean_parent_ids.insert(0, norm_parent)
+        norm_parent = clean_parent_ids[0] if clean_parent_ids else None
+    else:
+        clean_parent_ids = [norm_parent] if norm_parent else []
+
+    if clean_type == "Main spine":
+        norm_parent = None
+        clean_parent_ids = []
+        clean_type = "Assembly"
+    elif clean_type == "Subassembly":
+        if not norm_parent:
+            raise ValueError("A subassembly must have a parent assembly.")
+        clean_type = "Assembly"
+    if clean_id in clean_parent_ids or norm_parent == clean_id:
+        raise ValueError("A section cannot be its own parent.")
+
+    timestamp = now_iso()
+    try:
+        with connection() as conn:
+            existing_rows = {
+                str(r["id"]): dict(r)
+                for r in conn.execute(
+                    "SELECT id, name, section_type, parent_id FROM assembly_sections WHERE project_id=?",
+                    (project_id,),
+                ).fetchall()
+            }
+            prev = existing_rows.get(clean_id)
+            if prev is None:
+                raise ValueError("The selected Fishbone section no longer exists.")
+            for other_id, other_row in existing_rows.items():
+                if other_id != clean_id and str(other_row.get("name") or "").strip().casefold() == clean_name.casefold():
+                    raise ValueError(
+                        f"A section named '{other_row['name']}' already exists in this project. Section names must be unique."
+                    )
+            valid_parent_ids: list[str] = []
+            for pid in clean_parent_ids:
+                if pid in existing_rows:
+                    valid_parent_ids.append(pid)
+                elif clean_type != "Support Operations":
+                    raise ValueError(f"Choose a valid parent for {clean_name}.")
+            clean_parent_ids = valid_parent_ids
+            norm_parent = clean_parent_ids[0] if clean_parent_ids else None
+
+            parent_by_id: dict[str, str | None] = {}
+            for sid, r in existing_rows.items():
+                p_raw = r.get("parent_id")
+                parent_by_id[sid] = (
+                    None
+                    if p_raw is None or pd.isna(p_raw) or not str(p_raw).strip()
+                    else str(p_raw).strip()
+                )
+            for candidate_parent in (clean_parent_ids or [None]):
+                parent_by_id[clean_id] = candidate_parent
+                for sid in existing_rows:
+                    visited: set[str] = set()
+                    cursor = sid
+                    while cursor:
+                        if cursor in visited:
+                            raise ValueError(
+                                "The assembly framework cannot contain a circular parent relationship."
+                            )
+                        visited.add(cursor)
+                        cursor = parent_by_id.get(cursor)
+            parent_by_id[clean_id] = norm_parent
+
+            old_name = str(prev.get("name") or "").strip()
+            old_type = str(prev.get("section_type") or "Assembly").strip()
+            old_parent_raw = prev.get("parent_id")
+            old_parent_id = (
+                None
+                if old_parent_raw is None or pd.isna(old_parent_raw) or not str(old_parent_raw).strip()
+                else str(old_parent_raw).strip()
+            )
+
+            conn.execute(
+                """UPDATE assembly_sections
+                   SET name=?, section_type=?, parent_id=?, updated_at=?
+                   WHERE id=? AND project_id=?""",
+                (clean_name, clean_type, norm_parent, timestamp, clean_id, project_id),
+            )
+
+            if not clean_parent_ids:
+                conn.execute(
+                    """DELETE FROM assembly_section_connections
+                       WHERE project_id=? AND from_section_id=? AND connection_type='subassembly'""",
+                    (project_id, clean_id),
+                )
+                if old_parent_id:
+                    conn.execute(
+                        """DELETE FROM assembly_section_connections
+                           WHERE project_id=? AND from_section_id=? AND to_section_id=?""",
+                        (project_id, clean_id, old_parent_id),
+                    )
+            else:
+                placeholders = ", ".join("?" for _ in clean_parent_ids)
+                conn.execute(
+                    f"""DELETE FROM assembly_section_connections
+                        WHERE project_id=? AND from_section_id=?
+                          AND to_section_id NOT IN ({placeholders})
+                          AND connection_type='subassembly'""",
+                    (project_id, clean_id, *clean_parent_ids),
+                )
+                if old_parent_id and old_parent_id not in clean_parent_ids:
+                    conn.execute(
+                        """DELETE FROM assembly_section_connections
+                           WHERE project_id=? AND from_section_id=? AND to_section_id=?""",
+                        (project_id, clean_id, old_parent_id),
+                    )
+                for idx, target_pid in enumerate(clean_parent_ids, start=1):
+                    existing_conn = conn.execute(
+                        "SELECT id FROM assembly_section_connections WHERE project_id=? AND from_section_id=? AND to_section_id=?",
+                        (project_id, clean_id, target_pid),
+                    ).fetchone()
+                    if not existing_conn:
+                        conn.execute(
+                            """INSERT INTO assembly_section_connections
+                               (id, project_id, from_section_id, to_section_id, connection_type, sequence, created_at, updated_at)
+                               VALUES (?, ?, ?, ?, 'subassembly', ?, ?, ?)""",
+                            (str(uuid4()), project_id, clean_id, target_pid, idx * 10, timestamp, timestamp),
+                        )
+
+            if old_name and old_name != clean_name:
+                linked_areas = conn.execute(
+                    "SELECT id, scenario_id, name FROM yamazumi_areas WHERE project_id=? AND section_id=?",
+                    (project_id, clean_id),
+                ).fetchall()
+                for area_row in linked_areas:
+                    if str(area_row["name"] or "").strip().casefold() == old_name.casefold():
+                        conflict = conn.execute(
+                            """SELECT 1 FROM yamazumi_areas
+                               WHERE project_id=? AND scenario_id=? AND LOWER(TRIM(name))=LOWER(TRIM(?)) AND id<>?
+                               LIMIT 1""",
+                            (project_id, area_row["scenario_id"], clean_name, area_row["id"]),
+                        ).fetchone()
+                        if not conflict:
+                            conn.execute(
+                                "UPDATE yamazumi_areas SET name=?, updated_at=? WHERE id=?",
+                                (clean_name, timestamp, area_row["id"]),
+                            )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(f"A section named '{clean_name}' already exists in this project.") from exc
+
+    return {
+        "section_id": clean_id,
+        "old_name": old_name,
+        "new_name": clean_name,
+        "old_section_type": old_type,
+        "new_section_type": clean_type,
+        "old_parent_id": old_parent_id,
+        "new_parent_id": norm_parent,
+        "new_parent_ids": clean_parent_ids,
+    }
+
 def reorder_assembly_section(project_id: str, section_id: str, action: str) -> bool:
     allowed = {"Move earlier", "Move later", "Move to start", "Move to end"}
     if action not in allowed:
@@ -1119,6 +1326,7 @@ def fishbone_part_assignments(
                   a.use_description, a.notes, a.pits_sync_status, a.pits_quantity_updated_at,
                   a.updated_at, p.part_number, p.description, p.revision, p.model_applicability,
                   COALESCE(p.factory_nickname, '') AS factory_nickname,
+                  COALESCE(NULLIF(TRIM(p.image_path), ''), (SELECT image.image_path FROM part_images image WHERE image.part_id=p.id ORDER BY image.created_at, image.id LIMIT 1), '') AS image_path,
                   s.name AS section_name
            FROM fishbone_part_assignments a
            JOIN parts p ON p.id = a.part_id
@@ -1195,6 +1403,7 @@ def search_parts_and_fishbone(
     rows = query(
         f"""SELECT p.id AS part_id, p.part_number, p.description,
                    COALESCE(p.factory_nickname, '') AS factory_nickname,
+                  COALESCE(NULLIF(TRIM(p.image_path), ''), (SELECT image.image_path FROM part_images image WHERE image.part_id=p.id ORDER BY image.created_at, image.id LIMIT 1), '') AS image_path,
                    p.revision, p.model_applicability, a.id AS assignment_id,
                    a.section_id, s.name AS section_name, a.quantity,
                    a.use_description, a.notes AS assignment_notes
@@ -1906,6 +2115,10 @@ def fishbone_plan_snapshot(project_id: str) -> dict:
                 "SELECT * FROM assembly_section_connections WHERE project_id=?",
                 (project_id,),
             ).fetchall()],
+            "sticky_notes": [dict(row) for row in conn.execute(
+                "SELECT * FROM fishbone_sticky_notes WHERE project_id=?",
+                (project_id,),
+            ).fetchall()],
         }
 
 @cached_store_read
@@ -1988,6 +2201,7 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
             )
         conn.execute("DELETE FROM assembly_section_connections WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM fishbone_part_assignments WHERE project_id=?", (project_id,))
+        conn.execute("DELETE FROM fishbone_sticky_notes WHERE project_id=?", (project_id,))
         conn.execute("DELETE FROM assembly_sections WHERE project_id=?", (project_id,))
         # Insert parents and children with empty parent IDs first, then reconnect them.
         section_rows = [{**row, "parent_id": None} for row in sections]
@@ -2002,6 +2216,18 @@ def restore_fishbone_plan_snapshot(project_id: str, snapshot: dict) -> None:
         _insert_snapshot_rows(conn, "fishbone_part_assignments", assignments)
         restored_assignment_ids = {str(r.get("id")) for r in assignments if r.get("id")}
         restored_section_ids = {str(r.get("id")) for r in sections if r.get("id")}
+        sticky_note_rows = [
+            {
+                **row,
+                "section_id": (
+                    row.get("section_id")
+                    if str(row.get("section_id") or "") in restored_section_ids
+                    else None
+                ),
+            }
+            for row in snapshot.get("sticky_notes", [])
+        ]
+        _insert_snapshot_rows(conn, "fishbone_sticky_notes", sticky_note_rows)
         for row in saved_option_assignments:
             aid = str(row.get("fishbone_assignment_id") or "")
             if aid in restored_assignment_ids:
@@ -2457,9 +2683,11 @@ def save_fishbone_canvas_draft(
     updated_assignments: list[dict] | None = None,
     deleted_assignment_ids: list[str] | None = None,
     variant_links: list[list[str]] | None = None,
+    sticky_notes: list[dict] | None = None,
+    deleted_sticky_note_ids: list[str] | None = None,
     editor_name: str = "",
 ) -> dict[str, int]:
-    """Atomically commit canvas positions, connections, and part assignments from a visual edit draft."""
+    """Atomically commit canvas positions, connections, part assignments, and sticky notes from a visual edit draft."""
     timestamp = now_iso()
     positions_saved = 0
     conns_saved = 0
@@ -2468,6 +2696,8 @@ def save_fishbone_canvas_draft(
     assignments_updated = 0
     assignments_deleted = 0
     variant_links_saved = 0
+    sticky_notes_saved = 0
+    sticky_notes_deleted = 0
     with connection() as conn:
         if positions:
             for section_id, coords in positions.items():
@@ -2609,6 +2839,116 @@ def save_fishbone_canvas_draft(
                         _conn=conn,
                     )
                     variant_links_saved += 1
+        if deleted_sticky_note_ids:
+            clean_deleted_note_ids = [
+                str(nid).strip()
+                for nid in dict.fromkeys(deleted_sticky_note_ids)
+                if str(nid or "").strip()
+            ]
+            if clean_deleted_note_ids:
+                note_placeholders = ", ".join("?" for _ in clean_deleted_note_ids)
+                existing_deleted_note_rows = conn.execute(
+                    f"SELECT id, text, author_name FROM fishbone_sticky_notes WHERE project_id = ? AND id IN ({note_placeholders})",
+                    (project_id, *clean_deleted_note_ids),
+                ).fetchall()
+                existing_deleted_note_ids = [str(r["id"]) for r in existing_deleted_note_rows]
+                if existing_deleted_note_ids:
+                    first_row = existing_deleted_note_rows[0]
+                    snippet = str(first_row["text"] or "").strip().splitlines()[0][:40] if str(first_row["text"] or "").strip() else "Sticky note"
+                    label = (
+                        f"{snippet} (by {first_row['author_name']})"
+                        if len(existing_deleted_note_ids) == 1 and str(first_row["author_name"] or "").strip()
+                        else (snippet if len(existing_deleted_note_ids) == 1 else f"{len(existing_deleted_note_ids)} Fishbone sticky notes")
+                    )
+                    with capture_deletion_to_recycle_bin(
+                        conn,
+                        project_id=project_id,
+                        entity_type="Fishbone Sticky Note",
+                        entity_table="fishbone_sticky_notes",
+                        entity_id=existing_deleted_note_ids[0],
+                        entity_label=label,
+                        deleted_by=str(editor_name or "").strip(),
+                    ):
+                        del_placeholders = ", ".join("?" for _ in existing_deleted_note_ids)
+                        sticky_notes_deleted = conn.execute(
+                            f"DELETE FROM fishbone_sticky_notes WHERE project_id = ? AND id IN ({del_placeholders})",
+                            (project_id, *existing_deleted_note_ids),
+                        ).rowcount
+        if sticky_notes:
+            valid_section_ids = {
+                str(r["id"])
+                for r in conn.execute(
+                    "SELECT id FROM assembly_sections WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
+            }
+            for sn in sticky_notes:
+                if not isinstance(sn, dict):
+                    continue
+                sn_id = str(sn.get("id") or uuid4()).strip()
+                if not sn_id:
+                    sn_id = str(uuid4())
+                sec_raw = str(sn.get("section_id") or "").strip()
+                sec_id = sec_raw if sec_raw in valid_section_ids else None
+                note_text = str(sn.get("text") or "")
+                author_val = str(sn.get("author_name") or editor_name or "").strip()
+                color_val = str(sn.get("color") or "yellow").strip().lower()
+                if color_val not in {"yellow", "pink", "blue", "green", "orange", "purple"}:
+                    color_val = "yellow"
+                orient_val = str(sn.get("orientation") or "square").strip().lower()
+                if orient_val not in {"square", "diamond"}:
+                    orient_val = "square"
+                try:
+                    cx = float(sn.get("canvas_x") if sn.get("canvas_x") is not None else 120.0)
+                except (TypeError, ValueError):
+                    cx = 120.0
+                try:
+                    cy = float(sn.get("canvas_y") if sn.get("canvas_y") is not None else 120.0)
+                except (TypeError, ValueError):
+                    cy = 120.0
+                try:
+                    w_val = max(110.0, min(900.0, float(sn.get("width") if sn.get("width") is not None else 200.0)))
+                except (TypeError, ValueError):
+                    w_val = 200.0
+                try:
+                    h_val = max(90.0, min(900.0, float(sn.get("height") if sn.get("height") is not None else 160.0)))
+                except (TypeError, ValueError):
+                    h_val = 160.0
+                created_val = str(sn.get("created_at") or "").strip() or timestamp
+                conn.execute(
+                    """INSERT INTO fishbone_sticky_notes (
+                           id, project_id, section_id, text, author_name, color, orientation,
+                           canvas_x, canvas_y, width, height, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           section_id = excluded.section_id,
+                           text = excluded.text,
+                           author_name = excluded.author_name,
+                           color = excluded.color,
+                           orientation = excluded.orientation,
+                           canvas_x = excluded.canvas_x,
+                           canvas_y = excluded.canvas_y,
+                           width = excluded.width,
+                           height = excluded.height,
+                           updated_at = excluded.updated_at
+                       WHERE fishbone_sticky_notes.project_id = excluded.project_id""",
+                    (
+                        sn_id,
+                        project_id,
+                        sec_id,
+                        note_text,
+                        author_val,
+                        color_val,
+                        orient_val,
+                        cx,
+                        cy,
+                        w_val,
+                        h_val,
+                        created_val,
+                        timestamp,
+                    ),
+                )
+                sticky_notes_saved += 1
         total_changes = (
             positions_saved
             + conns_saved
@@ -2617,6 +2957,8 @@ def save_fishbone_canvas_draft(
             + assignments_updated
             + assignments_deleted
             + variant_links_saved
+            + sticky_notes_saved
+            + sticky_notes_deleted
         )
         record_audit_event(
             project_id,
@@ -2632,6 +2974,8 @@ def save_fishbone_canvas_draft(
                 "assignments_updated": assignments_updated,
                 "assignments_deleted": assignments_deleted,
                 "variant_links_saved": variant_links_saved,
+                "sticky_notes_saved": sticky_notes_saved,
+                "sticky_notes_deleted": sticky_notes_deleted,
             },
             _conn=conn,
         )
@@ -2643,6 +2987,8 @@ def save_fishbone_canvas_draft(
         "assignments_updated": assignments_updated,
         "assignments_deleted": assignments_deleted,
         "variant_links_saved": variant_links_saved,
+        "sticky_notes_saved": sticky_notes_saved,
+        "sticky_notes_deleted": sticky_notes_deleted,
     }
 
 
@@ -2887,7 +3233,7 @@ def clear_interactive_fishbone(
         "process_groups_deleted": process_groups_deleted,
     }
 
-__domain_exports__ = ['assembly_sections', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'set_fishbone_assignments_stack_group', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
+__domain_exports__ = ['assembly_sections', 'fishbone_sticky_notes', 'assembly_section_walk_order', '_assembly_section_delete_rows', '_assembly_section_target_validation', '_merge_yamazumi_areas_for_section_delete', 'assembly_section_delete_target_validation', 'assembly_section_delete_impact', 'delete_assembly_sections', '_create_yamazumi_areas_for_section', 'yamazumi_area_creation_summary', 'add_assembly_section', 'update_assembly_section', 'reorder_assembly_section', 'update_assembly_section_rows', 'fishbone_part_assignments', 'search_parts_and_fishbone', 'create_part_and_assign_to_section', 'move_fishbone_part_assignment', 'reorder_fishbone_part_assignments', 'set_fishbone_assignments_stack_group', 'assign_parts_to_section', 'delete_fishbone_part_assignments', 'delete_fishbone_part_assignment', 'replace_fishbone_part_assignments', 'save_fishbone_plan', 'replace_fishbone_nodes', 'import_fishbone_nodes', 'project_models', 'fishbone_plan_snapshot', 'fishbone_assignment_snapshot', 'restore_fishbone_plan_snapshot', 'restore_fishbone_assignment_snapshot', 'update_fishbone_assignment_use', 'assembly_section_connections', 'save_assembly_section_connection', 'delete_assembly_section_connection', 'move_assembly_section_connection', 'save_fishbone_canvas_positions', 'save_fishbone_canvas_draft', 'clear_interactive_fishbone']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

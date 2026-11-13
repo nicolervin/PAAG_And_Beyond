@@ -41,6 +41,7 @@ from utils.table_ui import (
     drop_untouched_new_rows,
     editable_table_footer,
     editable_table_heading,
+    format_part_label,
     native_selected_rows,
     direct_entry_editor_rows,
     count_table_create_and_edit_rows, render_audit_history_table, selectable_dataframe,
@@ -2083,11 +2084,18 @@ else:
             if "Part name" in selected_feature_displays:
                 parts_df = project_table("parts", project_id)
                 if not parts_df.empty:
-                    for raw_pn, raw_desc in zip(
-                        parts_df["part_number"], parts_df["description"]
+                    _m_fn_col = (
+                        parts_df["factory_nickname"]
+                        if "factory_nickname" in parts_df.columns
+                        else [""] * len(parts_df)
+                    )
+                    for raw_pn, raw_desc, raw_fn in zip(
+                        parts_df["part_number"], parts_df["description"], _m_fn_col
                     ):
                         pn_key = str(raw_pn or "").strip().upper()
-                        p_name = str(raw_desc or "").strip()
+                        p_name = format_part_label(
+                            raw_pn, raw_desc, raw_fn, include_part_number=False
+                        )
                         if pn_key and (
                             pn_key not in part_name_by_pn
                             or (p_name and not part_name_by_pn[pn_key])
@@ -4838,9 +4846,18 @@ else:
             if "Part name" in target_feature_displays:
                 p_df = project_table("parts", project_id)
                 if not p_df.empty:
-                    for r_pn, r_desc in zip(p_df["part_number"], p_df["description"]):
+                    _p_fn_col = (
+                        p_df["factory_nickname"]
+                        if "factory_nickname" in p_df.columns
+                        else [""] * len(p_df)
+                    )
+                    for r_pn, r_desc, r_fn in zip(
+                        p_df["part_number"], p_df["description"], _p_fn_col
+                    ):
                         pk = str(r_pn or "").strip().upper()
-                        pn_val = str(r_desc or "").strip()
+                        pn_val = format_part_label(
+                            r_pn, r_desc, r_fn, include_part_number=False
+                        )
                         if pk and (pk not in p_name_map or (pn_val and not p_name_map[pk])):
                             p_name_map[pk] = pn_val
 

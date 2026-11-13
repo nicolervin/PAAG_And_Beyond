@@ -2873,6 +2873,24 @@ def init_db() -> None:
                 ON assembly_section_connections(project_id, from_section_id);
             CREATE INDEX IF NOT EXISTS idx_section_conn_to
                 ON assembly_section_connections(project_id, to_section_id);
+            CREATE TABLE IF NOT EXISTS fishbone_sticky_notes (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT DEFAULT NULL REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                text TEXT NOT NULL DEFAULT '',
+                author_name TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT 'yellow',
+                orientation TEXT NOT NULL DEFAULT 'square'
+                    CHECK(orientation IN ('square', 'diamond')),
+                canvas_x REAL NOT NULL DEFAULT 120.0,
+                canvas_y REAL NOT NULL DEFAULT 120.0,
+                width REAL NOT NULL DEFAULT 160.0,
+                height REAL NOT NULL DEFAULT 160.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fishbone_sticky_notes_project
+                ON fishbone_sticky_notes(project_id);
             CREATE TABLE IF NOT EXISTS fishbone_part_assignments (
                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 part_id TEXT NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
@@ -3004,9 +3022,10 @@ def init_db() -> None:
                 ppe_poster_workstation_override TEXT NOT NULL DEFAULT '',
                 ppe_poster_section_override TEXT NOT NULL DEFAULT '',
                 jsa_job_title_override TEXT NOT NULL DEFAULT '',
-                jsa_plant_code TEXT NOT NULL DEFAULT 'AP1',
+                jsa_plant_code TEXT NOT NULL DEFAULT '',
                 jsa_important_notice TEXT NOT NULL DEFAULT '',
                 jsa_include_pitch_photos INTEGER NOT NULL DEFAULT 1,
+                jsa_rows_override_json TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 UNIQUE(project_id, area_id, pitch_number)
             );
@@ -3740,6 +3759,28 @@ def init_db() -> None:
             """CREATE INDEX IF NOT EXISTS idx_section_conn_to
                ON assembly_section_connections(project_id, to_section_id)"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS fishbone_sticky_notes (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                section_id TEXT DEFAULT NULL REFERENCES assembly_sections(id) ON DELETE SET NULL,
+                text TEXT NOT NULL DEFAULT '',
+                author_name TEXT NOT NULL DEFAULT '',
+                color TEXT NOT NULL DEFAULT 'yellow',
+                orientation TEXT NOT NULL DEFAULT 'square'
+                    CHECK(orientation IN ('square', 'diamond')),
+                canvas_x REAL NOT NULL DEFAULT 120.0,
+                canvas_y REAL NOT NULL DEFAULT 120.0,
+                width REAL NOT NULL DEFAULT 160.0,
+                height REAL NOT NULL DEFAULT 160.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_fishbone_sticky_notes_project
+               ON fishbone_sticky_notes(project_id)"""
+        )
         conn_table_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='assembly_section_connections'"
         ).fetchone()
@@ -3852,6 +3893,7 @@ def init_db() -> None:
             "ppe_poster_section_override",
             "jsa_job_title_override",
             "jsa_important_notice",
+            "jsa_rows_override_json",
         ):
             if ppe_override_col not in pitch_columns:
                 conn.execute(
@@ -3859,7 +3901,7 @@ def init_db() -> None:
                 )
         if "jsa_plant_code" not in pitch_columns:
             conn.execute(
-                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_plant_code TEXT NOT NULL DEFAULT 'AP1'"
+                "ALTER TABLE yamazumi_pitches ADD COLUMN jsa_plant_code TEXT NOT NULL DEFAULT ''"
             )
         if "jsa_include_pitch_photos" not in pitch_columns:
             conn.execute(

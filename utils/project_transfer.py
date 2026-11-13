@@ -41,7 +41,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("pits_record_revisions", "pits_records", "record_id"),
     TransferTable("project_models"), TransferTable("complexity_features"),
     TransferTable("model_feature_values"), TransferTable("part_feature_rules"),
-    TransferTable("assembly_sections"), TransferTable("assembly_section_connections"),
+    TransferTable("assembly_sections"), TransferTable("assembly_section_connections"), TransferTable("fishbone_sticky_notes"),
     TransferTable("fishbone_part_assignments"),
     TransferTable("pits_bom_occurrences"),
     TransferTable(
@@ -70,6 +70,7 @@ PROJECT_TRANSFER_TABLES = (
     TransferTable("ergonomic_hazard_options"), TransferTable("ergonomics_reviews"),
     TransferTable("ergonomics_review_hazard_selections"),
     TransferTable("ergonomics_visual_media"),
+    TransferTable("ergonomics_review_tool_assessments"),
     TransferTable("quality_requirements"), TransferTable("quality_requirement_assignments"),
     TransferTable("quality_requirement_torque_details"), TransferTable("quality_requirement_types"),
     TransferTable("equipment_types"), TransferTable("equipment_type_function_links"),
@@ -664,3 +665,102 @@ def import_project_package(
         "scenario_id": str(scenario_rows[0]["id"]) if scenario_rows else None,
         "operation": operation,
     }
+
+
+def _filter_tables_to_active_scenarios(
+    conn: sqlite3.Connection, tables: dict[str, list[dict]]
+) -> dict[str, list[dict]]:
+    """Return a copy of the project table graph keeping only Active (non-Archived) scenarios."""
+    all_scenarios = [dict(row) for row in tables.get("planning_scenarios", [])]
+    active_scenarios = [
+        row
+        for row in all_scenarios
+        if str(row.get("status") or "Working").strip().title() != "Archived"
+    ]
+    if not active_scenarios and all_scenarios:
+        fallback = dict(all_scenarios[0])
+        fallback["status"] = "Working"
+        active_scenarios = [fallback]
+
+    active_scenario_ids = {
+        str(row["id"]) for row in active_scenarios if row.get("id") is not None
+    }
+    for row in active_scenarios:
+        parent_id = row.get("parent_scenario_id")
+        if parent_id is not None and str(parent_id).strip() and str(parent_id) not in active_scenario_ids:
+            row["parent_scenario_id"] = None
+
+    filtered: dict[str, list[dict]] = {
+        "projects": [dict(r) for r in tables.get("projects", [])],
+        "planning_scenarios": active_scenarios,
+        "audit_log": [],
+        "project_transfer_events": [],
+    }
+    kept_ids: dict[str, set[str]] = {
+        "projects": {
+            str(r["id"]) for r in filtered["projects"] if r.get("id") is not None
+        },
+        "planning_scenarios": active_scenario_ids,
+        "audit_log": set(),
+        "project_transfer_events": set(),
+    }
+
+    for item in PROJECT_TRANSFER_TABLES:
+        if item.name in filtered:
+            continue
+        fk_edges = [
+            (str(fk[3]), str(fk[2]), str(fk[4]))
+            for fk in conn.execute(f'PRAGMA foreign_key_list("{item.name}")')
+        ]
+        kept_rows: list[dict] = []
+        for raw_row in tables.get(item.name, []):
+            row = dict(raw_row)
+            if "scenario_id" in row:
+                scen_val = row.get("scenario_id")
+                if (
+                    scen_val is not None
+                    and str(scen_val).strip() != ""
+                    and str(scen_val) not in active_scenario_ids
+                ):
+                    continue
+            if (
+                item.parent_table
+                and item.foreign_key
+                and item.parent_table in kept_ids
+            ):
+                p_val = row.get(item.foreign_key)
+                if (
+                    p_val is not None
+                    and str(p_val).strip() != ""
+                    and str(p_val) not in kept_ids[item.parent_table]
+                ):
+                    continue
+            exclude_row = False
+            for col, parent_table, parent_col in fk_edges:
+                if (
+                    parent_table == "projects"
+                    or parent_table == item.name
+                    or parent_col != "id"
+                    or parent_table not in kept_ids
+                ):
+                    continue
+                fk_val = row.get(col)
+                if fk_val is None or str(fk_val).strip() == "":
+                    continue
+                if str(fk_val) not in kept_ids[parent_table]:
+                    if item.name == "layout_shapes" and col == "pitch_id":
+                        row["pitch_id"] = None
+                    else:
+                        exclude_row = True
+                        break
+            if exclude_row:
+                continue
+            kept_rows.append(row)
+        filtered[item.name] = kept_rows
+        if kept_rows and "id" in kept_rows[0]:
+            kept_ids[item.name] = {
+                str(r["id"]) for r in kept_rows if r.get("id") is not None
+            }
+        else:
+            kept_ids[item.name] = set()
+    return filtered

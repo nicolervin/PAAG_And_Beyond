@@ -29,7 +29,7 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("appendDropSlot(logicalIndex + 1)", board_module._JS)
         self.assertIn("before_element_id: items[logicalIndex]?.id || null", board_module._JS)
         self.assertIn("after_element_id: logicalIndex > 0", board_module._JS)
-        self.assertIn("paag_yamazumi_drag_board_v48", inspect.getsource(board_module))
+        self.assertIn("paag_yamazumi_drag_board_v51", inspect.getsource(board_module))
         self.assertIn(
             "setTriggerValue('edit_element', { element_id: item.id, model_variant: variant })",
             board_module._JS,
@@ -168,11 +168,8 @@ class YamazumiComponentTests(unittest.TestCase):
         self.assertIn("::-webkit-scrollbar", board_module._CSS)
         self.assertIn(".board.fullscreen-board .board-actions", board_module._CSS)
 
-    def test_board_renders_separate_read_only_criticality_tags(self) -> None:
-        self.assertIn("item.criticality || []", board_module._JS)
-        self.assertIn("criticality-tag", board_module._JS)
-        self.assertIn("Derived from PFMEA Classification", board_module._JS)
-        self.assertIn("Derived from an active Safety requirement", board_module._JS)
+    def test_board_does_not_render_functional_criticality_badges(self) -> None:
+        self.assertNotIn("item.criticality", board_module._JS)
         self.assertNotIn("item.flags", board_module._JS)
     def test_selected_time_unit_scales_labels_and_preserves_height_ratio(self) -> None:
         self.assertIn("const displayTime = value =>", board_module._JS)

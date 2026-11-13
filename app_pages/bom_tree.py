@@ -60,6 +60,7 @@ from utils.table_filters import (
 from utils.table_ui import (
     check_standalone_conflict_resolution,
     format_clean_number,
+    format_part_label,
     guarded_tabs,
     has_active_unsaved_changes,
     register_unsaved_source,
@@ -1131,14 +1132,24 @@ def copy_bom_dialog(
         "You can search and select an assembly from the Parts Catalog, or type a part number directly."
     )
 
-    cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=? ORDER BY part_number", (proj_id,))
+    cat_rows = query(
+        "SELECT part_number, description, COALESCE(factory_nickname, '') AS factory_nickname FROM parts WHERE project_id=? ORDER BY part_number",
+        (proj_id,),
+    )
     cat_parts_dict = {
         str(r["part_number"]).strip(): str(r["description"] or "").strip()
         for r in cat_rows
         if clean_bom_cell_text(r.get("part_number"))
     }
     cat_options = ["-- Select from Parts Catalog --"] + [
-        f"{pn} · {desc}".rstrip(" ·") for pn, desc in cat_parts_dict.items()
+        format_part_label(
+            r.get("part_number"),
+            r.get("description"),
+            r.get("factory_nickname"),
+            separator=" · ",
+        )
+        for r in cat_rows
+        if clean_bom_cell_text(r.get("part_number"))
     ]
 
     pn_key = f"copy_lvl1_pn_{curr_model_id}"
@@ -1691,14 +1702,24 @@ def generate_bom_from_features_dialog(
         "You can search and select an assembly from the Parts Catalog, or type a part number directly."
     )
 
-    cat_rows = query("SELECT part_number, description FROM parts WHERE project_id=? ORDER BY part_number", (proj_id,))
+    cat_rows = query(
+        "SELECT part_number, description, COALESCE(factory_nickname, '') AS factory_nickname FROM parts WHERE project_id=? ORDER BY part_number",
+        (proj_id,),
+    )
     cat_parts_dict = {
         str(r["part_number"]).strip(): str(r["description"] or "").strip()
         for r in cat_rows
         if clean_bom_cell_text(r.get("part_number"))
     }
     cat_options = ["-- Select from Parts Catalog --"] + [
-        f"{pn} · {desc}".rstrip(" ·") for pn, desc in cat_parts_dict.items()
+        format_part_label(
+            r.get("part_number"),
+            r.get("description"),
+            r.get("factory_nickname"),
+            separator=" · ",
+        )
+        for r in cat_rows
+        if clean_bom_cell_text(r.get("part_number"))
     ]
 
     pn_key = f"pred_lvl1_pn_{curr_model_id}"
@@ -1875,9 +1896,17 @@ def group_conflict_dialog(
 
     # Map part numbers to descriptions from Parts Catalog, BOM occurrences, and current rows
     part_desc_map: dict[str, str] = {}
-    for cr in query("SELECT part_number, description FROM parts WHERE project_id=?", (proj_id,)):
+    for cr in query(
+        "SELECT part_number, description, COALESCE(factory_nickname, '') AS factory_nickname FROM parts WHERE project_id=?",
+        (proj_id,),
+    ):
         c_pn = clean_bom_cell_text(cr.get("part_number")).upper()
-        c_desc = clean_bom_cell_text(cr.get("description"))
+        c_desc = format_part_label(
+            c_pn,
+            clean_bom_cell_text(cr.get("description")),
+            clean_bom_cell_text(cr.get("factory_nickname")),
+            include_part_number=False,
+        )
         if c_pn and c_desc:
             part_desc_map[c_pn] = c_desc
     for pr in query("SELECT part_number, description FROM pits_records WHERE project_id=?", (proj_id,)):

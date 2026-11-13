@@ -64,6 +64,7 @@ _TABLE_HUMAN_LABELS: dict[str, str] = {
     "part_feature_rules": "part feature rule",
     "assembly_sections": "Fishbone section",
     "assembly_section_connections": "section connection",
+    "fishbone_sticky_notes": "Fishbone sticky note",
     "fishbone_part_assignments": "Fishbone part placement",
     "pits_bom_occurrences": "PITS BOM occurrence",
     "pits_bom_occurrence_revisions": "PITS BOM occurrence revision",
@@ -1466,6 +1467,11 @@ def restore_recycle_bin_items(
                         "entity_type": entity_type,
                         "entity_table": entity_table,
                         "entity_id": str(item["entity_id"] or ""),
+                        "restored_entity_ids": [
+                            str(r_dict.get("id") or "").strip()
+                            for r_dict in (deleted_rows.get(entity_table) or [])
+                            if isinstance(r_dict, dict) and str(r_dict.get("id") or "").strip()
+                        ],
                         "entity_label": entity_label,
                         "scenario_id": scenario_id or "",
                     },
@@ -1575,6 +1581,288 @@ def empty_recycle_bin(
     return permanently_delete_recycle_bin_items(ids, editor_name=editor_name)
 
 
+def get_last_undoable_recycle_bin_restore(
+    project_id: str | None = None,
+    include_all_projects: bool = False,
+) -> dict[str, Any] | None:
+    """Return metadata for the most recent Recycle Bin restore that can be undone."""
+    with _db_core.connection() as conn:
+        init_recycle_bin_schema(conn)
+        existing_tables = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        if "audit_logs" not in existing_tables:
+            return None
+
+        if include_all_projects or not project_id:
+            rows = conn.execute(
+                """SELECT id, project_id, action, editor_name, details, created_at
+                   FROM audit_logs
+                   WHERE table_name = 'Recycle Bin'
+                   ORDER BY datetime(created_at) DESC, created_at DESC, rowid DESC
+                   LIMIT 200"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, project_id, action, editor_name, details, created_at
+                   FROM audit_logs
+                   WHERE table_name = 'Recycle Bin' AND project_id = ?
+                   ORDER BY datetime(created_at) DESC, created_at DESC, rowid DESC
+                   LIMIT 200""",
+                (str(project_id),),
+            ).fetchall()
+
+        undone_log_ids: set[str] = set()
+        for r in rows:
+            act = str(r["action"] or "").strip()
+            if act.lower().startswith("undo restore"):
+                try:
+                    det = json.loads(r["details"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    det = {}
+                undone_id = str(det.get("undone_audit_log_id") or "").strip()
+                if undone_id:
+                    undone_log_ids.add(undone_id)
+
+        for r in rows:
+            log_id = str(r["id"] or "").strip()
+            act = str(r["action"] or "").strip()
+            if not log_id or log_id in undone_log_ids or not act.lower().startswith("restore "):
+                continue
+            try:
+                det = json.loads(r["details"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                det = {}
+            entity_table = str(det.get("entity_table") or "").strip()
+            if not entity_table or entity_table not in existing_tables:
+                continue
+            candidate_ids = [
+                str(eid).strip()
+                for eid in (det.get("restored_entity_ids") or [])
+                if str(eid).strip()
+            ]
+            single_eid = str(det.get("entity_id") or "").strip()
+            if single_eid and single_eid not in candidate_ids:
+                candidate_ids.append(single_eid)
+            if not candidate_ids:
+                lbl_val = str(det.get("entity_label") or "").strip()
+                pid_val = str(r["project_id"] or "").strip()
+                if lbl_val and entity_table == "work_elements":
+                    desc_part = lbl_val.split("\u2014", 1)[-1].strip() if "\u2014" in lbl_val else lbl_val
+                    fb_rows = conn.execute(
+                        "SELECT id FROM work_elements WHERE project_id=? AND (operation=? OR description=?) ORDER BY updated_at DESC LIMIT 1",
+                        (pid_val, desc_part, desc_part),
+                    ).fetchall()
+                    candidate_ids = [str(fr[0]) for fr in fb_rows if str(fr[0]).strip()]
+                elif lbl_val and entity_table == "yamazumi_elements":
+                    fb_rows = conn.execute(
+                        "SELECT id FROM yamazumi_elements WHERE project_id=? AND description=? ORDER BY updated_at DESC LIMIT 1",
+                        (pid_val, lbl_val),
+                    ).fetchall()
+                    candidate_ids = [str(fr[0]) for fr in fb_rows if str(fr[0]).strip()]
+            if not candidate_ids:
+                continue
+
+            placeholders = ",".join("?" for _ in candidate_ids)
+            try:
+                active_rows = conn.execute(
+                    f'SELECT id FROM "{entity_table}" WHERE id IN ({placeholders})',
+                    tuple(candidate_ids),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            active_ids = [str(ar[0]) for ar in active_rows if str(ar[0]).strip()]
+            if not active_ids:
+                continue
+
+            return {
+                "audit_log_id": log_id,
+                "project_id": str(r["project_id"] or ""),
+                "scenario_id": str(det.get("scenario_id") or "").strip(),
+                "entity_type": str(det.get("entity_type") or "Record").strip(),
+                "entity_table": entity_table,
+                "entity_ids": active_ids,
+                "entity_label": str(det.get("entity_label") or active_ids[0]).strip(),
+                "restored_at": str(r["created_at"] or ""),
+                "restored_by": str(r["editor_name"] or ""),
+            }
+    return None
+
+
+def undo_recycle_bin_restore(
+    audit_log_id: str,
+    editor_name: str = "",
+) -> dict[str, Any]:
+    """Undo a Recycle Bin restore by moving the restored item(s) back to the Recycle Bin."""
+    clean_log_id = str(audit_log_id or "").strip()
+    if not clean_log_id:
+        raise ValueError("No Recycle Bin restore action was specified to undo.")
+
+    with _db_core.connection() as conn:
+        init_recycle_bin_schema(conn)
+        row = conn.execute(
+            """SELECT id, project_id, action, editor_name, details, created_at
+               FROM audit_logs
+               WHERE id = ? AND table_name = 'Recycle Bin'""",
+            (clean_log_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("The restore event could not be found in audit history.")
+        try:
+            det = json.loads(row["details"] or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("The restore event details are unreadable.") from exc
+
+        project_id = str(row["project_id"] or "").strip()
+        scenario_id = str(det.get("scenario_id") or "").strip() or None
+        entity_type = str(det.get("entity_type") or "Record").strip()
+        entity_table = str(det.get("entity_table") or "").strip()
+        entity_label = str(det.get("entity_label") or "").strip()
+
+        candidate_ids = [
+            str(eid).strip()
+            for eid in (det.get("restored_entity_ids") or [])
+            if str(eid).strip()
+        ]
+        single_eid = str(det.get("entity_id") or "").strip()
+        if single_eid and single_eid not in candidate_ids:
+            candidate_ids.append(single_eid)
+        if not candidate_ids and entity_label:
+            if entity_table == "work_elements":
+                desc_part = entity_label.split("\u2014", 1)[-1].strip() if "\u2014" in entity_label else entity_label
+                fb_rows = conn.execute(
+                    "SELECT id FROM work_elements WHERE project_id=? AND (operation=? OR description=?) ORDER BY updated_at DESC LIMIT 1",
+                    (project_id, desc_part, desc_part),
+                ).fetchall()
+                candidate_ids = [str(fr[0]) for fr in fb_rows if str(fr[0]).strip()]
+            elif entity_table == "yamazumi_elements":
+                fb_rows = conn.execute(
+                    "SELECT id FROM yamazumi_elements WHERE project_id=? AND description=? ORDER BY updated_at DESC LIMIT 1",
+                    (project_id, entity_label),
+                ).fetchall()
+                candidate_ids = [str(fr[0]) for fr in fb_rows if str(fr[0]).strip()]
+        if not entity_table or not candidate_ids:
+            raise ValueError("Cannot undo this restore because its target record ID is missing.")
+
+        placeholders = ",".join("?" for _ in candidate_ids)
+        active_rows = conn.execute(
+            f'SELECT id FROM "{entity_table}" WHERE id IN ({placeholders})',
+            tuple(candidate_ids),
+        ).fetchall()
+        active_ids = [str(ar[0]) for ar in active_rows if str(ar[0]).strip()]
+        if not active_ids:
+            raise ValueError(
+                f"'{entity_label or entity_type}' is no longer in the active plan (it may have already been deleted)."
+            )
+
+        active_placeholders = ",".join("?" for _ in active_ids)
+        now_str = _db_core.now_iso()
+
+        with capture_deletion_to_recycle_bin(
+            conn,
+            project_id=project_id,
+            scenario_id=scenario_id,
+            entity_type=entity_type,
+            entity_table=entity_table,
+            entity_id=active_ids[0] if len(active_ids) == 1 else "",
+            entity_label=entity_label or active_ids[0],
+            deleted_by=editor_name or "Collaborator",
+        ):
+            if entity_table == "work_elements":
+                for elem_id in active_ids:
+                    we_row = conn.execute(
+                        "SELECT operation, description, station, sequence, location FROM work_elements WHERE id=?",
+                        (elem_id,),
+                    ).fetchone()
+                    if we_row:
+                        op_val = str(we_row["operation"] or "")
+                        desc_val = str(we_row["description"] or "")
+                        pitch_val = str(we_row["station"] or "")
+                        seq_val = int(we_row["sequence"] or 0)
+                        loc_val = str(we_row["location"] or "")
+                        conn.execute(
+                            """UPDATE quality_requirement_assignments
+                               SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                                   process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                                   station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                                   unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                                   work_element_id = NULL,
+                                   updated_at = ?
+                               WHERE project_id=? AND work_element_id=?""",
+                            (op_val, desc_val, pitch_val, now_str, now_str, project_id, elem_id),
+                        )
+                        conn.execute(
+                            """UPDATE equipment_process_links
+                               SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                                   process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                                   station_pitch_snapshot = CASE WHEN station_pitch_snapshot = '' THEN ? ELSE station_pitch_snapshot END,
+                                   unlinked_at = CASE WHEN unlinked_at = '' THEN ? ELSE unlinked_at END,
+                                   work_element_id = NULL,
+                                   updated_at = ?
+                               WHERE project_id=? AND work_element_id=?""",
+                            (op_val, desc_val, pitch_val, now_str, now_str, project_id, elem_id),
+                        )
+                        conn.execute(
+                            """UPDATE pfmea_entries
+                               SET process_operation_snapshot = CASE WHEN process_operation_snapshot = '' THEN ? ELSE process_operation_snapshot END,
+                                   process_description_snapshot = CASE WHEN process_description_snapshot = '' THEN ? ELSE process_description_snapshot END,
+                                   process_pitch_snapshot = CASE WHEN process_pitch_snapshot = '' THEN ? ELSE process_pitch_snapshot END,
+                                   process_location_snapshot = CASE WHEN process_location_snapshot = '' THEN ? ELSE process_location_snapshot END,
+                                   process_sequence_snapshot = CASE WHEN process_sequence_snapshot = 0 THEN ? ELSE process_sequence_snapshot END,
+                                   work_element_id = NULL,
+                                   updated_at = ?
+                               WHERE project_id=? AND work_element_id=?""",
+                            (op_val, desc_val, pitch_val, loc_val, seq_val, now_str, project_id, elem_id),
+                        )
+                conn.execute(
+                    f"""UPDATE yamazumi_elements
+                        SET process_element_id=NULL, process_sync_status='Needs IE review', updated_at=?
+                        WHERE project_id=? AND process_element_id IN ({active_placeholders})""",
+                    (now_str, project_id, *active_ids),
+                )
+            elif entity_table == "yamazumi_pitches":
+                conn.execute(
+                    f"UPDATE yamazumi_pitches SET feeds_into_pitch_id=NULL WHERE id IN ({active_placeholders})",
+                    tuple(active_ids),
+                )
+            conn.execute(
+                f'DELETE FROM "{entity_table}" WHERE id IN ({active_placeholders})',
+                tuple(active_ids),
+            )
+
+        if entity_table == "yamazumi_elements":
+            _db_core._sync_linked_process_work_elements(conn, project_id, timestamp=now_str)
+
+        if project_id and conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (project_id,)
+        ).fetchone():
+            _db_core.record_audit_event(
+                project_id,
+                "Recycle Bin",
+                f"Undo restore {entity_type}",
+                len(active_ids),
+                editor_name=editor_name,
+                details={
+                    "undone_audit_log_id": clean_log_id,
+                    "entity_type": entity_type,
+                    "entity_table": entity_table,
+                    "entity_ids": active_ids,
+                    "entity_label": entity_label,
+                    "scenario_id": scenario_id or "",
+                },
+                _conn=conn,
+            )
+
+    return {
+        "undone_count": len(active_ids),
+        "entity_type": entity_type,
+        "entity_label": entity_label or active_ids[0],
+    }
+
+
 __domain_exports__ = [
     "RECYCLE_BIN_RETENTION_DAYS",
     "init_recycle_bin_schema",
@@ -1586,6 +1874,8 @@ __domain_exports__ = [
     "list_recycle_bin_items",
     "detect_recycle_bin_restore_conflicts",
     "restore_recycle_bin_items",
+    "get_last_undoable_recycle_bin_restore",
+    "undo_recycle_bin_restore",
     "permanently_delete_recycle_bin_items",
     "empty_recycle_bin",
 ]

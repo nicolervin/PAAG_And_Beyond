@@ -828,7 +828,24 @@ def save_planning_scenario_rows(
             raise ValueError("One of the planning scenarios no longer exists. Refresh and try again.")
         name = str(record.get("name") or "").strip()
         revision_label = str(record.get("revision_label") or "").strip()
-        status = str(record.get("status") or "Working").strip().title()
+        raw_status = str(record.get("status") or "").strip().title()
+        if "active" in record and record.get("active") is not None and not pd.isna(record.get("active")):
+            is_active = bool(record.get("active"))
+            prev_status = (
+                str(existing_by_id.get(scenario_id, {}).get("status") or "Working").strip().title()
+                if scenario_id in existing_by_id
+                else "Working"
+            )
+            if is_active:
+                status = (
+                    raw_status
+                    if raw_status in {"Working", "Frozen", "Released"}
+                    else (prev_status if prev_status != "Archived" else "Working")
+                )
+            else:
+                status = "Archived"
+        else:
+            status = raw_status or "Working"
         if not name or not revision_label:
             raise ValueError("Scenario name and revision label are required in every row.")
         if status not in valid_statuses:
@@ -857,6 +874,9 @@ def save_planning_scenario_rows(
                 "change_summary": str(record.get("change_summary") or "").strip(),
             }
         )
+
+    if cleaned and not any(item["status"] != "Archived" for item in cleaned):
+        raise ValueError("At least one planning scenario must remain Active.")
 
     updated_count = 0
     modified_count = 0
@@ -1300,7 +1320,177 @@ def delete_project(project_id: str, editor_name: str = "") -> dict[str, Any]:
         "deleted_files_count": deleted_files_count,
     }
 
-__domain_exports__ = ['projects', 'get_project', 'get_last_active_workspace', 'set_last_active_workspace', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns', 'get_project_deletion_impact', 'delete_project']
+
+def copy_project(
+    source_project_id: str,
+    name: str,
+    program: str = "",
+    owner: str = "",
+    takt_time_s: float = 60.0,
+    *,
+    product_line: str = "",
+    takt_time_unit: str = "seconds",
+    building_location: str = "",
+    revision: str = "",
+    notes: str | None = None,
+    editor_name: str = "",
+    only_active_scenarios: bool = True,
+    active_scenarios_only: bool | None = None,
+) -> dict[str, Any]:
+    """Create a new project copied from an existing project, keeping only Active scenarios by default."""
+    from pathlib import Path
+    from utils.project_transfer import (
+        _filter_tables_to_active_scenarios,
+        _insert_remapped_tables,
+        _registered_rows,
+        _remapped_tables,
+        _upload_manifest,
+    )
+
+    clean_name = str(name or "").strip()
+    clean_location = str(building_location or "").strip()
+    if not clean_name:
+        raise ValueError("Project name is required.")
+    if not clean_location:
+        raise ValueError("Building location is required.")
+    try:
+        takt_val = float(takt_time_s)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Project takt time must be a number.") from exc
+    if takt_val <= 0:
+        raise ValueError("Project takt time must be greater than zero.")
+    takt_unit = normalize_time_unit(takt_time_unit)
+
+    new_project_id = str(uuid4())
+    timestamp = now_iso()
+    created_files: list[Path] = []
+    upload_paths: dict[str, str] = {}
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with connection() as conn:
+            conn.execute("PRAGMA defer_foreign_keys=ON")
+            tables, _ = _registered_rows(conn, str(source_project_id))
+            source_project = dict(tables["projects"][0])
+            source_project_name = str(source_project.get("name") or "")
+
+            if active_scenarios_only is not None:
+                only_active_scenarios = bool(active_scenarios_only)
+            if only_active_scenarios:
+                tables = _filter_tables_to_active_scenarios(conn, tables)
+            else:
+                tables = {
+                    **tables,
+                    "audit_log": [],
+                    "project_transfer_events": [],
+                }
+
+            project_row = dict(tables["projects"][0])
+            project_row.update(
+                name=clean_name,
+                program=str(program or "").strip(),
+                product_line=str(product_line or "").strip(),
+                building_location=clean_location,
+                owner=str(owner or "").strip() or str(source_project.get("owner") or ""),
+                revision=str(revision or "").strip() or str(source_project.get("revision") or "A"),
+                status="Draft",
+                takt_time_s=takt_val,
+                takt_time_unit=takt_unit,
+                notes=str(notes) if notes is not None else str(source_project.get("notes") or ""),
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            tables["projects"] = [project_row]
+
+            uploads = _upload_manifest(tables)
+            for upload in uploads:
+                database_path = str(upload["database_path"])
+                source_path = upload.get("source_path")
+                if not isinstance(source_path, Path) or not source_path.is_file():
+                    continue
+                suffix = Path(database_path).suffix.lower()
+                target_path = (
+                    UPLOAD_DIR
+                    / f"project_copy_{new_project_id}_{uuid4()}{suffix}"
+                )
+                target_path.write_bytes(source_path.read_bytes())
+                created_files.append(target_path)
+                upload_paths[database_path] = str(target_path)
+
+            remapped = _remapped_tables(
+                conn,
+                tables,
+                str(source_project_id),
+                new_project_id,
+                upload_paths,
+            )
+            _insert_remapped_tables(conn, remapped)
+
+            if remapped.get("control_plan_items"):
+                from utils.control_plan_store import refresh_in_sync_control_plan_fingerprints_conn
+
+                reverse_eq_map: dict[str, str] = {}
+                for old_eq, new_eq in zip(
+                    tables.get("equipment_assets", []),
+                    remapped.get("equipment_assets", []),
+                ):
+                    old_eq_id = str(old_eq.get("id") or "")
+                    new_eq_id = str(new_eq.get("id") or "")
+                    if old_eq_id and new_eq_id:
+                        reverse_eq_map[new_eq_id] = old_eq_id
+                cp_scenarios = {
+                    str(r.get("scenario_id") or "")
+                    for r in remapped.get("control_plan_items", [])
+                    if str(r.get("scenario_id") or "")
+                }
+                for cp_scenario_id in cp_scenarios:
+                    refresh_in_sync_control_plan_fingerprints_conn(
+                        conn,
+                        new_project_id,
+                        cp_scenario_id,
+                        reverse_equipment_id_map=reverse_eq_map,
+                    )
+
+            copied_scenarios = remapped.get("planning_scenarios", [])
+            record_audit_event(
+                new_project_id,
+                "Projects",
+                "Copy project",
+                1,
+                str(editor_name or "").strip(),
+                {
+                    "created_project_id": new_project_id,
+                    "created_project_name": clean_name,
+                    "source_project_id": str(source_project_id),
+                    "source_project_name": source_project_name,
+                    "building_location": clean_location,
+                    "only_active_scenarios": bool(only_active_scenarios),
+                    "copied_scenario_count": len(copied_scenarios),
+                    "upload_count": len(created_files),
+                },
+                _conn=conn,
+            )
+
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise ValueError("The copied project contains invalid relationships.")
+    except Exception:
+        for path in created_files:
+            path.unlink(missing_ok=True)
+        raise
+
+    copied_scenarios = remapped.get("planning_scenarios", [])
+    return {
+        "project_id": new_project_id,
+        "project_name": clean_name,
+        "source_project_id": str(source_project_id),
+        "source_project_name": source_project_name,
+        "scenario_id": str(copied_scenarios[0]["id"]) if copied_scenarios else None,
+        "copied_scenario_count": len(copied_scenarios),
+        "active_scenario_count": len(copied_scenarios),
+    }
+
+__domain_exports__ = ['projects', 'get_project', 'get_last_active_workspace', 'set_last_active_workspace', 'planning_scenarios', 'get_planning_scenario', 'table_view_preference', 'save_table_view_preference', 'next_scenario_revision_label', 'update_planning_scenario', 'update_yamazumi_time_unit', 'clone_planning_scenario', 'save_planning_scenario_rows', 'create_project', 'copy_project', 'update_project_yamazumi_line_code', 'update_project', 'replace_concerns', 'get_project_deletion_impact', 'delete_project']
 for _export_name in __domain_exports__:
     if callable(globals()[_export_name]):
         globals()[_export_name] = _db_core.domain_entrypoint(globals()[_export_name])

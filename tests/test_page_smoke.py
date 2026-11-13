@@ -1406,24 +1406,11 @@ class ModelAndAssemblyPageSmokeTests(unittest.TestCase):
         self.assertEqual(list(yamazumi_app.exception), [])
         yamazumi_tables = [
             table.value for table in yamazumi_app.dataframe
-            if "criticality" in table.value.columns and "process_element_id" in table.value.columns
+            if "process_element_id" in table.value.columns
         ]
         self.assertTrue(yamazumi_tables)
-        linked_rows = pd.concat(yamazumi_tables, ignore_index=True).drop_duplicates(
-            subset=["process_element_id"]
-        )
-        self.assertEqual(
-            list(linked_rows.loc[
-                linked_rows["process_element_id"].astype(str).eq(ctq_work_id), "criticality"
-            ].iloc[0]),
-            ["CTQ"],
-        )
-        self.assertEqual(
-            list(linked_rows.loc[
-                linked_rows["process_element_id"].astype(str).eq(safety_work_id), "criticality"
-            ].iloc[0]),
-            ["Safety"],
-        )
+        for tbl in yamazumi_tables:
+            self.assertNotIn("criticality", tbl.columns)
 
     def test_empty_yamazumi_area_uses_on_page_controls_without_prompt(self) -> None:
         first_area_id = store.upsert_yamazumi_area(

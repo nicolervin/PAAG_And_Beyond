@@ -1127,9 +1127,21 @@ def _apply_seed_to_dataframe(
         for col in display_df.columns
         if pd.api.types.is_bool_dtype(display_df[col].dtype)
     ]
+    datetime_cols = [
+        col
+        for col in display_df.columns
+        if pd.api.types.is_datetime64_any_dtype(display_df[col].dtype)
+    ]
     try:
         import pyarrow as pa
-        from streamlit.elements.lib.column_types import determine_dataframe_schema
+        try:
+            from streamlit.elements.lib.column_config_utils import (
+                determine_dataframe_schema,
+            )
+        except ImportError:
+            from streamlit.elements.lib.column_types import (
+                determine_dataframe_schema,
+            )
         from streamlit.elements.widgets.data_editor import (
             _apply_cell_edits,
             _apply_row_additions,
@@ -1186,6 +1198,9 @@ def _apply_seed_to_dataframe(
                 for col in display_df.columns
             }
             display_df.loc[next_idx] = row_dict
+        for dt_col in datetime_cols:
+            if dt_col in display_df.columns and not pd.api.types.is_datetime64_any_dtype(display_df[dt_col].dtype):
+                display_df[dt_col] = pd.to_datetime(display_df[dt_col], errors="coerce")
         return display_df
 
 
@@ -1342,6 +1357,13 @@ def _wrap_data_editor(data, *args, **kwargs):
                 display_df = frozen_df.copy()
         else:
             st.session_state[frozen_key] = display_df.copy()
+    for col in data.columns:
+        if (
+            col in display_df.columns
+            and pd.api.types.is_datetime64_any_dtype(data[col].dtype)
+            and not pd.api.types.is_datetime64_any_dtype(display_df[col].dtype)
+        ):
+            display_df[col] = pd.to_datetime(display_df[col], errors="coerce")
     st.session_state[f"_table_display_df_{logical_key}"] = display_df.copy()
     _capture_editor_undo_meta(logical_key, display_df, kwargs.get("column_config"))
     result_df = _ORIG_DATA_EDITOR(display_df, *args, **kwargs)

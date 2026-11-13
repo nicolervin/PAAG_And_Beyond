@@ -77,6 +77,7 @@ from utils.table_filters import (
 from utils.table_ui import (
     check_standalone_conflict_resolution,
     compare_record_field_conflicts,
+    format_part_label,
     dataframe_to_excel,
     drop_untouched_new_rows,
     editable_table_footer,
@@ -1868,7 +1869,12 @@ valid_part_ids = set(parts["id"].astype(str))
 if st.session_state.get(selected_part_key) not in valid_part_ids:
     st.session_state[selected_part_key] = str(parts.iloc[0]["id"])
 part = parts.loc[parts["id"].astype(str) == st.session_state[selected_part_key]].iloc[0].to_dict()
-part_name = str(part.get("description") or "").strip()
+part_name = format_part_label(
+    part.get("part_number"),
+    part.get("description"),
+    part.get("factory_nickname"),
+    include_part_number=False,
+)
 part_details_title = f"Part Details · {part['part_number']}"
 if part_name:
     part_details_title += f" {part_name}"
@@ -2938,7 +2944,15 @@ with image_col.container(border=True):
 
 with details_col.container(border=True):
     st.subheader(part["part_number"])
-    st.write(part["description"] or "No part name")
+    st.write(
+        format_part_label(
+            part.get("part_number"),
+            part.get("description"),
+            part.get("factory_nickname"),
+            include_part_number=False,
+        )
+        or "No part name"
+    )
     detail_cols = st.columns(2)
     detail_cols[0].metric("Design Maturity", part.get("design_maturity") or part.get("revision") or "—")
     detail_cols[1].metric("Source", part["source"])

@@ -15,6 +15,7 @@ This file is the authoritative reference for every Process at a Glance database 
 - **Purpose:** A named planning branch used to compare alternative takt, balancing, and process plans without mixing their records. `takt_time_s` remains canonical seconds while `takt_time_unit` stores the scenario's independent takt display preference. `yamazumi_time_unit` separately controls Yamazumi work-duration presentation and entry; neither preference changes persisted timing quantities.
 - **Key relationships:** Belongs to `projects`. May reference another `planning_scenarios` row as its parent. Owns `part_scenario_activity`, `yamazumi_areas`, `work_elements`, and `process_part_groups`. Scenario cloning copies the applicable scenario-owned planning data.
 - **Scope:** Scenario-specific.
+- **Scenario Active toggle:** Overview's **Scenario definitions** table exposes an **Active** checkbox column mapped to `planning_scenarios.status` (`'Working'` when checked vs. `'Archived'` when unchecked; existing non-archived statuses such as `'Frozen'` or `'Released'` remain preserved when kept active). Unchecking **Active** hides the scenario from the sidebar and page-header scenario selectors without deleting any scenario-owned records, while keeping it visible in Overview's **Scenario definitions** table so it can be re-activated at any time. At least one planning scenario per project must remain Active; deactivating the currently viewed scenario automatically switches the session to the newest remaining active scenario.
 
 Creating a new active Fishbone section or subassembly atomically creates one linked Yamazumi area in every existing planning scenario, including archived scenarios. Automatic creation is idempotent and create-only: it uses a new UUID, the Fishbone section name, and no takt override, but never relinks, renames, detaches, or otherwise repairs an existing area. A same-name or conflicting area is preserved and reported for explicit repair; unaffected scenarios still receive their new areas. Later scenario clones retain the established behavior of copying the source scenario's linked areas. Yamazumi does not display the fixed Fishbone relationship for an already linked area; only an imported or legacy area with a null `section_id` exposes **Pair with Fishbone section**.
 
@@ -153,6 +154,12 @@ The Yamazumi workbook's unlabelled `Pitch_Takt_time` and `Work_Time_to_complete`
 - **Purpose:** Represents one placed occurrence or use of a catalog part in a fishbone section, with a strictly positive decimal occurrence quantity, use or installation description, notes, order, and a controlled `pits_sync_status` of `Not linked`, `In sync`, `Quantity differs`, or `No longer found`. One part may have multiple assignments.
 - **Key relationships:** Belongs to `projects`, references `parts`, and references `assembly_sections`. Process pairing validates that selected catalog parts are available in the relevant section and may save the exact placement through `process_part_options.fishbone_assignment_id`. At most one `pits_bom_occurrences` row may reference an assignment as its approved source occurrence.
 - **Scope:** Project-wide; scenario views filter these assignments using `part_scenario_activity`.
+
+### `fishbone_sticky_notes`
+
+- **Purpose:** Stores collaborative digital sticky notes placed on the Interactive Fishbone canvas, including note text, editor attribution (`author_name` displayed in the bottom corner of the note), color (`'yellow'`, `'pink'`, `'blue'`, `'green'`, `'orange'`, `'purple'`), orientation (`'square'` normal `0°` square/rectangle vs. `'diamond'` rotated `45°` diamond shape), 2D canvas coordinates (`canvas_x`, `canvas_y`), 2-direction dimensions (`width`, `height`), and timestamps.
+- **Key relationships:** Belongs to `projects` (`ON DELETE CASCADE`) and optionally references `assembly_sections` (`ON DELETE SET NULL`).
+- **Scope:** Project-wide (`All scenarios`), matching the Fishbone framework (`assembly_sections` and `assembly_section_connections`).
 
 ### `manufacturing_assemblies`
 
@@ -1402,7 +1409,7 @@ In-house fabrication tagging for Fishbone sections: a future idea to mark a Suba
 - **Relationship to the critical thread:** Op ID is a read-only derived label over the existing critical thread: project-wide Fishbone structure → scenario-specific Yamazumi area and pitch → reconciled Yamazumi element → Process at a Glance Work Element. It does not create, replace, approve, or modify any Fishbone, Yamazumi, or Process planning decision.
 - **Scope:** Scenario-specific. `work_elements`, `yamazumi_elements`, `yamazumi_pitches`, and `yamazumi_areas` belong to the active planning scenario. Project-wide `assembly_sections` rows are read-only structural input. The calculation must validate the active project and scenario throughout and must never resolve a Process step, Yamazumi element, pitch, or area from another planning scenario.
 - **Storage:** No new table, field, cached value, or backfill is introduced. Op IDs are computed fresh whenever displayed. The shared store-layer batch implementation returns display values for multiple `work_elements` rows and supplies the non-persisted physical sort position used by both the PFMEA Process Function picker and Control Plan Pr. Nº suggestions. Complete options use Fishbone traversal first, followed by the separately decoded Pitch-address components (numeric sub-line, case-insensitive work-area letters, numeric work-area suffix, and numeric position), then Yamazumi element/stack order and a stable-ID tie-breaker. This natural comparison keeps values such as `WA2` before `WA10`. Nonconforming Pitch addresses sort after conforming addresses within their Fishbone group and use curated Yamazumi Pitch sequence as a deterministic fallback; incomplete source states sort after complete options. The address text remains unchanged for display. The single-record helper delegates to the same calculation. No consumer stores the Op ID or uses it as a relationship.
-- **Format:** A complete Op ID has the form `M{n}S{n}{depth-or-branch-designator}.{pitch address}.{stack position}`, for example `M1S1b.01-ML1-004.4`. A Work Element attached directly to a Main spine section omits the entire `S{n}{...}` portion.
+- **Format:** A complete Op ID has the form `<Section Name>.<Pitch Address>.<Position>`, for example `Door Assembly.01-ML1-004.4`, where `<Section Name>` is the linked Fishbone section's `assembly_sections.name`, `<Pitch Address>` is `yamazumi_pitches.pitch_number`, and `<Position>` is the 1-based stack position within that pitch.
 - **Mainline prefix:** Use `assembly_section_walk_order(project_id)` and count only rows whose `assembly_sections.section_type` is `Main spine`, in walk order, starting at `1`. The resulting `M1`, `M2`, and subsequent values are computed positions. They are not derived from the raw `assembly_sections.sequence` value because stored sequence values are spaced and are not guaranteed to be clean or contiguous.
 - **Subassembly lineage and depth:** When the linked `yamazumi_areas.section_id` identifies a Subassembly section, walk its `assembly_sections.parent_id` ancestry to its Main spine ancestor. Each top-level Subassembly child feeding directly into that Main spine establishes a lineage numbered `S1`, `S2`, `S3`, and so on in sibling `(sequence, name)` order. The top-level Subassembly receives depth letter `a`; each successively nested non-branching level receives `b`, `c`, and subsequent letters.
 - **Branch-point rule:** When one section at a given depth has multiple Subassembly children, those sibling branches use the approved compound designator rather than creating new top-level lineage numbers or receiving an ambiguous shared letter. For example, multiple branches beneath the section carrying `b` are identified as `b1`, `b2`, and so on in `(sequence, name)` order. The same numeric-discriminator rule applies recursively wherever another branch occurs. No new ordering or tie-breaker field is introduced.
@@ -1574,7 +1581,7 @@ Future issued-document generation and approval (not implemented)
 - **Date proposed:** October 14, 2026
 - **Review status:** **Approved for implementation on branch `NE_fishbone_flow_Updates`**
 - **1. Connections:** Connects to `assembly_sections` (Fishbone framework spines/sections), `fishbone_part_assignments` (placed part occurrences in sections), `parts` / `pits_bom_occurrences` (Parts Catalog and BOM model tree), `manufacturing_assemblies` (Built and Installed sections), and downstream `yamazumi_areas` (linked to `assembly_sections`), `yamazumi_pitches`, and `work_elements` (Process at a Glance via live-derived Op IDs).
-- **2. Relationship to the critical thread:** Parts Catalog & BOM model tree -> placed into `fishbone_part_assignments` -> organized on the interactive canvas into `assembly_sections` with many-to-many flow lines in `assembly_section_connections` -> drives scenario-aware Yamazumi areas -> drives Op IDs (`M1+M2.S1a...`) in Process at a Glance.
+- **2. Relationship to the critical thread:** Parts Catalog & BOM model tree -> placed into `fishbone_part_assignments` -> organized on the interactive canvas into `assembly_sections` with many-to-many flow lines in `assembly_section_connections` -> drives scenario-aware Yamazumi areas -> drives Op IDs (`<Section Name>.<Pitch Address>.<Position>`) in Process at a Glance.
 - **3. Scope:** Project-wide. `assembly_sections` (with `grid_x`, `grid_y`), `assembly_section_connections`, and `fishbone_part_assignments` belong to `projects`. When subassembly parts have `step_number` (Phase 2), it is project-wide. Fishbone structure creation does NOT automatically force or sync Yamazumi pitches ahead of time.
 - **4. Tables and fields:**
   - Extended `assembly_sections`:
@@ -1951,3 +1958,59 @@ Future issued-document generation and approval (not implemented)
      - **Universal Deletion Standard:** Checked delete confirmation modal for safety requirement rows.
      - **Universal Audit Trail & History Standard:** Every persisted change (`safety_requirements` JSA fields and `yamazumi_pitches` JSA settings) is logged via `record_audit_event()` under category `"Safety requirements"` with Current editor attribution and exposed in the bottom `audit_history()` expander.
      - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS`, `TROUBLESHOOTING_FAQS`, `GLOSSARY_TERMS`) and in-page `Instructions` popovers.
+
+
+### Project Overview: Scenario Active Toggle & Copy Project from Existing Project (`projects`, `planning_scenarios`, `app_pages/overview.py`, `utils/project_store.py`, `utils/project_transfer.py`)
+
+- **Proposed by:** Nicole Ervin, project owner
+- **Date recorded:** November 9, 2026
+- **Approval status:** Approved by project owner on November 9, 2026 for implementation on branch `NE_Continue_Safety_Functional_Reviews`.
+- **Purpose:**
+  1. *Scenario Active Toggle:* Allow collaborators to turn planning scenarios on and off (`Active` checkbox column) in the **Scenario definitions** table on **Project overview**. Active scenarios (`status != 'Archived'`) appear in the sidebar and page-title scenario selectors across the application; inactive scenarios (`status = 'Archived'`) are hidden from active scenario selectors without deleting their data and remain manageable in Overview's **Scenario definitions** table.
+  2. *Copy Project to New Project:* Allow collaborators to create a new NPI project copied from an existing project (e.g., copying a Current Production project to start a new NPI project) directly from the **Project definition** section (and **New project** dialog) on **Project overview**, copying all project-wide master data, uploaded media files, and **only the active planning scenarios** (`status != 'Archived'`) and their scenario-owned records into a new independent project.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:*
+     - Scenario Active Toggle: connects to `planning_scenarios` (`planning_scenarios.project_id -> projects.id`).
+     - Copy Project to New Project: connects to `projects` (root entity) and clones all project-wide entities and active-scenario-owned entities across `PROJECT_TRANSFER_TABLES` (`planning_scenarios`, `project_models`, `complexity_features`, `parts`, `assembly_sections`, `fishbone_part_assignments`, `yamazumi_areas`/`pitches`/`elements`, `work_elements`, `layout_plans`, Functional Reviews, and owned files in `data/uploads/`).
+  2. *Critical thread relationship:*
+     - Scenario Active Toggle: operates at the `projects -> planning_scenarios` branch level of the critical thread (*Product Architecture -> Parts Catalog -> Fishbone -> scenario-specific Yamazumi -> scenario-specific Process at a Glance -> derived Pin Map*), controlling which planning scenarios are active and selectable in downstream scenario-aware and scenario-specific views.
+     - Copy Project to New Project: deep-clones the complete critical thread from a source `projects` record into a brand-new `projects` UUID with fresh remapped UUIDs for all child records and duplicated upload files so edits in the new NPI project never mutate the source production project.
+  3. *Scope:*
+     - Scenario Active Toggle: Scenario-specific metadata managed in the **Planning scenarios** section on **Project overview**.
+     - Copy Project to New Project: Project-wide (`scope="project"`), creating a new top-level `projects` record and switching the active workspace to the new project.
+  4. *Table requirement:* No new tables or columns required. Existing `planning_scenarios.status` serves the **Active** toggle (`status != 'Archived'` when Active, `'Archived'` when inactive, enforcing that at least one scenario in a project remains Active). Existing `projects` and `PROJECT_TRANSFER_TABLES` in `utils/project_transfer.py` serve project copying, filtering scenario-scoped tables and child graphs to active scenarios only.
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Universal Save Action Standard:** The **Active** checkbox in **Scenario definitions** saves atomically via **Save & Refresh** and **Undo** (`editable_table_footer()`) with concurrent save conflict protection. Project copying uses a modal dialog with required **Project name** and **Building location** validation.
+     - **Universal Deletion Standard:** Deactivating a scenario hides it from active scenario switchers without deleting any records.
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` with Current editor attribution under `"Planning scenarios"` and `"Projects"` (`"Copy project"`), exposed in the bottom **History** expander on **Project overview**.
+     - **Canonical Terminology & Help Text:** Uses the canonical label **Active** for the boolean toggle column, preserves scope badges, and updates `utils/help_hub.py`.
+
+### Interactive Fishbone Digital Sticky Notes (`fishbone_sticky_notes`, `app_pages/fishbone.py`, `utils/fishbone_visual.py`, `utils/fishbone_store.py`)
+
+- **Proposed by:** Nicole Ervin (Project Owner) & Antigravity
+- **Date recorded:** November 12, 2026
+- **Approval status:** Approved by project owner on November 12, 2026 for implementation on branch `NE_Continue_Safety_Functional_Reviews`.
+- **Purpose:** Add interactive digital sticky notes to the Interactive Fishbone canvas so collaborators can leave visual annotations, reminders, and review callouts directly on the Fishbone diagram with editor attribution in the bottom corner, 2-direction resizing (`width` and `height` for square or rectangular notes), selectable note colors, orientation toggle (`square` vs. `45°` `diamond` shape), free drag-and-drop positioning, and deletion.
+- **Answers to New Module Proposal Gate Questions:**
+  1. *Connected entities:* Connects to `projects` (`project_id -> projects.id`) with optional association to a Fishbone section (`section_id -> assembly_sections.id`).
+  2. *Critical thread relationship:* Attaches to the **Fishbone** stage of the critical thread (*Product Architecture -> Parts -> Fishbone -> Yamazumi -> Process at a Glance*) as collaborative visual canvas annotations that do not alter part placements, Yamazumi balancing, or Op IDs.
+  3. *Scope:* Project-wide (`All scenarios`), matching the Fishbone framework (`assembly_sections` and `assembly_section_connections`).
+  4. *Table & field requirement:* New project-owned table `fishbone_sticky_notes`:
+     - `id TEXT PRIMARY KEY` (UUID)
+     - `project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE`
+     - `section_id TEXT DEFAULT NULL REFERENCES assembly_sections(id) ON DELETE SET NULL`
+     - `text TEXT NOT NULL DEFAULT ''`
+     - `author_name TEXT NOT NULL DEFAULT ''` (editor's name displayed in the bottom corner of the note)
+     - `color TEXT NOT NULL DEFAULT 'yellow'` (`'yellow'`, `'pink'`, `'blue'`, `'green'`, `'orange'`, `'purple'`)
+     - `orientation TEXT NOT NULL DEFAULT 'square'` (`'square'` normal `0°` rectangle/square vs. `'diamond'` rotated `45°` diamond shape)
+     - `canvas_x REAL NOT NULL DEFAULT 120.0`
+     - `canvas_y REAL NOT NULL DEFAULT 120.0`
+     - `width REAL NOT NULL DEFAULT 160.0`
+     - `height REAL NOT NULL DEFAULT 160.0`
+     - `created_at TEXT NOT NULL`
+     - `updated_at TEXT NOT NULL`
+  5. *Applicable DESIGN_SYSTEM.md standards:*
+     - **Universal Save Action Standard:** Sticky note additions, edits, moves, resizes, and deletions on the Fishbone canvas stage in the Fishbone canvas draft and commit atomically via **Save & Refresh** (with **Undo last edit**, **Redo last edit**, and **Discard all edits** support, plus saved-state **Undo** snapshot restoration).
+     - **Universal Deletion Standard:** Delete button on the sticky note removes unsaved notes immediately or stages saved notes for deletion, archiving deleted saved notes to the 30-day Recycle Bin (`recycle_bin_items`).
+     - **Universal Audit Trail & History Standard:** Logged via `record_audit_event()` under `"Fishbone framework"` with Current editor attribution and exposed in the bottom **History** expander on the Fishbone page.
+     - **In-App Help Synchronization:** Updates `utils/help_hub.py` (`PAGE_MANUALS["fishbone"]`).
