@@ -54,6 +54,7 @@ from utils.table_filters import (
     has_unsaved_table_changes,
     logical_table_editor_key,
     merge_filtered_edits,
+    mount_table_layout_preservation_script,
     request_table_editor_reset,
 )
 
@@ -63,6 +64,7 @@ page_title_with_scope("Complexity Trees", scope="project")
 st.caption("Translate each Model number into the Model name and description the IE and lean team use during planning.")
 if not project_id:
     st.stop()
+mount_table_layout_preservation_script()
 if st.session_state.get("_models_active_project_id") != str(project_id):
     if st.session_state.get("_models_active_project_id") is not None:
         request_table_editor_reset(f"model_definitions_editor_v2_{project_id}")
@@ -517,6 +519,35 @@ def confirm_model_delete() -> None:
 if st.session_state.get(f"models_pending_delete_{project_id}"):
     confirm_model_delete()
 
+def _remap_model_fields_in_session_filters(
+    proj_id: str,
+    model_num_map: dict[str, str],
+    model_name_map: dict[str, str],
+) -> None:
+    """Update active Complexity tree filter selections when model numbers or names are renamed."""
+    for col_suffix, rmap in (
+        ("official_model_number", model_num_map),
+        ("common_name", model_name_map),
+    ):
+        if not rmap:
+            continue
+        w_key = f"complexity_tree_filters_{proj_id}_{col_suffix}"
+        cur = st.session_state.get(w_key) or st.session_state.get(
+            f"_saved_filter_col_{w_key}"
+        )
+        if isinstance(cur, list) and cur:
+            updated = list(
+                dict.fromkeys(rmap.get(str(v).strip(), v) for v in cur)
+            )
+            if updated != cur:
+                st.session_state[f"_pending_filter_col_{w_key}"] = updated
+                st.session_state[f"_saved_filter_col_{w_key}"] = updated
+                try:
+                    st.session_state[w_key] = updated
+                except Exception:
+                    pass
+
+
 if save_requested:
     try:
         if not selected_models.empty:
@@ -537,12 +568,22 @@ if save_requested:
         ]
         added_model_rows = 0
         edited_model_rows = 0
+        model_num_rename_map: dict[str, str] = {}
+        model_name_rename_map: dict[str, str] = {}
         for _, row in merged_models.iterrows():
             model_id = "" if pd.isna(row.get("id")) else str(row.get("id")).strip()
             if not model_id or model_id not in existing_models_by_id:
                 added_model_rows += 1
                 continue
             previous = existing_models_by_id[model_id]
+            old_num = "" if pd.isna(previous.get("model_number")) else str(previous.get("model_number") or "").strip()
+            new_num = "" if pd.isna(row.get("model_number")) else str(row.get("model_number") or "").strip()
+            if old_num and new_num and old_num != new_num:
+                model_num_rename_map[old_num] = new_num
+            old_name = "" if pd.isna(previous.get("display_name")) else str(previous.get("display_name") or "").strip()
+            new_name = "" if pd.isna(row.get("display_name")) else str(row.get("display_name") or "").strip()
+            if old_name and new_name and old_name != new_name:
+                model_name_rename_map[old_name] = new_name
             if any(
                 (None if pd.isna(row.get(field)) else row.get(field))
                 != (None if pd.isna(previous.get(field)) else previous.get(field))
@@ -550,6 +591,9 @@ if save_requested:
             ):
                 edited_model_rows += 1
         count = update_project_model_rows(project_id, merged_models)
+        _remap_model_fields_in_session_filters(
+            project_id, model_num_rename_map, model_name_rename_map
+        )
         record_audit_event(
             project_id,
             "Model definitions",
@@ -894,17 +938,93 @@ def _remap_choice_in_session_filters(
     for feat_id, rmap in rename_maps.items():
         if not rmap:
             continue
-        for filter_key in (
-            f"complexity_tree_filters_{proj_id}_{feat_id}",
-            f"_saved_filter_col_complexity_tree_filters_{proj_id}_{feat_id}",
-        ):
-            cur = st.session_state.get(filter_key)
-            if isinstance(cur, list) and cur:
-                updated = list(
-                    dict.fromkeys(rmap.get(str(v).strip(), v) for v in cur)
-                )
-                if updated != cur:
-                    st.session_state[filter_key] = updated
+        w_key = f"complexity_tree_filters_{proj_id}_{feat_id}"
+        cur = st.session_state.get(w_key) or st.session_state.get(
+            f"_saved_filter_col_{w_key}"
+        )
+        if isinstance(cur, list) and cur:
+            updated = list(
+                dict.fromkeys(rmap.get(str(v).strip(), v) for v in cur)
+            )
+            if updated != cur:
+                st.session_state[f"_pending_filter_col_{w_key}"] = updated
+                st.session_state[f"_saved_filter_col_{w_key}"] = updated
+                try:
+                    st.session_state[w_key] = updated
+                except Exception:
+                    pass
+
+
+def _remap_feature_metadata_in_session_filters(
+    proj_id: str,
+    old_features_df: pd.DataFrame,
+    new_features_df: pd.DataFrame,
+) -> None:
+    """Update active Feature definitions and visual category filters when category or subsystem values are renamed."""
+    if old_features_df is None or old_features_df.empty or new_features_df is None or new_features_df.empty:
+        return
+    old_by_id = {
+        clean_feature_text(r.get("id")): r
+        for _, r in old_features_df.iterrows()
+        if clean_feature_text(r.get("id"))
+    }
+    remaining_cats = {
+        clean_feature_text(r.get("category"))
+        for _, r in new_features_df.iterrows()
+        if clean_feature_text(r.get("category"))
+    }
+    remaining_subs = {
+        clean_feature_text(r.get("subsystem"))
+        for _, r in new_features_df.iterrows()
+        if clean_feature_text(r.get("subsystem"))
+    }
+    cat_map: dict[str, str] = {}
+    sub_map: dict[str, str] = {}
+    for _, r in new_features_df.iterrows():
+        fid = clean_feature_text(r.get("id"))
+        if not fid or fid not in old_by_id:
+            continue
+        old_r = old_by_id[fid]
+        old_cat = clean_feature_text(old_r.get("category"))
+        new_cat = clean_feature_text(r.get("category"))
+        if old_cat and new_cat and old_cat != new_cat and old_cat not in remaining_cats:
+            cat_map[old_cat] = new_cat
+        old_sub = clean_feature_text(old_r.get("subsystem"))
+        new_sub = clean_feature_text(r.get("subsystem"))
+        if old_sub and new_sub and old_sub != new_sub and old_sub not in remaining_subs:
+            sub_map[old_sub] = new_sub
+    if cat_map:
+        feat_cat_wkey = f"feature_definition_filters_{proj_id}_category"
+        cur_feat_cat = st.session_state.get(feat_cat_wkey) or st.session_state.get(
+            f"_saved_filter_col_{feat_cat_wkey}"
+        )
+        if isinstance(cur_feat_cat, list) and cur_feat_cat:
+            updated_feat_cat = list(
+                dict.fromkeys(cat_map.get(str(v).strip(), v) for v in cur_feat_cat)
+            )
+            if updated_feat_cat != cur_feat_cat:
+                st.session_state[f"_pending_filter_col_{feat_cat_wkey}"] = updated_feat_cat
+                st.session_state[f"_saved_filter_col_{feat_cat_wkey}"] = updated_feat_cat
+        vis_cat_wkey = f"complexity_tree_visual_category_{proj_id}"
+        cur_vis_cat = st.session_state.get(vis_cat_wkey)
+        if isinstance(cur_vis_cat, list) and cur_vis_cat:
+            updated_vis_cat = list(
+                dict.fromkeys(cat_map.get(str(v).strip(), v) for v in cur_vis_cat)
+            )
+            if updated_vis_cat != cur_vis_cat:
+                st.session_state[f"_pending_{vis_cat_wkey}"] = updated_vis_cat
+    if sub_map:
+        feat_sub_wkey = f"feature_definition_filters_{proj_id}_subsystem"
+        cur_feat_sub = st.session_state.get(feat_sub_wkey) or st.session_state.get(
+            f"_saved_filter_col_{feat_sub_wkey}"
+        )
+        if isinstance(cur_feat_sub, list) and cur_feat_sub:
+            updated_feat_sub = list(
+                dict.fromkeys(sub_map.get(str(v).strip(), v) for v in cur_feat_sub)
+            )
+            if updated_feat_sub != cur_feat_sub:
+                st.session_state[f"_pending_filter_col_{feat_sub_wkey}"] = updated_feat_sub
+                st.session_state[f"_saved_filter_col_{feat_sub_wkey}"] = updated_feat_sub
 
 
 def _preserve_and_remap_tree_editor_draft(
@@ -1061,6 +1181,9 @@ if feature_actions.save_and_refresh:
         )
         changed_features = pending_feature_edit_summaries()
         _remap_choice_in_session_filters(project_id, live_choice_rename_maps)
+        _remap_feature_metadata_in_session_filters(
+            project_id, feature_rows, merged_features
+        )
         _preserve_and_remap_tree_editor_draft(tree_editor_key, live_choice_rename_maps)
         count = update_complexity_features(project_id, merged_features)
         editor_name = st.session_state.get("current_editor", "")
@@ -1079,7 +1202,6 @@ if feature_actions.save_and_refresh:
             editor_name,
             {"features": changed_features, "created_count": count_table_create_and_edit_rows(feature_rows, merged_features)[0], "updated_count": count_table_create_and_edit_rows(feature_rows, merged_features)[1]},
         )
-        request_table_editor_reset(tree_editor_key)
         request_table_editor_reset(feature_editor_key)
         st.toast(
             f"Saved {count} feature definition(s)"
@@ -1218,8 +1340,19 @@ else:
             for _, f in active_features.iterrows()
         },
     }
+    has_active_tree_col_filters = any(
+        bool(
+            st.session_state.get(f"complexity_tree_filters_{project_id}_{fid}")
+            or st.session_state.get(
+                f"_saved_filter_col_complexity_tree_filters_{project_id}_{fid}"
+            )
+        )
+        for fid in active_feature_ids
+    )
     tree_filter_expander = st.expander(
-        "Filter columns", icon=":material/filter_list:", expanded=False
+        "Filter columns",
+        icon=":material/filter_list:",
+        expanded=has_active_tree_col_filters,
     )
     tree_always_visible_filters = st.container(
         horizontal=True, vertical_alignment="bottom"
@@ -1335,6 +1468,10 @@ else:
             )
             merged_feat = merge_filtered_edits(
                 feature_rows, visible_features, cleaned_feat
+            )
+            _remap_choice_in_session_filters(project_id, live_choice_rename_maps)
+            _remap_feature_metadata_in_session_filters(
+                project_id, feature_rows, merged_feat
             )
             changed_feat_summaries = pending_feature_edit_summaries()
             update_complexity_features(project_id, merged_feat)
@@ -1495,6 +1632,10 @@ else:
         }
     )
     visual_category_key = f"complexity_tree_visual_category_{project_id}"
+    if f"_pending_{visual_category_key}" in st.session_state:
+        st.session_state[visual_category_key] = list(
+            st.session_state.pop(f"_pending_{visual_category_key}") or []
+        )
     existing_visual_category = st.session_state.get(visual_category_key)
     if isinstance(existing_visual_category, str):
         st.session_state[visual_category_key] = (
@@ -1799,8 +1940,11 @@ else:
             ".ct-custom-save-btn{padding:3px 8px;border:1px solid var(--st-primary-color,#2563eb);border-radius:5px;background:var(--st-primary-color,#2563eb);color:#ffffff;font:inherit;font-size:.72rem;font-weight:700;cursor:pointer;white-space:nowrap;}"
             ".ct-custom-save-btn:hover{opacity:.92;}"
             ".ct-choice-chips{display:flex;flex-direction:column;gap:5px;padding-top:5px;border-top:1px dashed var(--st-border-color,#e2e8f0);}"
-            ".ct-choice-row{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 5px;border-radius:6px;background:var(--st-secondary-background-color,#f8fafc);flex-wrap:wrap;}"
-            ".ct-choice-preview{font-size:.74rem;font-weight:700;padding:2px 7px;border-radius:4px;min-width:0;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(15,23,42,.12);}"
+            ".ct-choice-row{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:3px 5px;border-radius:6px;border:1px solid transparent;background:var(--st-secondary-background-color,#f8fafc);flex-wrap:wrap;}"
+            ".ct-choice-row.is-selected-choice{border-color:rgba(37,99,235,.45);background:rgba(37,99,235,.06);}"
+            ".ct-choice-left{display:inline-flex;align-items:center;gap:5px;min-width:0;}"
+            ".ct-choice-select-cb{width:14px;height:14px;margin:0;cursor:pointer;accent-color:var(--st-primary-color,#2563eb);flex-shrink:0;}"
+            ".ct-choice-preview{font-size:.74rem;font-weight:700;padding:2px 7px;border-radius:4px;min-width:0;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid rgba(15,23,42,.12);}"
             ".ct-choice-shades{display:inline-flex;align-items:center;gap:3px;}"
             ".complexity-tree-viewport{position:relative;box-sizing:border-box;flex:1 1 auto;width:100%;max-width:100%;min-width:0;padding:12px 14px 16px;overflow-x:auto;overflow-y:visible;}"
             ".complexity-tree-shell.fullscreen-visual .complexity-tree-viewport,.complexity-tree-shell:fullscreen .complexity-tree-viewport{flex:1 1 auto;min-height:0;padding:16px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable both-edges;cursor:grab;}"
@@ -2235,6 +2379,7 @@ else:
                 rootWin.__paagComplexityTreeColorsByProject = rootWin.__paagComplexityTreeColorsByProject || {{}};
                 rootWin.__paagComplexityTreeSavedPaletteByProject = rootWin.__paagComplexityTreeSavedPaletteByProject || {{}};
                 rootWin.__paagComplexityTreeOpenPalettes = rootWin.__paagComplexityTreeOpenPalettes || {{}};
+                rootWin.__paagComplexityTreeSelectedChoices = rootWin.__paagComplexityTreeSelectedChoices || {{}};
                 rootWin.__paagComplexityTreeDraftCustomHex = rootWin.__paagComplexityTreeDraftCustomHex || "#287ec2";
                 rootWin.__paagComplexityTreeSidebarFilter = rootWin.__paagComplexityTreeSidebarFilter || "all";
                 rootWin.__paagComplexityTreeSidebarSearch = rootWin.__paagComplexityTreeSidebarSearch || "";
@@ -2437,7 +2582,7 @@ else:
                 }}
 
                 function emptyColorConfig() {{
-                    return {{ models: {{}}, features: {{}}, featureShades: {{}}, choices: {{}} }};
+                    return {{ models: {{}}, features: {{}}, featureShades: {{}}, choiceShades: {{}}, choices: {{}} }};
                 }}
 
                 function getSavedCustomColors(projId) {{
@@ -2448,6 +2593,7 @@ else:
                             models: Object.assign({{}}, mem.models || {{}}),
                             features: Object.assign({{}}, mem.features || {{}}),
                             featureShades: Object.assign({{}}, mem.featureShades || {{}}),
+                            choiceShades: Object.assign({{}}, mem.choiceShades || {{}}),
                             choices: Object.assign({{}}, mem.choices || {{}}),
                         }};
                     }}
@@ -2460,6 +2606,7 @@ else:
                                     models: Object.assign({{}}, parsed.models || {{}}),
                                     features: Object.assign({{}}, parsed.features || {{}}),
                                     featureShades: Object.assign({{}}, parsed.featureShades || {{}}),
+                                    choiceShades: Object.assign({{}}, parsed.choiceShades || {{}}),
                                     choices: Object.assign({{}}, parsed.choices || {{}}),
                                 }};
                                 rootWin.__paagComplexityTreeColorsByProject[projId] = norm;
@@ -2476,6 +2623,7 @@ else:
                         Object.keys(cfg.models || {{}}).length > 0 ||
                         Object.keys(cfg.features || {{}}).length > 0 ||
                         Object.keys(cfg.featureShades || {{}}).length > 0 ||
+                        Object.keys(cfg.choiceShades || {{}}).length > 0 ||
                         Object.keys(cfg.choices || {{}}).length > 0
                     );
                 }}
@@ -2486,12 +2634,14 @@ else:
                         models: Object.assign({{}}, (cfg && cfg.models) || {{}}),
                         features: Object.assign({{}}, (cfg && cfg.features) || {{}}),
                         featureShades: Object.assign({{}}, (cfg && cfg.featureShades) || {{}}),
+                        choiceShades: Object.assign({{}}, (cfg && cfg.choiceShades) || {{}}),
                         choices: Object.assign({{}}, (cfg && cfg.choices) || {{}}),
                     }};
                     const hasAny = (
                         Object.keys(norm.models).length > 0 ||
                         Object.keys(norm.features).length > 0 ||
                         Object.keys(norm.featureShades).length > 0 ||
+                        Object.keys(norm.choiceShades).length > 0 ||
                         Object.keys(norm.choices).length > 0
                     );
                     if (!hasAny) {{
@@ -2560,6 +2710,25 @@ else:
                     }}
                     const defaultFam = CURATED_COLOR_PALETTES[(featIndex || 0) % CURATED_COLOR_PALETTES.length];
                     return defaultFam.shades.slice();
+                }}
+
+                function getChoiceActiveShades(feat, featIndex, choiceVal, customColors) {{
+                    const fId = String(feat.id);
+                    const cKey = fId + "::" + String(choiceVal || "");
+                    const cShadesMap = (customColors && customColors.choiceShades) || {{}};
+                    if (Array.isArray(cShadesMap[cKey]) && cShadesMap[cKey].length >= 5) {{
+                        return cShadesMap[cKey].slice(0, 5).map(function(s) {{ return normalizeHexColor(s, "#e2f3fb"); }});
+                    }}
+                    const featShades = getFeatureActiveShades(feat, featIndex, customColors);
+                    const choicesMap = (customColors && customColors.choices) || {{}};
+                    if (choicesMap[cKey]) {{
+                        const cHex = normalizeHexColor(choicesMap[cKey], "");
+                        if (featShades.indexOf(cHex) !== -1) {{
+                            return featShades;
+                        }}
+                        return buildFiveShadeRamp(cHex);
+                    }}
+                    return featShades;
                 }}
 
                 function findActiveShadeIndex(shadesList, targetHex) {{
@@ -3185,7 +3354,19 @@ else:
                     }});
                 }}
 
-                function buildPaletteDrawerHtml(targetMode, targetKey, activeHex, activeShades, projId) {{
+                function getSelectedChoicesForFeature(featureId) {{
+                    const selMap = rootWin.__paagComplexityTreeSelectedChoices || {{}};
+                    const prefix = String(featureId) + "::";
+                    const out = [];
+                    Object.keys(selMap).forEach(function(k) {{
+                        if (selMap[k] && k.indexOf(prefix) === 0) {{
+                            out.push(k.slice(prefix.length));
+                        }}
+                    }});
+                    return out;
+                }}
+
+                function buildPaletteDrawerHtml(targetMode, targetKey, activeHex, activeShades, projId, selectedCount) {{
                     const savedCustomList = getSavedUserPalette(projId);
                     const draftHex = normalizeHexColor(
                         rootWin.__paagComplexityTreeDraftCustomHex || activeHex || "#287ec2",
@@ -3193,6 +3374,7 @@ else:
                     );
                     const draftRamp = buildFiveShadeRamp(draftHex);
                     const isFeatureMode = (targetMode === "feature");
+                    const isChoiceMode = (targetMode === "choice");
                     const activeFirstShade = normalizeHexColor(
                         (Array.isArray(activeShades) && activeShades[0]) || activeHex || "",
                         ""
@@ -3201,15 +3383,16 @@ else:
 
                     const familyGridHtml = CURATED_COLOR_PALETTES.map(function(fam) {{
                         const famFirst = normalizeHexColor(fam.shades[0], "");
-                        const isActiveFam = isFeatureMode && famFirst === activeFirstShade;
+                        const famShadesStr = fam.shades.join(",");
+                        const isActiveFam = (isFeatureMode || isChoiceMode) && famFirst === activeFirstShade;
                         const dotsHtml = fam.shades.map(function(shHex, sIdx) {{
                             const cleanSh = normalizeHexColor(shHex, "#ffffff");
                             const isDotActive = !isFeatureMode && cleanSh === activeHexClean;
                             return (
                                 '\\x3cbutton type="button" class="ct-shade-dot' + (isDotActive ? ' is-active-shade' : '') + '" ' +
                                 (isFeatureMode
-                                    ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(fam.shades.join(",")) + '" data-ct-family-base="' + cleanSh + '" title="Use ' + escapeAttr(fam.name) + ' palette for this feature"'
-                                    : 'data-ct-swatch-type="' + escapeAttr(targetMode) + '" data-ct-target-key="' + escapeAttr(targetKey) + '" data-ct-swatch-color="' + cleanSh + '" title="Select ' + escapeAttr(fam.name) + ' shade ' + (sIdx + 1) + ' (' + cleanSh + ')"'
+                                    ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(famShadesStr) + '" data-ct-family-base="' + cleanSh + '" title="Use ' + escapeAttr(fam.name) + ' palette"'
+                                    : 'data-ct-swatch-type="' + escapeAttr(targetMode) + '" data-ct-target-key="' + escapeAttr(targetKey) + '" data-ct-swatch-color="' + cleanSh + '" data-ct-swatch-shades="' + escapeAttr(famShadesStr) + '" title="Select ' + escapeAttr(fam.name) + ' shade ' + (sIdx + 1) + ' (' + cleanSh + ')"'
                                 ) +
                                 ' style="background:' + cleanSh + ';">\\x3c/button>'
                             );
@@ -3217,8 +3400,10 @@ else:
                         return (
                             '\\x3cdiv class="ct-palette-family-row' + (isActiveFam ? ' is-active-family' : '') + '" ' +
                             (isFeatureMode
-                                ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(fam.shades.join(",")) + '" data-ct-family-base="' + famFirst + '" title="Apply ' + escapeAttr(fam.name) + ' shade family"'
-                                : 'title="' + escapeAttr(fam.name) + ' shades"'
+                                ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(famShadesStr) + '" data-ct-family-base="' + famFirst + '" title="Apply ' + escapeAttr(fam.name) + ' shade family"'
+                                : (isChoiceMode
+                                    ? 'data-ct-family-target="choice" data-ct-choice-key="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(famShadesStr) + '" data-ct-family-base="' + famFirst + '" title="Apply ' + escapeAttr(fam.name) + ' 5-shade palette to this item"'
+                                    : 'title="' + escapeAttr(fam.name) + ' shades"')
                             ) +
                             '>' + dotsHtml + '\\x3c/div>'
                         );
@@ -3229,15 +3414,16 @@ else:
                         const savedRows = savedCustomList.map(function(savedHex) {{
                             const cleanSaved = normalizeHexColor(savedHex, "#287ec2");
                             const ramp = buildFiveShadeRamp(cleanSaved);
-                            const isActiveSavedFam = isFeatureMode && normalizeHexColor(ramp[0], "") === activeFirstShade;
+                            const rampStr = ramp.join(",");
+                            const isActiveSavedFam = (isFeatureMode || isChoiceMode) && normalizeHexColor(ramp[0], "") === activeFirstShade;
                             const dots = ramp.map(function(shHex, sIdx) {{
                                 const cleanSh = normalizeHexColor(shHex, "#ffffff");
                                 const isDotActive = !isFeatureMode && cleanSh === activeHexClean;
                                 return (
                                     '\\x3cbutton type="button" class="ct-shade-dot' + (isDotActive ? ' is-active-shade' : '') + '" ' +
                                     (isFeatureMode
-                                        ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(ramp.join(",")) + '" data-ct-family-base="' + cleanSaved + '" title="Use saved custom palette (' + cleanSaved + ')"'
-                                        : 'data-ct-swatch-type="' + escapeAttr(targetMode) + '" data-ct-target-key="' + escapeAttr(targetKey) + '" data-ct-swatch-color="' + cleanSh + '" title="Select saved custom shade ' + (sIdx + 1) + ' (' + cleanSh + ')"'
+                                        ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(rampStr) + '" data-ct-family-base="' + cleanSaved + '" title="Use saved custom palette (' + cleanSaved + ')"'
+                                        : 'data-ct-swatch-type="' + escapeAttr(targetMode) + '" data-ct-target-key="' + escapeAttr(targetKey) + '" data-ct-swatch-color="' + cleanSh + '" data-ct-swatch-shades="' + escapeAttr(rampStr) + '" title="Select saved custom shade ' + (sIdx + 1) + ' (' + cleanSh + ')"'
                                     ) +
                                     ' style="background:' + cleanSh + ';">\\x3c/button>'
                                 );
@@ -3246,8 +3432,10 @@ else:
                                 '\\x3cdiv class="ct-saved-custom-row">' +
                                 '\\x3cdiv class="ct-palette-family-row' + (isActiveSavedFam ? ' is-active-family' : '') + '" style="flex:1 1 auto;" ' +
                                 (isFeatureMode
-                                    ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(ramp.join(",")) + '" data-ct-family-base="' + cleanSaved + '" title="Apply saved custom shade family (' + cleanSaved + ')"'
-                                    : ''
+                                    ? 'data-ct-family-target="feature" data-ct-feature-id="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(rampStr) + '" data-ct-family-base="' + cleanSaved + '" title="Apply saved custom shade family (' + cleanSaved + ')"'
+                                    : (isChoiceMode
+                                        ? 'data-ct-family-target="choice" data-ct-choice-key="' + escapeAttr(targetKey) + '" data-ct-family-shades="' + escapeAttr(rampStr) + '" data-ct-family-base="' + cleanSaved + '" title="Apply saved custom 5-shade palette to this item"'
+                                        : '')
                                 ) +
                                 '>' + dots + '\\x3c/div>' +
                                 '\\x3cbutton type="button" class="ct-saved-custom-delete" data-ct-delete-saved-color="' + cleanSaved + '" title="Remove saved custom color ' + cleanSaved + '">×\\x3c/button>' +
@@ -3266,10 +3454,19 @@ else:
                         return '\\x3cspan class="ct-family-mini-dot" style="background:' + sh + ';">\\x3c/span>';
                     }}).join("");
 
+                    let drawerTitle = "Choose a shade from the palette";
+                    if (isFeatureMode) {{
+                        drawerTitle = (selectedCount && selectedCount > 0)
+                            ? ("Choose a palette for " + selectedCount + " selected item" + (selectedCount === 1 ? "" : "s"))
+                            : "Choose a color palette (5 shades)";
+                    }} else if (isChoiceMode) {{
+                        drawerTitle = "Choose a 5-shade palette or shade for this item";
+                    }}
+
                     return (
                         '\\x3cdiv class="ct-palette-drawer" data-ct-palette-drawer="' + escapeAttr(targetMode + ":" + targetKey) + '">' +
                         '\\x3cdiv class="ct-palette-drawer-title">' +
-                        '\\x3cspan>' + (isFeatureMode ? 'Choose a color palette (5 shades)' : 'Choose a shade from the palette') + '\\x3c/span>' +
+                        '\\x3cspan>' + drawerTitle + '\\x3c/span>' +
                         '\\x3c/div>' +
                         '\\x3cdiv class="ct-palette-grid">' + familyGridHtml + '\\x3c/div>' +
                         savedCustomHtml +
@@ -3293,6 +3490,7 @@ else:
                     const features = spec.features || [];
                     const customColors = getSavedCustomColors(spec.projectId);
                     const openPalettes = rootWin.__paagComplexityTreeOpenPalettes || {{}};
+                    const selectedChoicesMap = rootWin.__paagComplexityTreeSelectedChoices || {{}};
                     const activeFilter = rootWin.__paagComplexityTreeSidebarFilter || "all";
                     const query = String(rootWin.__paagComplexityTreeSidebarSearch || "").trim().toLowerCase();
 
@@ -3344,7 +3542,7 @@ else:
                                     '\\x3c/div>' +
                                     '\\x3c/div>' +
                                     '\\x3cdiv class="ct-preset-swatches">' + allSwatches + '\\x3c/div>' +
-                                    (isAllOpen ? buildPaletteDrawerHtml("all-models", "__all__", allModelsColor, null, spec.projectId) : '') +
+                                    (isAllOpen ? buildPaletteDrawerHtml("all-models", "__all__", allModelsColor, null, spec.projectId, 0) : '') +
                                     '\\x3c/div>'
                                 );
                             }}
@@ -3391,7 +3589,7 @@ else:
                                     '\\x3c/div>' +
                                     '\\x3c/div>' +
                                     '\\x3cdiv class="ct-preset-swatches">' + modelSwatches + '\\x3c/div>' +
-                                    (isModelOpen ? buildPaletteDrawerHtml("model", col.groupKey, resolved.bg, null, spec.projectId) : '') +
+                                    (isModelOpen ? buildPaletteDrawerHtml("model", col.groupKey, resolved.bg, null, spec.projectId, 0) : '') +
                                     '\\x3c/div>'
                                 );
                             }});
@@ -3424,8 +3622,14 @@ else:
                                     "#287ec2"
                                 );
                                 const choices = Array.isArray(feat.choices) ? feat.choices : [];
+                                const selectedForFeat = getSelectedChoicesForFeature(fId);
+                                const selectedCount = selectedForFeat.length;
                                 const hasAnyChoiceCustom = choices.some(function(ch) {{
-                                    return Boolean(customColors.choices && customColors.choices[fId + "::" + String(ch.value || "")]);
+                                    const ck = fId + "::" + String(ch.value || "");
+                                    return Boolean(
+                                        (customColors.choices && customColors.choices[ck]) ||
+                                        (customColors.choiceShades && customColors.choiceShades[ck])
+                                    );
                                 }});
                                 const hasRowCustom = Boolean(
                                     (customColors.features && customColors.features[fId]) ||
@@ -3446,6 +3650,7 @@ else:
                                 }}).map(function(ch) {{
                                     const cVal = String(ch.value || "");
                                     const cKey = fId + "::" + cVal;
+                                    const isChecked = Boolean(selectedChoicesMap[cKey]);
                                     const resolved = resolveFeatureChoiceColor(
                                         feat,
                                         cVal,
@@ -3454,10 +3659,14 @@ else:
                                         customColors
                                     );
                                     const resolvedBgClean = normalizeHexColor(resolved.bg, "#f1f5f9");
-                                    const hasChoiceCustom = Boolean(customColors.choices && customColors.choices[cKey]);
+                                    const hasChoiceCustom = Boolean(
+                                        (customColors.choices && customColors.choices[cKey]) ||
+                                        (customColors.choiceShades && customColors.choiceShades[cKey])
+                                    );
                                     const cPaletteKey = "choice:" + cKey;
                                     const isChoicePaletteOpen = Boolean(openPalettes[cPaletteKey]);
-                                    const fiveShades = activeShades.slice(0, 5);
+                                    const choiceShades = getChoiceActiveShades(feat, featOrigIdx, cVal, customColors);
+                                    const fiveShades = choiceShades.slice(0, 5);
                                     const matchedShadeIdx = findActiveShadeIndex(fiveShades, resolvedBgClean);
                                     const shadeDotsHtml = fiveShades.map(function(shHex, sIdx) {{
                                         const cleanSh = normalizeHexColor(shHex, "#ffffff");
@@ -3473,44 +3682,59 @@ else:
                                     }}).join("");
                                     return (
                                         '\\x3cdiv style="display:flex;flex-direction:column;gap:4px;">' +
-                                        '\\x3cdiv class="ct-choice-row">' +
+                                        '\\x3cdiv class="ct-choice-row' + (isChecked ? ' is-selected-choice' : '') + '">' +
+                                        '\\x3cdiv class="ct-choice-left">' +
+                                        '\\x3cinput type="checkbox" class="ct-choice-select-cb" data-ct-select-choice="' + escapeAttr(cKey) + '" ' +
+                                        (isChecked ? 'checked ' : '') +
+                                        'title="Select ' + escapeAttr(cVal) + ' to change its color palette" />' +
                                         '\\x3cspan class="ct-choice-preview" title="' + escapeAttr(cVal) + '" style="background:' + resolved.bg + ';color:' + resolved.text + ';">' +
                                         escapeAttr(cVal) +
                                         '\\x3c/span>' +
+                                        '\\x3c/div>' +
                                         '\\x3cdiv class="ct-color-actions">' +
-                                        '\\x3cdiv class="ct-choice-shades" title="Choose from the 5 shades of this feature color">' +
+                                        '\\x3cdiv class="ct-choice-shades" title="Choose from the 5 shades for ' + escapeAttr(cVal) + '">' +
                                         shadeDotsHtml +
                                         '\\x3c/div>' +
                                         '\\x3cbutton type="button" class="ct-family-pill-btn' + (isChoicePaletteOpen ? ' is-open' : '') + '" style="padding:2px 5px;" ' +
-                                        'data-ct-toggle-palette="' + escapeAttr(cPaletteKey) + '" title="All palettes &amp; custom color for ' + escapeAttr(cVal) + '">🎨\\x3c/button>' +
+                                        'data-ct-toggle-palette="' + escapeAttr(cPaletteKey) + '" title="Change 5-shade palette or custom color for ' + escapeAttr(cVal) + '">🎨\\x3c/button>' +
                                         (hasChoiceCustom
-                                            ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-reset-type="choice" data-ct-feature-id="' + escapeAttr(fId) + '" data-ct-choice-value="' + escapeAttr(cVal) + '" title="Reset choice color">↺\\x3c/button>'
+                                            ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-reset-type="choice" data-ct-feature-id="' + escapeAttr(fId) + '" data-ct-choice-value="' + escapeAttr(cVal) + '" title="Reset color &amp; palette for ' + escapeAttr(cVal) + '">↺\\x3c/button>'
                                             : '') +
                                         '\\x3c/div>' +
                                         '\\x3c/div>' +
-                                        (isChoicePaletteOpen ? buildPaletteDrawerHtml("choice", cKey, resolvedBgClean, activeShades, spec.projectId) : '') +
+                                        (isChoicePaletteOpen ? buildPaletteDrawerHtml("choice", cKey, resolvedBgClean, fiveShades, spec.projectId, 0) : '') +
                                         '\\x3c/div>'
                                     );
                                 }}).join("");
+
+                                const paletteBtnLabel = selectedCount > 0
+                                    ? ('Palette (' + selectedCount + ') ' + (isFeatPaletteOpen ? '▴' : '▾'))
+                                    : ('Palette ' + (isFeatPaletteOpen ? '▴' : '▾'));
+                                const sublabelText = selectedCount > 0
+                                    ? (selectedCount + ' item' + (selectedCount === 1 ? '' : 's') + ' selected — Palette applies only to selected')
+                                    : 'Check specific items or click 🎨 to change their palette';
 
                                 html.push(
                                     '\\x3cdiv class="ct-sidebar-card" data-sidebar-feature-id="' + escapeAttr(fId) + '">' +
                                     '\\x3cdiv class="ct-sidebar-row">' +
                                     '\\x3cdiv style="min-width:0;">' +
                                     '\\x3cdiv class="ct-sidebar-label">' + (feat.rowLabelHtml || escapeAttr(feat.labelText || "")) + '\\x3c/div>' +
-                                    '\\x3cspan class="ct-sidebar-sublabel">Choose color family, then pick shade per choice\\x3c/span>' +
+                                    '\\x3cspan class="ct-sidebar-sublabel">' + escapeAttr(sublabelText) + '\\x3c/span>' +
                                     '\\x3c/div>' +
                                     '\\x3cdiv class="ct-color-actions">' +
-                                    '\\x3cbutton type="button" class="ct-family-pill-btn' + (isFeatPaletteOpen ? ' is-open' : '') + '" data-ct-toggle-palette="' + escapeAttr(fPaletteKey) + '" title="Choose color family or create custom color for ' + escapeAttr(feat.labelText || "") + '">' +
+                                    '\\x3cbutton type="button" class="ct-family-pill-btn' + (isFeatPaletteOpen ? ' is-open' : '') + '" data-ct-toggle-palette="' + escapeAttr(fPaletteKey) + '" title="Choose color family for ' + (selectedCount > 0 ? (selectedCount + ' selected item(s)') : escapeAttr(feat.labelText || "")) + '">' +
                                     '\\x3cspan class="ct-family-mini-dots">' + miniDotsHtml + '\\x3c/span>' +
-                                    '\\x3cspan>Palette ' + (isFeatPaletteOpen ? '▴' : '▾') + '\\x3c/span>' +
+                                    '\\x3cspan>' + paletteBtnLabel + '\\x3c/span>' +
                                     '\\x3c/button>' +
+                                    (selectedCount > 0
+                                        ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-clear-selected="' + escapeAttr(fId) + '" title="Clear selected items">×\\x3c/button>'
+                                        : '') +
                                     (hasRowCustom
                                         ? '\\x3cbutton type="button" class="ct-color-reset-mini" data-ct-reset-type="feature" data-ct-feature-id="' + escapeAttr(fId) + '" title="Reset feature row &amp; choice colors">↺\\x3c/button>'
                                         : '') +
                                     '\\x3c/div>' +
                                     '\\x3c/div>' +
-                                    (isFeatPaletteOpen ? buildPaletteDrawerHtml("feature", fId, rowHex, activeShades, spec.projectId) : '') +
+                                    (isFeatPaletteOpen ? buildPaletteDrawerHtml("feature", fId, rowHex, activeShades, spec.projectId, selectedCount) : '') +
                                     (choiceRowsHtml ? '\\x3cdiv class="ct-choice-chips">' + choiceRowsHtml + '\\x3c/div>' : '') +
                                     '\\x3c/div>'
                                 );
@@ -3557,9 +3781,36 @@ else:
                     renderComplexityTreeGrid(state.cols, state.spec, null);
                 }}
 
+                function applyChoicePaletteFamily(featureId, choiceValuesList, shadesList, explicitHex) {{
+                    const state = rootWin.__paagComplexityTreeState;
+                    if (!state || !state.spec) return;
+                    const cfg = getSavedCustomColors(state.spec.projectId);
+                    const ramp = (Array.isArray(shadesList) && shadesList.length >= 5)
+                        ? shadesList.slice(0, 5).map(function(s) {{ return normalizeHexColor(s, "#287ec2"); }})
+                        : buildFiveShadeRamp(explicitHex || "#287ec2");
+                    const prefix = String(featureId) + "::";
+                    const targets = (Array.isArray(choiceValuesList) ? choiceValuesList : [choiceValuesList]).filter(Boolean);
+                    targets.forEach(function(cVal, idx) {{
+                        const cKey = prefix + String(cVal);
+                        cfg.choiceShades[cKey] = ramp.slice();
+                        if (targets.length === 1 && explicitHex) {{
+                            cfg.choices[cKey] = normalizeHexColor(explicitHex, ramp[0]);
+                        }} else {{
+                            cfg.choices[cKey] = ramp[idx % ramp.length];
+                        }}
+                    }});
+                    saveCustomColors(state.spec.projectId, cfg);
+                    renderComplexityTreeGrid(state.cols, state.spec, null);
+                }}
+
                 function applyFeaturePaletteFamily(featureId, shadesList, baseHex) {{
                     const state = rootWin.__paagComplexityTreeState;
                     if (!state || !state.spec) return;
+                    const selectedChoices = getSelectedChoicesForFeature(featureId);
+                    if (selectedChoices.length > 0) {{
+                        applyChoicePaletteFamily(featureId, selectedChoices, shadesList, null);
+                        return;
+                    }}
                     const cfg = getSavedCustomColors(state.spec.projectId);
                     const ramp = (Array.isArray(shadesList) && shadesList.length >= 5)
                         ? shadesList.slice(0, 5).map(function(s) {{ return normalizeHexColor(s, "#287ec2"); }})
@@ -3567,18 +3818,21 @@ else:
                     cfg.features[featureId] = normalizeHexColor(baseHex || ramp[0], "#287ec2");
                     cfg.featureShades[featureId] = ramp;
                     const prefix = String(featureId) + "::";
-                    Object.keys(cfg.choices).forEach(function(k) {{
-                        if (k.indexOf(prefix) === 0) {{
-                            delete cfg.choices[k];
-                        }}
-                    }});
                     const features = state.spec.features || [];
                     features.forEach(function(feat) {{
                         if (String(feat.id) === String(featureId) && Array.isArray(feat.choices)) {{
+                            const allHaveCustomShades = feat.choices.length > 0 && feat.choices.every(function(ch) {{
+                                return Boolean(cfg.choiceShades[prefix + String(ch.value || "")]);
+                            }});
                             feat.choices.forEach(function(ch, idx) {{
                                 const cVal = String(ch.value || "");
-                                if (cVal) {{
-                                    cfg.choices[prefix + cVal] = ramp[idx % ramp.length];
+                                const cKey = prefix + cVal;
+                                if (!cVal) return;
+                                if (allHaveCustomShades) {{
+                                    delete cfg.choiceShades[cKey];
+                                    cfg.choices[cKey] = ramp[idx % ramp.length];
+                                }} else if (!cfg.choiceShades[cKey]) {{
+                                    cfg.choices[cKey] = ramp[idx % ramp.length];
                                 }}
                             }});
                         }}
@@ -3592,17 +3846,55 @@ else:
                     applyFeaturePaletteFamily(featureId, ramp, hexVal);
                 }}
 
-                function applyFeatureChoiceColorChange(featureId, choiceVal, hexVal) {{
+                function applyFeatureChoiceColorChange(featureId, choiceVal, hexVal, optionalShadesList) {{
                     const state = rootWin.__paagComplexityTreeState;
                     if (!state || !state.spec) return;
                     const cfg = getSavedCustomColors(state.spec.projectId);
-                    cfg.choices[String(featureId) + "::" + String(choiceVal)] = normalizeHexColor(hexVal, "#f1f5f9");
+                    const cKey = String(featureId) + "::" + String(choiceVal);
+                    const cleanHex = normalizeHexColor(hexVal, "#f1f5f9");
+                    cfg.choices[cKey] = cleanHex;
+                    if (Array.isArray(optionalShadesList) && optionalShadesList.length >= 5) {{
+                        cfg.choiceShades[cKey] = optionalShadesList.slice(0, 5).map(function(s) {{
+                            return normalizeHexColor(s, "#287ec2");
+                        }});
+                    }}
                     saveCustomColors(state.spec.projectId, cfg);
                     renderComplexityTreeGrid(state.cols, state.spec, null);
                 }}
 
                 function bindSidebarColorEvents(listEl) {{
                     if (!listEl) return;
+
+                    listEl.querySelectorAll("input[data-ct-select-choice]").forEach(function(cb) {{
+                        cb.onchange = function(ev) {{
+                            ev.stopPropagation();
+                            const cKey = cb.getAttribute("data-ct-select-choice") || "";
+                            if (!cKey) return;
+                            rootWin.__paagComplexityTreeSelectedChoices = rootWin.__paagComplexityTreeSelectedChoices || {{}};
+                            if (cb.checked) {{
+                                rootWin.__paagComplexityTreeSelectedChoices[cKey] = true;
+                            }} else {{
+                                delete rootWin.__paagComplexityTreeSelectedChoices[cKey];
+                            }}
+                            renderColorSidebarList();
+                        }};
+                    }});
+
+                    listEl.querySelectorAll("[data-ct-clear-selected]").forEach(function(clrBtn) {{
+                        clrBtn.onclick = function(ev) {{
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const fId = clrBtn.getAttribute("data-ct-clear-selected") || "";
+                            const prefix = String(fId) + "::";
+                            const selMap = rootWin.__paagComplexityTreeSelectedChoices || {{}};
+                            Object.keys(selMap).forEach(function(k) {{
+                                if (k.indexOf(prefix) === 0) {{
+                                    delete selMap[k];
+                                }}
+                            }});
+                            renderColorSidebarList();
+                        }};
+                    }});
 
                     listEl.querySelectorAll("[data-ct-toggle-palette]").forEach(function(btn) {{
                         btn.onclick = function(ev) {{
@@ -3629,12 +3921,36 @@ else:
                         }};
                     }});
 
+                    listEl.querySelectorAll("[data-ct-family-target='choice']").forEach(function(famEl) {{
+                        famEl.onclick = function(ev) {{
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const cKey = famEl.getAttribute("data-ct-choice-key") || "";
+                            const splitIdx = cKey.indexOf("::");
+                            if (splitIdx === -1) return;
+                            const fId = cKey.slice(0, splitIdx);
+                            const cVal = cKey.slice(splitIdx + 2);
+                            const rawShades = famEl.getAttribute("data-ct-family-shades") || "";
+                            const baseHex = famEl.getAttribute("data-ct-family-base") || "#287ec2";
+                            const shades = rawShades ? rawShades.split(",").filter(Boolean) : buildFiveShadeRamp(baseHex);
+                            const selectedForFeat = getSelectedChoicesForFeature(fId);
+                            if (selectedForFeat.length > 1 && selectedForFeat.indexOf(cVal) !== -1) {{
+                                applyChoicePaletteFamily(fId, selectedForFeat, shades, null);
+                            }} else {{
+                                applyChoicePaletteFamily(fId, [cVal], shades, shades[0]);
+                            }}
+                            renderColorSidebarList();
+                        }};
+                    }});
+
                     listEl.querySelectorAll("[data-ct-swatch-type]").forEach(function(swBtn) {{
                         swBtn.onclick = function(ev) {{
                             ev.preventDefault();
                             ev.stopPropagation();
                             const sType = swBtn.getAttribute("data-ct-swatch-type");
                             const sColor = swBtn.getAttribute("data-ct-swatch-color") || "#ffffff";
+                            const rawShades = swBtn.getAttribute("data-ct-swatch-shades") || "";
+                            const swatchShades = rawShades ? rawShades.split(",").filter(Boolean) : null;
                             const targetKey = swBtn.getAttribute("data-ct-target-key") || "";
                             if (sType === "all-models") {{
                                 applyAllModelsColorChange(sColor);
@@ -3650,7 +3966,15 @@ else:
                                     fId = targetKey.slice(0, splitIdx);
                                     cVal = targetKey.slice(splitIdx + 2);
                                 }}
-                                applyFeatureChoiceColorChange(fId, cVal, sColor);
+                                if (swatchShades) {{
+                                    const selectedForFeat = getSelectedChoicesForFeature(fId);
+                                    if (selectedForFeat.length > 1 && selectedForFeat.indexOf(cVal) !== -1) {{
+                                        applyChoicePaletteFamily(fId, selectedForFeat, swatchShades, null);
+                                        renderColorSidebarList();
+                                        return;
+                                    }}
+                                }}
+                                applyFeatureChoiceColorChange(fId, cVal, sColor, swatchShades);
                             }}
                             renderColorSidebarList();
                         }};
@@ -3689,14 +4013,22 @@ else:
                             );
                             rootWin.__paagComplexityTreeDraftCustomHex = pickedHex;
                             saveUserCustomColor(state.spec.projectId, pickedHex);
+                            const customRamp = buildFiveShadeRamp(pickedHex);
                             const mode = saveBtn.getAttribute("data-ct-save-custom-mode") || "";
                             const tKey = saveBtn.getAttribute("data-ct-save-custom-key") || "";
                             if (mode === "feature") {{
-                                applyFeaturePaletteFamily(tKey, buildFiveShadeRamp(pickedHex), pickedHex);
+                                applyFeaturePaletteFamily(tKey, customRamp, pickedHex);
                             }} else if (mode === "choice") {{
                                 const splitIdx = tKey.indexOf("::");
                                 if (splitIdx !== -1) {{
-                                    applyFeatureChoiceColorChange(tKey.slice(0, splitIdx), tKey.slice(splitIdx + 2), pickedHex);
+                                    const fId = tKey.slice(0, splitIdx);
+                                    const cVal = tKey.slice(splitIdx + 2);
+                                    const selectedForFeat = getSelectedChoicesForFeature(fId);
+                                    if (selectedForFeat.length > 1 && selectedForFeat.indexOf(cVal) !== -1) {{
+                                        applyChoicePaletteFamily(fId, selectedForFeat, customRamp, null);
+                                    }} else {{
+                                        applyFeatureChoiceColorChange(fId, cVal, pickedHex, customRamp);
+                                    }}
                                 }}
                             }} else if (mode === "model") {{
                                 applyModelColorChange(tKey, pickedHex);
@@ -3750,10 +4082,16 @@ else:
                                         delete cfg.choices[k];
                                     }}
                                 }});
+                                Object.keys(cfg.choiceShades).forEach(function(k) {{
+                                    if (k.indexOf(prefix) === 0) {{
+                                        delete cfg.choiceShades[k];
+                                    }}
+                                }});
                             }} else if (rType === "choice") {{
                                 const fId = rstBtn.getAttribute("data-ct-feature-id") || "";
                                 const cVal = rstBtn.getAttribute("data-ct-choice-value") || "";
                                 delete cfg.choices[fId + "::" + cVal];
+                                delete cfg.choiceShades[fId + "::" + cVal];
                             }}
                             saveCustomColors(state.spec.projectId, cfg);
                             renderComplexityTreeGrid(state.cols, state.spec, null);

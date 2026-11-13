@@ -81,7 +81,13 @@ def filter_table(
             values = sorted(values, key=lambda value: str(value).casefold())
         widget_key = f"{key}_{column}"
         saved_col_key = f"_saved_filter_col_{widget_key}"
-        if widget_key not in st.session_state and saved_col_key in st.session_state:
+        pending_col_key = f"_pending_filter_col_{widget_key}"
+        if pending_col_key in st.session_state:
+            st.session_state[widget_key] = list(
+                st.session_state.pop(pending_col_key) or []
+            )
+            st.session_state[saved_col_key] = list(st.session_state[widget_key])
+        elif widget_key not in st.session_state and saved_col_key in st.session_state:
             st.session_state[widget_key] = list(st.session_state.get(saved_col_key) or [])
         stored_selection = st.session_state.get(widget_key, [])
         current_selection = stored_selection
@@ -89,6 +95,14 @@ def filter_table(
             current_selection = []
         elif not isinstance(current_selection, (list, tuple, set)):
             current_selection = [current_selection]
+        if column not in dropdown_options:
+            for sel_val in current_selection:
+                if (
+                    sel_val is not None
+                    and (isinstance(sel_val, bool) or str(sel_val).strip() != "")
+                    and sel_val not in values
+                ):
+                    values.append(sel_val)
         normalized_selection = [
             value for value in current_selection if value in values
         ]
@@ -1584,3 +1598,490 @@ def apply_pending_table_editor_reset(key: str) -> str:
         generation += 1
         st.session_state[generation_key] = generation
     return f"{logical_key}{_EDITOR_INSTANCE_MARKER}{generation}"
+
+
+_TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-layout-keeper="2"></div>
+<script>
+(function() {
+  var SESSION_PREFIX = "paag_table_layout_v2_";
+  window.__paagTableLayouts = window.__paagTableLayouts || {};
+
+  function loadSavedLayout(logicalKey) {
+    if (!logicalKey) return null;
+    if (window.__paagTableLayouts[logicalKey]) {
+      return window.__paagTableLayouts[logicalKey];
+    }
+    try {
+      var raw = window.sessionStorage.getItem(SESSION_PREFIX + logicalKey);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          window.__paagTableLayouts[logicalKey] = parsed;
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function saveLayout(logicalKey, layout) {
+    if (!logicalKey || !layout) return;
+    window.__paagTableLayouts[logicalKey] = layout;
+    try {
+      window.sessionStorage.setItem(SESSION_PREFIX + logicalKey, JSON.stringify(layout));
+    } catch (e) {}
+  }
+
+  function getActiveFiber(fiber) {
+    if (!fiber || !fiber.alternate) return fiber;
+    var p = fiber;
+    var steps = 0;
+    while (p.return && steps < 200) {
+      p = p.return;
+      steps++;
+    }
+    if (p && p.stateNode && p.stateNode.current) {
+      return p.stateNode.current === p ? fiber : fiber.alternate;
+    }
+    return fiber;
+  }
+
+  function getHookState(h) {
+    if (!h) return undefined;
+    if (h.queue && "lastRenderedState" in h.queue && h.queue.lastRenderedState !== undefined) {
+      return h.queue.lastRenderedState;
+    }
+    return h.memoizedState;
+  }
+
+  function findDataFrameFiber(el) {
+    if (!el) return null;
+    var keys = Object.keys(el);
+    var fKey = null;
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf("__reactFiber$") === 0) {
+        fKey = keys[i];
+        break;
+      }
+    }
+    if (!fKey) return null;
+    var cur = getActiveFiber(el[fKey]);
+    var steps = 0;
+    while (cur && steps < 25) {
+      var activeCur = getActiveFiber(cur);
+      var mp = activeCur.memoizedProps;
+      var ms = activeCur.memoizedState;
+      if (
+        mp &&
+        mp.element &&
+        typeof mp.element.id === "string" &&
+        ms &&
+        typeof ms === "object" &&
+        "memoizedState" in ms &&
+        "next" in ms
+      ) {
+        return activeCur;
+      }
+      cur = activeCur.return;
+      steps++;
+    }
+    return null;
+  }
+
+  function extractLogicalKey(rawId) {
+    if (!rawId || typeof rawId !== "string") return "";
+    var stripped = rawId.replace(/^\\$\\$ID-[^-]+-/, "");
+    if (!stripped || stripped === "None") return "";
+    return stripped.split("__editor_instance_")[0] || "";
+  }
+
+  function inspectDataFrameHooks(fiber) {
+    var hooks = [];
+    var h = fiber ? fiber.memoizedState : null;
+    var guard = 0;
+    while (h && guard < 150) {
+      hooks.push(h);
+      h = h.next;
+      guard++;
+    }
+
+    var configIdx = -1;
+    for (var i = 1; i < hooks.length; i++) {
+      var cur = hooks[i];
+      var prev = hooks[i - 1];
+      var isState = Boolean(cur.queue && typeof cur.queue.dispatch === "function");
+      var curVal = getHookState(cur);
+      if (
+        isState &&
+        curVal instanceof Map &&
+        prev &&
+        !prev.queue &&
+        Array.isArray(prev.memoizedState) &&
+        prev.memoizedState[0] instanceof Map
+      ) {
+        configIdx = i;
+        break;
+      }
+    }
+    if (configIdx < 0) return null;
+
+    var columnOrderHook = null;
+    for (var j = configIdx - 1; j >= 0; j--) {
+      var hj = hooks[j];
+      var hjVal = getHookState(hj);
+      if (hj.queue && typeof hj.queue.dispatch === "function" && Array.isArray(hjVal)) {
+        columnOrderHook = hj;
+        break;
+      }
+    }
+    if (!columnOrderHook) return null;
+
+    var configMapHook = hooks[configIdx];
+    var baseConfigMap = hooks[configIdx - 1].memoizedState[0];
+    var allColumns = null;
+    var sortHook = null;
+    var widthsHook = null;
+
+    for (var k = configIdx + 1; k < hooks.length; k++) {
+      var hk = hooks[k];
+      var hkIsState = Boolean(hk.queue && typeof hk.queue.dispatch === "function");
+      var hkVal = getHookState(hk);
+      if (
+        !allColumns &&
+        !hkIsState &&
+        Array.isArray(hk.memoizedState) &&
+        Array.isArray(hk.memoizedState[0]) &&
+        hk.memoizedState[0].length > 0 &&
+        hk.memoizedState[0][0] &&
+        typeof hk.memoizedState[0][0].id === "string" &&
+        "name" in hk.memoizedState[0][0]
+      ) {
+        allColumns = hk.memoizedState[0];
+      }
+      if (
+        !sortHook &&
+        hkIsState &&
+        k + 1 < hooks.length &&
+        !hooks[k + 1].queue &&
+        Array.isArray(hooks[k + 1].memoizedState) &&
+        hooks[k + 1].memoizedState[0] instanceof Map &&
+        hooks[k + 1].memoizedState[0].size > 0
+      ) {
+        var firstEntry = hooks[k + 1].memoizedState[0].entries().next().value;
+        if (
+          firstEntry &&
+          typeof firstEntry[0] === "string" &&
+          (firstEntry[0].indexOf("_column-") === 0 || firstEntry[0].indexOf("_index-") === 0)
+        ) {
+          sortHook = hk;
+          if (!allColumns) {
+            allColumns = Array.from(hooks[k + 1].memoizedState[0].values());
+          }
+        }
+      }
+      if (!widthsHook && hkIsState && hkVal instanceof Map) {
+        widthsHook = hk;
+      }
+    }
+
+    var idToName = new Map();
+    var nameToId = new Map();
+    var currentColumnNames = [];
+    if (Array.isArray(allColumns)) {
+      for (var cIdx = 0; cIdx < allColumns.length; cIdx++) {
+        var colObj = allColumns[cIdx];
+        if (colObj && typeof colObj.id === "string") {
+          var cName = typeof colObj.name === "string" && colObj.name ? colObj.name : colObj.id;
+          idToName.set(colObj.id, cName);
+          if (!nameToId.has(cName)) {
+            nameToId.set(cName, colObj.id);
+          }
+          if (cName !== "_index-0" && cName.indexOf("_index-") !== 0) {
+            currentColumnNames.push(cName);
+          }
+        }
+      }
+    }
+
+    return {
+      columnOrderHook: columnOrderHook,
+      baseConfigMap: baseConfigMap,
+      configMapHook: configMapHook,
+      sortHook: sortHook,
+      widthsHook: widthsHook,
+      idToName: idToName,
+      nameToId: nameToId,
+      currentColumnNames: currentColumnNames
+    };
+  }
+
+  function applySavedLayoutToElement(el, saved) {
+    if (!el || !saved) return;
+    var fiber = findDataFrameFiber(el);
+    if (!fiber) return;
+    var info = inspectDataFrameHooks(fiber);
+    if (!info) return;
+
+    if (Array.isArray(saved.columnOrderNames) && info.columnOrderHook) {
+      var nextOrder = [];
+      var seenNames = new Set();
+      for (var i = 0; i < saved.columnOrderNames.length; i++) {
+        var cName = saved.columnOrderNames[i];
+        if (cName && cName !== "_index-0" && cName.indexOf("_index-") !== 0 && info.nameToId.has(cName)) {
+          nextOrder.push(info.nameToId.get(cName));
+          seenNames.add(cName);
+        }
+      }
+      var knownSet = Array.isArray(saved.knownColumnNames) ? new Set(saved.knownColumnNames) : null;
+      var serverOrder = (fiber.memoizedProps && fiber.memoizedProps.element && fiber.memoizedProps.element.columnOrder) || [];
+      if (knownSet && Array.isArray(serverOrder)) {
+        var insertIdx = nextOrder.length;
+        for (var k = 0; k < nextOrder.length; k++) {
+          var mappedName = info.idToName.get(nextOrder[k]) || nextOrder[k];
+          if (typeof mappedName === "string" && mappedName.indexOf("__complexity_tree_spacer_") === 0) {
+            insertIdx = k;
+            break;
+          }
+        }
+        for (var j = 0; j < serverOrder.length; j++) {
+          var sCol = serverOrder[j];
+          var sName = info.idToName.get(sCol) || sCol;
+          if (!knownSet.has(sName) && !seenNames.has(sName) && info.nameToId.has(sName)) {
+            nextOrder.splice(insertIdx, 0, info.nameToId.get(sName));
+            insertIdx++;
+            seenNames.add(sName);
+          }
+        }
+      }
+      var curOrder = getHookState(info.columnOrderHook) || [];
+      var curOrderNames = [];
+      for (var co = 0; co < curOrder.length; co++) {
+        var cm = info.idToName.get(curOrder[co]) || curOrder[co];
+        if (cm && cm !== "_index-0" && cm.indexOf("_index-") !== 0) {
+          curOrderNames.push(cm);
+        }
+      }
+      var nextOrderNames = nextOrder.map(function(x) { return info.idToName.get(x) || x; });
+      if (nextOrder.length > 0) {
+        if (fiber.memoizedProps && fiber.memoizedProps.element) {
+          try {
+            fiber.memoizedProps.element.columnOrder = nextOrder.slice();
+          } catch (e) {}
+        }
+        if (fiber.alternate && fiber.alternate.memoizedProps && fiber.alternate.memoizedProps.element) {
+          try {
+            fiber.alternate.memoizedProps.element.columnOrder = nextOrder.slice();
+          } catch (e) {}
+        }
+        if (curOrderNames.join("|") !== nextOrderNames.join("|")) {
+          info.columnOrderHook.queue.dispatch(nextOrder);
+        }
+      }
+    }
+
+    if (saved.configOverrides && typeof saved.configOverrides === "object" && info.configMapHook) {
+      var curConfigMap = getHookState(info.configMapHook);
+      var nextConfigMap = new Map(curConfigMap instanceof Map ? curConfigMap : []);
+      var configChanged = false;
+      var overrideKeys = Object.keys(saved.configOverrides);
+      for (var ci = 0; ci < overrideKeys.length; ci++) {
+        var colName = overrideKeys[ci];
+        var ov = saved.configOverrides[colName];
+        var targetId = info.nameToId.get(colName);
+        if (targetId && ov && typeof ov === "object") {
+          var existing = nextConfigMap.get(targetId) || {};
+          var merged = Object.assign({}, existing, ov);
+          if (
+            existing.hidden !== merged.hidden ||
+            existing.pinned !== merged.pinned ||
+            JSON.stringify(existing.type_config || null) !== JSON.stringify(merged.type_config || null)
+          ) {
+            nextConfigMap.set(targetId, merged);
+            configChanged = true;
+          }
+        }
+      }
+      if (configChanged) {
+        info.configMapHook.queue.dispatch(nextConfigMap);
+      }
+    }
+
+    if (saved.columnWidths && typeof saved.columnWidths === "object" && info.widthsHook) {
+      var curWidthsMap = getHookState(info.widthsHook);
+      var nextWidthsMap = new Map(curWidthsMap instanceof Map ? curWidthsMap : []);
+      var widthsChanged = false;
+      var widthKeys = Object.keys(saved.columnWidths);
+      for (var wi = 0; wi < widthKeys.length; wi++) {
+        var wName = widthKeys[wi];
+        var wVal = saved.columnWidths[wName];
+        var wId = info.nameToId.get(wName);
+        if (wId && typeof wVal === "number" && wVal > 0 && nextWidthsMap.get(wId) !== wVal) {
+          nextWidthsMap.set(wId, wVal);
+          widthsChanged = true;
+        }
+      }
+      if (widthsChanged) {
+        info.widthsHook.queue.dispatch(nextWidthsMap);
+      }
+    }
+
+    if (info.sortHook && saved.sortState && typeof saved.sortState === "object") {
+      var sortColName = saved.sortState.columnName;
+      var sortDir = saved.sortState.direction || "asc";
+      if (sortColName && info.nameToId.has(sortColName)) {
+        var targetSortId = info.nameToId.get(sortColName);
+        var curSort = getHookState(info.sortHook);
+        if (!curSort || curSort.columnId !== targetSortId || curSort.direction !== sortDir) {
+          info.sortHook.queue.dispatch({ columnId: targetSortId, direction: sortDir });
+        }
+      }
+    }
+
+    var scroller = el.querySelector(".dvn-scroller");
+    if (scroller) {
+      if (typeof saved.scrollLeft === "number" && saved.scrollLeft > 0) {
+        scroller.scrollLeft = saved.scrollLeft;
+      }
+      if (typeof saved.scrollTop === "number" && saved.scrollTop > 0) {
+        scroller.scrollTop = saved.scrollTop;
+      }
+    }
+  }
+
+  function captureLayoutFromElement(el, logicalKey, info) {
+    var orderRaw = getHookState(info.columnOrderHook) || [];
+    var orderNames = [];
+    for (var oi = 0; oi < orderRaw.length; oi++) {
+      var mapped = info.idToName.get(orderRaw[oi]) || orderRaw[oi];
+      if (mapped && mapped !== "_index-0" && mapped.indexOf("_index-") !== 0) {
+        orderNames.push(mapped);
+      }
+    }
+    var configOverrides = {};
+    var curConfigMap = getHookState(info.configMapHook);
+    if (curConfigMap instanceof Map) {
+      curConfigMap.forEach(function(v, k) {
+        if (v && typeof v === "object" && info.idToName.has(k)) {
+          var cName = info.idToName.get(k);
+          var ov = {};
+          if (typeof v.hidden === "boolean") ov.hidden = v.hidden;
+          if (typeof v.pinned === "boolean") ov.pinned = v.pinned;
+          if (v.type_config !== undefined) ov.type_config = v.type_config;
+          if (Object.keys(ov).length > 0) {
+            configOverrides[cName] = ov;
+          }
+        }
+      });
+    }
+    var columnWidths = {};
+    var curWidthsMap = info.widthsHook ? getHookState(info.widthsHook) : null;
+    if (curWidthsMap instanceof Map) {
+      curWidthsMap.forEach(function(w, k) {
+        if (typeof w === "number" && w > 0) {
+          columnWidths[info.idToName.get(k) || k] = w;
+        }
+      });
+    }
+    var sortState = null;
+    var curSort = info.sortHook ? getHookState(info.sortHook) : null;
+    if (curSort && typeof curSort.columnId === "string") {
+      sortState = {
+        columnName: info.idToName.get(curSort.columnId) || curSort.columnId,
+        direction: curSort.direction || "asc"
+      };
+    }
+    var prev = loadSavedLayout(logicalKey) || {};
+    var scroller = el.querySelector(".dvn-scroller");
+    var scrollLeft = scroller ? scroller.scrollLeft : (prev.scrollLeft || 0);
+    var scrollTop = scroller ? scroller.scrollTop : (prev.scrollTop || 0);
+
+    saveLayout(logicalKey, {
+      columnOrderNames: orderNames,
+      knownColumnNames: info.currentColumnNames,
+      configOverrides: configOverrides,
+      columnWidths: columnWidths,
+      sortState: sortState,
+      scrollLeft: scrollLeft,
+      scrollTop: scrollTop
+    });
+  }
+
+  function syncAllDataFrames() {
+    var frames = document.querySelectorAll('div.stDataFrame[data-testid="stDataFrame"]');
+    for (var i = 0; i < frames.length; i++) {
+      var el = frames[i];
+      var fiber = findDataFrameFiber(el);
+      if (!fiber) continue;
+      var rawId = fiber.memoizedProps && fiber.memoizedProps.element ? fiber.memoizedProps.element.id : "";
+      var logicalKey = extractLogicalKey(rawId);
+      if (!logicalKey) continue;
+
+      if (el.dataset.paagRestoredRawId !== rawId) {
+        el.dataset.paagRestoredRawId = rawId;
+        el.dataset.paagRestoreTs = String(Date.now());
+        var saved = loadSavedLayout(logicalKey);
+        if (saved) {
+          applySavedLayoutToElement(el, saved);
+          (function(targetEl, targetSaved) {
+            requestAnimationFrame(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            });
+            setTimeout(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            }, 50);
+            setTimeout(function() {
+              applySavedLayoutToElement(targetEl, targetSaved);
+            }, 140);
+          })(el, saved);
+        }
+      } else {
+        var elapsed = Date.now() - Number(el.dataset.paagRestoreTs || 0);
+        if (elapsed >= 180) {
+          var info = inspectDataFrameHooks(fiber);
+          if (info) {
+            captureLayoutFromElement(el, logicalKey, info);
+          }
+        }
+      }
+    }
+  }
+
+  window.__paagSyncAllDataFrames = syncAllDataFrames;
+
+  if (!window.__paagTableLayoutObserverInstalled) {
+    window.__paagTableLayoutObserverInstalled = true;
+    var observer = new MutationObserver(function() {
+      if (window.__paagSyncAllDataFrames) {
+        window.__paagSyncAllDataFrames();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener("pointerdown", function() {
+      if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+    }, true);
+    document.addEventListener("pointerup", function() {
+      setTimeout(function() {
+        if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+      }, 30);
+    }, true);
+    document.addEventListener("click", function() {
+      setTimeout(function() {
+        if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+      }, 30);
+    }, true);
+    setInterval(function() {
+      if (window.__paagSyncAllDataFrames) window.__paagSyncAllDataFrames();
+    }, 250);
+  }
+
+  syncAllDataFrames();
+})();
+</script>"""
+
+
+def mount_table_layout_preservation_script() -> None:
+    """Mount the client-side st.data_editor column layout and scroll preservation script."""
+    html_fn = getattr(st, "html", None)
+    if callable(html_fn):
+        html_fn(_TABLE_LAYOUT_PRESERVATION_HTML, unsafe_allow_javascript=True)
+
