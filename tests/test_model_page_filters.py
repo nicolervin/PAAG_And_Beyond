@@ -233,6 +233,10 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertIn("buildFiveShadeRamp", ct_scripts[0])
         self.assertIn("saveUserCustomColor", ct_scripts[0])
         self.assertIn("applyFeaturePaletteFamily", ct_scripts[0])
+        self.assertIn("applyChoicePaletteFamily", ct_scripts[0])
+        self.assertIn("getChoiceActiveShades", ct_scripts[0])
+        self.assertIn("choiceShades", ct_scripts[0])
+        self.assertIn("ct-choice-select-cb", ct_scripts[0])
         self.assertIn("buildPaletteDrawerHtml", ct_scripts[0])
         self.assertIn("resolveModelHeaderColor", ct_scripts[0])
         self.assertIn("resolveFeatureChoiceColor", ct_scripts[0])
@@ -508,6 +512,108 @@ class ModelPageFiltersTests(unittest.TestCase):
         self.assertEqual(saved_tree.at["MOD-10", f_console_id], "40WB")
         self.assertEqual(saved_tree.at["MOD-20", f_console_id], "50GB")
         self.assertEqual(saved_tree.at["MOD-30", f_console_id], "DS")
+
+    def test_save_preserves_filter_selections_and_layout_script(self) -> None:
+        m1_id = str(uuid4())
+        m2_id = str(uuid4())
+        models_df = pd.DataFrame([
+            {"id": m1_id, "model_number": "MOD-10", "display_name": "Alpha 10", "eau": 100, "description": "Desc A", "active": True, "notes": ""},
+            {"id": m2_id, "model_number": "MOD-20", "display_name": "Bravo 20", "eau": 200, "description": "Desc B", "active": True, "notes": ""},
+        ])
+        store.update_project_model_rows(self.project_id, models_df)
+
+        f1_id = str(uuid4())
+        f2_id = str(uuid4())
+        features_df = pd.DataFrame([
+            {"id": f1_id, "active": True, "category": "Console", "subsystem": "Controls", "name": "Panel", "allowed_choices": "WW1, WW2", "description": ""},
+            {"id": f2_id, "active": True, "category": "Fascia", "subsystem": "Trim", "name": "Badge", "allowed_choices": "60, 70", "description": ""},
+        ])
+        store.update_complexity_features(self.project_id, features_df)
+
+        tree = store.complexity_tree(self.project_id)
+        tree.loc[tree["model_id"] == m1_id, [f1_id, f2_id]] = ["WW1", "60"]
+        tree.loc[tree["model_id"] == m2_id, [f1_id, f2_id]] = ["WW2", "70"]
+        store.update_complexity_tree(self.project_id, tree)
+
+        script_path = str(Path(__file__).resolve().parent.parent / "app_pages" / "models.py")
+        app = AppTest.from_file(script_path, default_timeout=30)
+        app.session_state["project_id"] = self.project_id
+        app.session_state["current_editor"] = "Tester"
+        app.run()
+        self.assertFalse(app.exception)
+
+        # Verify table layout preservation script is mounted and XML-safe
+        html_blocks = [el.proto.body for el in app.get("html")]
+        layout_scripts = [b for b in html_blocks if "data-paag-table-layout-keeper" in b]
+        self.assertEqual(len(layout_scripts), 1)
+        self.assertIn("paag_table_layout_v2_", layout_scripts[0])
+        self.assertIn("applySavedLayoutToElement", layout_scripts[0])
+        self.assertIn("captureLayoutFromElement", layout_scripts[0])
+        self.assertIn("getActiveFiber", layout_scripts[0])
+        self.assertIn("getHookState", layout_scripts[0])
+        layout_script_inner = layout_scripts[0].split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        self.assertIsNone(
+            re.search(r"<[/\w!]", layout_script_inner),
+            "Layout preservation script must not contain raw '<tag' sequences",
+        )
+
+        # Set filters across Model information, Feature definitions, and Complexity tree
+        model_kw_key = f"model_definition_filters_{self.project_id}_keyword"
+        feat_cat_key = f"feature_definition_filters_{self.project_id}_category"
+        tree_name_key = f"complexity_tree_filters_{self.project_id}_common_name"
+        tree_feat_key = f"complexity_tree_filters_{self.project_id}_{f1_id}"
+
+        kw_input = next(ti for ti in app.text_input if ti.key == model_kw_key)
+        kw_input.set_value("MOD-10")
+        ms_feat_cat = next(ms for ms in app.multiselect if ms.key == feat_cat_key)
+        ms_feat_cat.set_value(["Console"])
+        ms_tree_name = next(ms for ms in app.multiselect if ms.key == tree_name_key)
+        ms_tree_name.set_value(["Alpha 10"])
+        ms_tree_feat = next(ms for ms in app.multiselect if ms.key == tree_feat_key)
+        ms_tree_feat.set_value(["WW1"])
+        app.run()
+        self.assertFalse(app.exception)
+
+        # 1) Edit Model information (rename Alpha 10 -> Alpha 10 Renamed) and click Save & Refresh
+        logical_model_key = f"model_definitions_editor_v2_{self.project_id}"
+        gen_m = int(app.session_state[f"_table_editor_generation_{logical_model_key}"])
+        app.session_state[f"{logical_model_key}__editor_instance_{gen_m}"] = {
+            "edited_rows": {0: {"display_name": "Alpha 10 Renamed"}},
+            "added_rows": [],
+            "deleted_rows": [],
+        }
+        app.run()
+        self.assertFalse(app.exception)
+        model_save_btn = next(b for b in app.button if b.key == "model_information_save_refresh")
+        model_save_btn.click()
+        app.run()
+        self.assertFalse(app.exception)
+
+        # Confirm filters are preserved (and renamed model display_name is remapped in Complexity tree filter!)
+        self.assertEqual(app.session_state[model_kw_key], "MOD-10")
+        self.assertEqual(app.session_state[feat_cat_key], ["Console"])
+        self.assertEqual(app.session_state[tree_name_key], ["Alpha 10 Renamed"])
+        self.assertEqual(app.session_state[tree_feat_key], ["WW1"])
+
+        # 2) Edit Feature definitions (rename category Console -> Console Pro) and click Save & Refresh
+        logical_feat_key = f"complexity_feature_editor_{self.project_id}"
+        gen_f = int(app.session_state[f"_table_editor_generation_{logical_feat_key}"])
+        app.session_state[f"{logical_feat_key}__editor_instance_{gen_f}"] = {
+            "edited_rows": {0: {"category": "Console Pro"}},
+            "added_rows": [],
+            "deleted_rows": [],
+        }
+        app.run()
+        self.assertFalse(app.exception)
+        feat_save_btn = next(b for b in app.button if b.key == "complexity_features_save_refresh")
+        feat_save_btn.click()
+        app.run()
+        self.assertFalse(app.exception)
+
+        # Confirm category filter was remapped to Console Pro and other filters remain intact
+        self.assertEqual(app.session_state[feat_cat_key], ["Console Pro"])
+        self.assertEqual(app.session_state[tree_name_key], ["Alpha 10 Renamed"])
+        self.assertEqual(app.session_state[tree_feat_key], ["WW1"])
 
 
 if __name__ == "__main__":
