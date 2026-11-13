@@ -27,7 +27,11 @@ from utils.store import (
     record_audit_event,
     upsert_part,
 )
-from utils.table_filters import filter_table, split_filter_values
+from utils.table_filters import (
+    filter_table,
+    mount_table_layout_preservation_script,
+    split_filter_values,
+)
 from utils.table_ui import selectable_dataframe
 
 
@@ -815,6 +819,7 @@ def _render_pits_flagged_changes_summary(
 
 
 def render_part_data_exchange(project_id: str, scenario_id: str | None) -> None:
+    mount_table_layout_preservation_script()
     wizard_key = f"pits_verification_wizard_{project_id}"
     st.session_state.pop(wizard_key, None)
 

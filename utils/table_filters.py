@@ -12,6 +12,177 @@ _EDITOR_INSTANCE_MARKER = "__editor_instance_"
 _ORIG_DATA_EDITOR = getattr(st, "_paag_orig_data_editor", st.data_editor)
 setattr(st, "_paag_orig_data_editor", _ORIG_DATA_EDITOR)
 
+_PRODUCT_STRUCTURE_FILTER_KEY_PREFIXES = (
+    "pits_reconciliation_filters_",
+    "pits_flagged_changes_filter_",
+    "pits_registry_filters_",
+    "pits_import_preview_filters",
+    "pits_model_preview_filters",
+    "pits_bom_preview_filters_",
+    "legacy_pits_preview_filters",
+    "mapped_bom_preview_filters",
+    "model_definition_filters_",
+    "feature_definition_filters_",
+    "complexity_feature_filters_",
+    "complexity_tree_filters_",
+    "part_catalog_filters_",
+    "fishbone_assignment_filters_",
+    "assembly_framework_filters_",
+)
+
+
+def _is_product_structure_filter_key(key: str) -> bool:
+    key_str = str(key or "").strip()
+    return any(key_str.startswith(prefix) for prefix in _PRODUCT_STRUCTURE_FILTER_KEY_PREFIXES)
+
+
+def clear_saved_table_filters(filter_key: str) -> None:
+    """Clear both live and saved filter widget state for a filter_table key prefix."""
+    key_str = str(filter_key or "").strip()
+    if not key_str:
+        return
+    st.session_state.pop(f"{key_str}_keyword", None)
+    st.session_state.pop(f"_saved_filter_kw_{key_str}", None)
+    prefixes = (
+        f"{key_str}_",
+        f"_saved_filter_col_{key_str}_",
+        f"_pending_filter_col_{key_str}_",
+    )
+    for existing_key in list(st.session_state.keys()):
+        existing_str = str(existing_key)
+        if existing_str != f"{key_str}_keyword" and any(
+            existing_str.startswith(p) for p in prefixes
+        ):
+            st.session_state.pop(existing_key, None)
+
+
+def preserve_filters_across_save(
+    filter_key: str,
+    before_df: pd.DataFrame,
+    after_df: pd.DataFrame,
+    dropdown_columns: Iterable[str] = (),
+    *,
+    id_column: str = "id",
+    multi_value_columns: Iterable[str] = (),
+) -> None:
+    """Preserve active filter selections and remap edited filter values across Save & Refresh."""
+    key_str = str(filter_key or "").strip()
+    if not key_str or not _is_product_structure_filter_key(key_str):
+        return
+    kw_widget_key = f"{key_str}_keyword"
+    saved_kw_key = f"_saved_filter_kw_{key_str}"
+    if kw_widget_key in st.session_state:
+        st.session_state[saved_kw_key] = str(st.session_state.get(kw_widget_key) or "")
+
+    multi_cols = {str(col) for col in (multi_value_columns or ())}
+    has_ids = (
+        isinstance(before_df, pd.DataFrame)
+        and isinstance(after_df, pd.DataFrame)
+        and id_column in before_df.columns
+        and id_column in after_df.columns
+    )
+    for col in dropdown_columns:
+        widget_key = f"{key_str}_{col}"
+        saved_col_key = f"_saved_filter_col_{widget_key}"
+        pending_col_key = f"_pending_filter_col_{widget_key}"
+        cur_sel = st.session_state.get(widget_key)
+        if cur_sel is None:
+            cur_sel = st.session_state.get(saved_col_key)
+        if not isinstance(cur_sel, (list, tuple, set)) or not cur_sel:
+            continue
+        cur_sel_list = list(cur_sel)
+        if (
+            not has_ids
+            or col not in before_df.columns
+            or col not in after_df.columns
+        ):
+            st.session_state[saved_col_key] = cur_sel_list
+            continue
+
+        before_by_id = {
+            str(rid).strip(): val
+            for rid, val in zip(before_df[id_column], before_df[col])
+            if rid is not None and not pd.isna(rid) and str(rid).strip()
+        }
+        after_by_id = {
+            str(rid).strip(): val
+            for rid, val in zip(after_df[id_column], after_df[col])
+            if rid is not None and not pd.isna(rid) and str(rid).strip()
+        }
+
+        if col in multi_cols:
+            remaining_tokens = {
+                tok
+                for cell in after_df[col]
+                for tok in split_filter_values(cell)
+            }
+            remapped_tokens: dict[str, list[str]] = {}
+            added_tokens: list[str] = []
+            for rid, old_cell in before_by_id.items():
+                if rid not in after_by_id:
+                    continue
+                old_toks = split_filter_values(old_cell)
+                new_toks = split_filter_values(after_by_id[rid])
+                if old_toks != new_toks:
+                    for ot in old_toks:
+                        if ot in cur_sel_list:
+                            for nt in new_toks:
+                                if nt:
+                                    remapped_tokens.setdefault(ot, []).append(nt)
+            for rid, new_cell in after_by_id.items():
+                if rid not in before_by_id:
+                    for nt in split_filter_values(new_cell):
+                        if nt and nt not in cur_sel_list:
+                            added_tokens.append(nt)
+            next_sel: list[object] = []
+            for sel_val in cur_sel_list:
+                sel_str = str(sel_val)
+                if sel_str in remaining_tokens or sel_str not in remapped_tokens:
+                    next_sel.append(sel_val)
+                if sel_str in remapped_tokens:
+                    next_sel.extend(remapped_tokens[sel_str])
+            next_sel.extend(added_tokens)
+            next_sel = list(dict.fromkeys(next_sel))
+        else:
+            remaining_vals = {
+                val
+                for val in after_df[col].dropna().tolist()
+                if val is not None and (isinstance(val, bool) or str(val).strip() != "")
+            }
+            remapped_vals: dict[object, list[object]] = {}
+            added_vals: list[object] = []
+            for rid, old_val in before_by_id.items():
+                if rid not in after_by_id:
+                    continue
+                new_val = after_by_id[rid]
+                if (
+                    old_val in cur_sel_list
+                    and new_val != old_val
+                    and new_val is not None
+                    and (isinstance(new_val, bool) or str(new_val).strip() != "")
+                ):
+                    remapped_vals.setdefault(old_val, []).append(new_val)
+            for rid, new_val in after_by_id.items():
+                if (
+                    rid not in before_by_id
+                    and new_val is not None
+                    and (isinstance(new_val, bool) or str(new_val).strip() != "")
+                    and new_val not in cur_sel_list
+                ):
+                    added_vals.append(new_val)
+            next_sel = []
+            for sel_val in cur_sel_list:
+                if sel_val in remaining_vals or sel_val not in remapped_vals:
+                    next_sel.append(sel_val)
+                if sel_val in remapped_vals:
+                    next_sel.extend(remapped_vals[sel_val])
+            next_sel.extend(added_vals)
+            next_sel = list(dict.fromkeys(next_sel))
+
+        st.session_state[saved_col_key] = list(next_sel)
+        if next_sel != cur_sel_list:
+            st.session_state[pending_col_key] = list(next_sel)
+
 
 def filter_table(
     dataframe: pd.DataFrame,
@@ -33,6 +204,7 @@ def filter_table(
         return dataframe.reset_index(drop=True)
     labels = labels or {}
     dropdown_options = dropdown_options or {}
+    preserve_for_product_structure = _is_product_structure_filter_key(key)
     always_visible_set = {str(col) for col in (always_visible_dropdown_columns or ())}
     multi_value_columns = set(multi_value_columns)
     universal_values = universal_values or {}
@@ -41,7 +213,11 @@ def filter_table(
     keyword_host = keyword_container if keyword_container is not None else controls
     kw_widget_key = f"{key}_keyword"
     saved_kw_key = f"_saved_filter_kw_{key}"
-    if kw_widget_key not in st.session_state and saved_kw_key in st.session_state:
+    if (
+        preserve_for_product_structure
+        and kw_widget_key not in st.session_state
+        and saved_kw_key in st.session_state
+    ):
         st.session_state[kw_widget_key] = str(st.session_state.get(saved_kw_key) or "")
     keyword = keyword_host.text_input(
         "Filter by keyword",
@@ -49,7 +225,8 @@ def filter_table(
         placeholder="Search this table",
         icon=":material/search:",
     )
-    st.session_state[saved_kw_key] = str(keyword or "")
+    if preserve_for_product_structure:
+        st.session_state[saved_kw_key] = str(keyword or "")
     selected: dict[str, list[object]] = {}
     for column in valid_dropdowns:
         if column in multi_value_columns:
@@ -82,12 +259,16 @@ def filter_table(
         widget_key = f"{key}_{column}"
         saved_col_key = f"_saved_filter_col_{widget_key}"
         pending_col_key = f"_pending_filter_col_{widget_key}"
-        if pending_col_key in st.session_state:
+        if preserve_for_product_structure and pending_col_key in st.session_state:
             st.session_state[widget_key] = list(
                 st.session_state.pop(pending_col_key) or []
             )
             st.session_state[saved_col_key] = list(st.session_state[widget_key])
-        elif widget_key not in st.session_state and saved_col_key in st.session_state:
+        elif (
+            preserve_for_product_structure
+            and widget_key not in st.session_state
+            and saved_col_key in st.session_state
+        ):
             st.session_state[widget_key] = list(st.session_state.get(saved_col_key) or [])
         stored_selection = st.session_state.get(widget_key, [])
         current_selection = stored_selection
@@ -95,7 +276,7 @@ def filter_table(
             current_selection = []
         elif not isinstance(current_selection, (list, tuple, set)):
             current_selection = [current_selection]
-        if column not in dropdown_options:
+        if preserve_for_product_structure and column not in dropdown_options:
             for sel_val in current_selection:
                 if (
                     sel_val is not None
@@ -116,7 +297,8 @@ def filter_table(
             key=widget_key,
         )
 
-        st.session_state[saved_col_key] = list(selected[column] or [])
+        if preserve_for_product_structure:
+            st.session_state[saved_col_key] = list(selected[column] or [])
     visible = dataframe
     kw = keyword.strip()
     if kw and not visible.empty:
@@ -1127,21 +1309,9 @@ def _apply_seed_to_dataframe(
         for col in display_df.columns
         if pd.api.types.is_bool_dtype(display_df[col].dtype)
     ]
-    datetime_cols = [
-        col
-        for col in display_df.columns
-        if pd.api.types.is_datetime64_any_dtype(display_df[col].dtype)
-    ]
     try:
         import pyarrow as pa
-        try:
-            from streamlit.elements.lib.column_config_utils import (
-                determine_dataframe_schema,
-            )
-        except ImportError:
-            from streamlit.elements.lib.column_types import (
-                determine_dataframe_schema,
-            )
+        from streamlit.elements.lib.column_types import determine_dataframe_schema
         from streamlit.elements.widgets.data_editor import (
             _apply_cell_edits,
             _apply_row_additions,
@@ -1198,9 +1368,6 @@ def _apply_seed_to_dataframe(
                 for col in display_df.columns
             }
             display_df.loc[next_idx] = row_dict
-        for dt_col in datetime_cols:
-            if dt_col in display_df.columns and not pd.api.types.is_datetime64_any_dtype(display_df[dt_col].dtype):
-                display_df[dt_col] = pd.to_datetime(display_df[dt_col], errors="coerce")
         return display_df
 
 
@@ -1357,13 +1524,6 @@ def _wrap_data_editor(data, *args, **kwargs):
                 display_df = frozen_df.copy()
         else:
             st.session_state[frozen_key] = display_df.copy()
-    for col in data.columns:
-        if (
-            col in display_df.columns
-            and pd.api.types.is_datetime64_any_dtype(data[col].dtype)
-            and not pd.api.types.is_datetime64_any_dtype(display_df[col].dtype)
-        ):
-            display_df[col] = pd.to_datetime(display_df[col], errors="coerce")
     st.session_state[f"_table_display_df_{logical_key}"] = display_df.copy()
     _capture_editor_undo_meta(logical_key, display_df, kwargs.get("column_config"))
     result_df = _ORIG_DATA_EDITOR(display_df, *args, **kwargs)
@@ -1710,11 +1870,59 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
     return null;
   }
 
+  var ALLOWED_TABLE_PREFIXES = [
+    "pits_flagged_changes_table_",
+    "pits_flagged_downstream_impacts_",
+    "pits_import_preview_table",
+    "pits_model_preview_table",
+    "pits_bom_preview_",
+    "pits_bom_issue_preview_",
+    "legacy_pits_preview_table",
+    "mapped_bom_preview_table",
+    "exchange_pits_history_",
+    "exchange_pits_bom_history_",
+    "exchange_mbom_history_",
+    "exchange_parts_import_history_",
+    "exchange_bom_history_",
+    "exchange_export_history_",
+    "model_definitions_editor_",
+    "complexity_feature_editor_",
+    "complexity_tree_editor_",
+    "model_similarity_summary_",
+    "model_similarity_pairs_",
+    "models_history_",
+    "complexity_history_",
+    "bom_model_tree_table_",
+    "bom_grid_editor_",
+    "bom_tree_history_",
+    "parts_catalog_editor_",
+    "parts_mini_bom_pits_",
+    "parts_mini_bom_legacy_",
+    "parts_history_table_",
+    "parts_fishbone_pool_",
+    "fishbone_assignment_editor_",
+    "assembly_framework_editor_",
+    "fishbone_canvas_sections_table_",
+    "fishbone_canvas_assignments_table_",
+    "fishbone_framework_history_",
+    "fishbone_uses_history_"
+  ];
+
   function extractLogicalKey(rawId) {
     if (!rawId || typeof rawId !== "string") return "";
     var stripped = rawId.replace(/^\\$\\$ID-[^-]+-/, "");
     if (!stripped || stripped === "None") return "";
-    return stripped.split("__editor_instance_")[0] || "";
+    return stripped.replace(/__editor_instance_\\d+/, "") || "";
+  }
+
+  function isProductStructureTableKey(logicalKey) {
+    if (!logicalKey || typeof logicalKey !== "string") return false;
+    for (var i = 0; i < ALLOWED_TABLE_PREFIXES.length; i++) {
+      if (logicalKey.indexOf(ALLOWED_TABLE_PREFIXES[i]) === 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function inspectDataFrameHooks(fiber) {
@@ -1909,16 +2117,21 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
       for (var ci = 0; ci < overrideKeys.length; ci++) {
         var colName = overrideKeys[ci];
         var ov = saved.configOverrides[colName];
+        if (!ov || typeof ov !== "object") continue;
         var targetId = info.nameToId.get(colName);
-        if (targetId && ov && typeof ov === "object") {
-          var existing = nextConfigMap.get(targetId) || {};
+        var candidateKeys = [];
+        if (targetId) candidateKeys.push(targetId);
+        if (nextConfigMap.has(colName) && colName !== targetId) candidateKeys.push(colName);
+        for (var ck = 0; ck < candidateKeys.length; ck++) {
+          var mapKey = candidateKeys[ck];
+          var existing = nextConfigMap.get(mapKey) || {};
           var merged = Object.assign({}, existing, ov);
           if (
             existing.hidden !== merged.hidden ||
             existing.pinned !== merged.pinned ||
             JSON.stringify(existing.type_config || null) !== JSON.stringify(merged.type_config || null)
           ) {
-            nextConfigMap.set(targetId, merged);
+            nextConfigMap.set(mapKey, merged);
             configChanged = true;
           }
         }
@@ -1939,6 +2152,10 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
         var wId = info.nameToId.get(wName);
         if (wId && typeof wVal === "number" && wVal > 0 && nextWidthsMap.get(wId) !== wVal) {
           nextWidthsMap.set(wId, wVal);
+          widthsChanged = true;
+        }
+        if (nextWidthsMap.has(wName) && wName !== wId && typeof wVal === "number" && wVal > 0 && nextWidthsMap.get(wName) !== wVal) {
+          nextWidthsMap.set(wName, wVal);
           widthsChanged = true;
         }
       }
@@ -1983,9 +2200,9 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
     var curConfigMap = getHookState(info.configMapHook);
     if (curConfigMap instanceof Map) {
       curConfigMap.forEach(function(v, k) {
-        if (v && typeof v === "object" && info.idToName.has(k)) {
-          var cName = info.idToName.get(k);
-          var ov = {};
+        var cName = info.idToName.get(k) || (info.nameToId.has(k) ? k : null);
+        if (v && typeof v === "object" && cName) {
+          var ov = configOverrides[cName] ? Object.assign({}, configOverrides[cName]) : {};
           if (typeof v.hidden === "boolean") ov.hidden = v.hidden;
           if (typeof v.pinned === "boolean") ov.pinned = v.pinned;
           if (v.type_config !== undefined) ov.type_config = v.type_config;
@@ -2029,6 +2246,7 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
   }
 
   function syncAllDataFrames() {
+    if (!document.querySelector('[data-paag-table-layout-keeper]')) return;
     var frames = document.querySelectorAll('div.stDataFrame[data-testid="stDataFrame"]');
     for (var i = 0; i < frames.length; i++) {
       var el = frames[i];
@@ -2036,7 +2254,7 @@ _TABLE_LAYOUT_PRESERVATION_HTML = """<div style="display:none" data-paag-table-l
       if (!fiber) continue;
       var rawId = fiber.memoizedProps && fiber.memoizedProps.element ? fiber.memoizedProps.element.id : "";
       var logicalKey = extractLogicalKey(rawId);
-      if (!logicalKey) continue;
+      if (!logicalKey || !isProductStructureTableKey(logicalKey)) continue;
 
       if (el.dataset.paagRestoredRawId !== rawId) {
         el.dataset.paagRestoredRawId = rawId;

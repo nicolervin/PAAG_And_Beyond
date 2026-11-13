@@ -68,9 +68,12 @@ from utils.table_filters import (
     apply_id_keyed_editor_draft,
     apply_pending_table_editor_reset,
     capture_id_keyed_editor_draft,
+    clear_saved_table_filters,
     filter_table,
     get_effective_table_editor_state,
     merge_filtered_edits,
+    mount_table_layout_preservation_script,
+    preserve_filters_across_save,
     request_table_editor_reset,
     was_table_editor_undo_reset,
 )
@@ -178,6 +181,7 @@ page_title_with_scope(
         "Active applies only to the currently selected scenario."
     ),
 )
+mount_table_layout_preservation_script()
 st.caption(
     "Connect official part numbers to CAD screenshots, revisions, model applicability, and the "
     "parts active in this planning scenario."
@@ -376,9 +380,8 @@ with st.expander(
     expanded=False,
 ):
     st.info(
-        "Use these controls for any layout you want to keep. Hiding or dragging a "
-        "column from its menu inside the table is temporary and cannot be captured "
-        "by Save & Refresh."
+        "Use these controls to customize the default database column order, or drag/hide "
+        "columns directly inside the table header — both are preserved across Save & Refresh."
     )
     selected_parts_columns = st.multiselect(
         "Columns shown in saved view",
@@ -991,7 +994,7 @@ if draft_added_records and not parts_full_for_editing.empty:
         ].reset_index(drop=True)
         request_table_editor_reset(parts_editor_key)
         parts_base_editor_key = apply_pending_table_editor_reset(
-            f"parts_catalog_editor_v9_{scenario_id}"
+            f"parts_catalog_editor_v10_{scenario_id}"
         )
         parts_editor_key = f"{parts_base_editor_key}_{parts_view_layout_token}"
         st.session_state[parts_draft_last_editor_key] = parts_editor_key
@@ -1026,14 +1029,16 @@ if qp_part_id or qp_part_number:
         st.session_state[selected_part_key] = matched_id
         # Pre-fill keyword filter so the table displays this queried part
         filter_kw = matched_pnum or qp_part_number
+        clear_saved_table_filters(f"part_catalog_filters_{project_id}")
         st.session_state[f"part_catalog_filters_{project_id}_keyword"] = filter_kw
+        st.session_state[f"_saved_filter_kw_part_catalog_filters_{project_id}_keyword"] = filter_kw
         st.session_state["part_catalog_filters_keyword"] = filter_kw
         # Clear conflicting dropdown filters so the part is guaranteed visible
         for filter_column in [
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "variant_group", "notes", "source", "created_at", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "applicability_status", "variant_group", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{project_id}_{filter_column}", None)
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
@@ -1116,7 +1121,7 @@ with filter_expander:
         elif pre_filter_had_dirty_state:
             request_table_editor_reset(parts_editor_key)
             parts_base_editor_key = apply_pending_table_editor_reset(
-                f"parts_catalog_editor_v9_{scenario_id}"
+                f"parts_catalog_editor_v10_{scenario_id}"
             )
             parts_editor_key = f"{parts_base_editor_key}_{parts_view_layout_token}"
             st.session_state[parts_draft_last_editor_key] = parts_editor_key
@@ -1132,13 +1137,14 @@ with filter_expander:
         if harvest_added_rows_into_draft(pre_filter_added_rows) or True:
             st.session_state.pop(parts_editor_key, None)
             request_table_editor_reset(parts_editor_key)
+        clear_saved_table_filters(f"part_catalog_filters_{project_id}")
         st.session_state.pop(f"part_catalog_filters_{project_id}_keyword", None)
         st.session_state.pop("part_catalog_filters_keyword", None)
         for filter_column in [
             "active", "photo_status", "part_number", "description", "subsystem", "design_maturity", "revision",
             "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
             "pmqe_aqe", "ame_tooling_engineer", "part_code", "source_code",
-            "make_buy", "pits_tracker_number", "feature_applicability", "variant_group", "notes", "source", "created_at", "updated_at",
+            "make_buy", "pits_tracker_number", "feature_applicability", "applicability_status", "variant_group", "notes", "source", "created_at", "updated_at",
         ]:
             st.session_state.pop(f"part_catalog_filters_{project_id}_{filter_column}", None)
             st.session_state.pop(f"part_catalog_filters_{filter_column}", None)
@@ -1537,6 +1543,19 @@ if apply_bulk_applicability:
                 st.session_state.get("current_editor", ""),
                 {"feature_applicability": bulk_applicability},
             )
+            after_bulk_df = parts_full_for_editing.copy()
+            bulk_ids = set(selected_saved_parts["id"].astype(str))
+            new_bulk_status = "; ".join(str(x) for x in bulk_applicability if str(x).strip()) or "All models"
+            after_bulk_df.loc[
+                after_bulk_df["id"].astype(str).isin(bulk_ids),
+                "applicability_status",
+            ] = new_bulk_status
+            preserve_filters_across_save(
+                f"part_catalog_filters_{project_id}",
+                parts_full_for_editing,
+                after_bulk_df,
+                dropdown_columns=["applicability_status"],
+            )
             clear_parts_editor_draft()
             request_table_editor_reset(parts_editor_key)
             st.toast(
@@ -1826,6 +1845,38 @@ if save_part_table:
                 audit_details,
                 _conn=conn,
             )
+        edited_parts_for_filter_sync = edited_parts.copy()
+        edited_parts_for_filter_sync["active"] = edited_parts_for_filter_sync.apply(
+            lambda r: (
+                True
+                if r.get("active") is None or pd.isna(r.get("active"))
+                else bool(r.get("active"))
+            ),
+            axis=1,
+        )
+        edited_parts_for_filter_sync["applicability_status"] = edited_parts_for_filter_sync.apply(
+            lambda r: (
+                "; ".join(str(x) for x in (r.get("feature_applicability") or []) if str(x).strip())
+                if (r.get("feature_applicability") or [])
+                else (
+                    "All models"
+                    if str(r.get("model_applicability") or "").strip().casefold() in {"all", "all models"}
+                    else "Needs feature tagging"
+                )
+            ),
+            axis=1,
+        )
+        preserve_filters_across_save(
+            f"part_catalog_filters_{project_id}",
+            parts_full_for_editing,
+            edited_parts_for_filter_sync,
+            dropdown_columns=[
+                "active", "source", "design_maturity", "subsystem", "source_code", "make_buy",
+                "factory_nickname", "design_engineer", "ppm", "buyer_gcl",
+                "pmqe_aqe", "ame_tooling_engineer", "part_code", "photo_status", "applicability_status", "variant_group",
+            ],
+            multi_value_columns=["feature_applicability", "variant_group"],
+        )
         clear_parts_editor_draft()
         st.session_state[parts_view_pending_key] = selected_parts_columns.copy()
         request_table_editor_reset(parts_editor_key)
@@ -3016,6 +3067,7 @@ with details_col.container(border=True):
             mini_bom_display,
             hide_index=True,
             width="stretch",
+            key=f"parts_mini_bom_pits_{project_id}_{part['id']}",
             column_config={
                 "Part number": st.column_config.TextColumn(
                     "Part number", pinned=True
@@ -3051,6 +3103,7 @@ with details_col.container(border=True):
                 mini_bom_view,
                 hide_index=True,
                 width="stretch",
+                key=f"parts_mini_bom_legacy_{project_id}_{part['id']}",
                 column_config={
                     "Part number": st.column_config.TextColumn(
                         "Part number", pinned=True
